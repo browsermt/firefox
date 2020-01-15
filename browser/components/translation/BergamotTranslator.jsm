@@ -192,6 +192,7 @@ this.BergamotTranslator.prototype = {
           let doc = new DOMParser().parseFromString(result, "text/html");
           result = doc.body.firstChild.nodeValue;
         }
+        root.isSimpleRoot = true;
         root.parseResult(result);
       } catch (e) {
         error = true;
