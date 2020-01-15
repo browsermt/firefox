@@ -13,6 +13,7 @@
  * liability, trademark and document use rules apply.
  */
 
+[Exposed=Window]
 interface Element : Node {
   [Constant]
   readonly attribute DOMString? namespaceURI;
@@ -31,6 +32,10 @@ interface Element : Node {
            attribute DOMString className;
   [Constant, PutForwards=value]
   readonly attribute DOMTokenList classList;
+
+  // https://drafts.csswg.org/css-shadow-parts/#idl
+  [SameObject, PutForwards=value, Pref="layout.css.shadow-parts.enabled"]
+  readonly attribute DOMTokenList part;
 
   [SameObject]
   readonly attribute NamedNodeMap attributes;
@@ -71,7 +76,7 @@ interface Element : Node {
   HTMLCollection getElementsByTagNameNS(DOMString? namespace, DOMString localName);
   [Pure]
   HTMLCollection getElementsByClassName(DOMString classNames);
- 
+
   [CEReactions, Throws, Pure]
   Element? insertAdjacentElement(DOMString where, Element element); // historical
 
@@ -269,23 +274,21 @@ partial interface Element {
            attribute DOMString slot;
 };
 
-Element implements ChildNode;
-Element implements NonDocumentTypeChildNode;
-Element implements ParentNode;
-Element implements Animatable;
-Element implements GeometryUtils;
+Element includes ChildNode;
+Element includes NonDocumentTypeChildNode;
+Element includes ParentNode;
+Element includes Animatable;
+Element includes GeometryUtils;
 
 // https://fullscreen.spec.whatwg.org/#api
 partial interface Element {
-  [Throws, Func="Document::IsUnprefixedFullscreenEnabled", NeedsCallerType]
+  [Throws, NeedsCallerType]
   Promise<void> requestFullscreen();
   [Throws, BinaryName="requestFullscreen", NeedsCallerType, Deprecated="MozRequestFullScreenDeprecatedPrefix"]
   Promise<void> mozRequestFullScreen();
 
   // Events handlers
-  [Func="Document::IsUnprefixedFullscreenEnabled"]
   attribute EventHandler onfullscreenchange;
-  [Func="Document::IsUnprefixedFullscreenEnabled"]
   attribute EventHandler onfullscreenerror;
 };
 
@@ -315,7 +318,7 @@ partial interface Element {
    */
   [ChromeOnly, Pure]
   sequence<Grid> getGridFragments();
-  
+
   /**
    * Returns a sequence of all the descendent elements of this element
    * that have display:grid or display:inline-grid style and generate
@@ -323,6 +326,16 @@ partial interface Element {
    */
   [ChromeOnly, Pure]
   sequence<Element> getElementsWithGrid();
+
+  /**
+   * Set attribute on the Element with a customized Content-Security-Policy
+   * appropriate to devtools, which includes:
+   * style-src 'unsafe-inline'
+   */
+  [ChromeOnly, CEReactions, Throws]
+  void setAttributeDevtools(DOMString name, DOMString value);
+  [ChromeOnly, CEReactions, Throws]
+  void setAttributeDevtoolsNS(DOMString? namespace, DOMString name, DOMString value);
 };
 
 // These variables are used in vtt.js, they are used for positioning vtt cues.

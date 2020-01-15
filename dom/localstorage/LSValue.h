@@ -8,6 +8,14 @@
 #define mozilla_dom_localstorage_LSValue_h
 
 #include "SnappyUtils.h"
+#include "nsString.h"
+
+class mozIStorageStatement;
+
+namespace IPC {
+template <typename>
+struct ParamTraits;
+}
 
 namespace mozilla {
 namespace dom {
@@ -29,26 +37,11 @@ class LSValue final {
   bool mCompressed;
 
  public:
-  LSValue() : mUTF16Length(0), mCompressed(false) {}
+  LSValue() : mUTF16Length(0), mCompressed(false) { SetIsVoid(true); }
 
-  explicit LSValue(const nsACString& aBuffer, uint32_t aUTF16Length,
-                   bool aCompressed)
-      : mBuffer(aBuffer),
-        mUTF16Length(aUTF16Length),
-        mCompressed(aCompressed) {}
+  bool InitFromString(const nsAString& aBuffer);
 
-  explicit LSValue(const nsAString& aBuffer) : mUTF16Length(aBuffer.Length()) {
-    if (aBuffer.IsVoid()) {
-      mBuffer.SetIsVoid(true);
-      mCompressed = false;
-    } else {
-      CopyUTF16toUTF8(aBuffer, mBuffer);
-      nsCString buffer;
-      if ((mCompressed = SnappyCompress(mBuffer, buffer))) {
-        mBuffer = buffer;
-      }
-    }
-  }
+  nsresult InitFromStatement(mozIStorageStatement* aStatement, uint32_t aIndex);
 
   bool IsVoid() const { return mBuffer.IsVoid(); }
 

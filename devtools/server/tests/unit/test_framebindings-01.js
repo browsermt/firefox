@@ -7,36 +7,15 @@
  * Check a frame actor's bindings property.
  */
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-
-registerCleanupFunction(() => {
-  Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-});
-
-function run_test() {
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-stack");
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-stack", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_pause_frame();
-    });
-  });
-  do_test_pending();
-}
+    );
 
-function test_pause_frame() {
-  gThreadFront.once("paused", function(packet) {
-    const bindings = packet.frame.environment.bindings;
+    const environment = await packet.frame.getEnvironment();
+    const bindings = environment.bindings;
     const args = bindings.arguments;
     const vars = bindings.variables;
 
@@ -56,34 +35,37 @@ function test_pause_frame() {
     Assert.equal(vars.c.value.class, "Object");
     Assert.ok(!!vars.c.value.actor);
 
-    const objClient = gThreadFront.pauseGrip(vars.c.value);
-    objClient.getPrototypeAndProperties(function(response) {
-      Assert.equal(response.ownProperties.a.configurable, true);
-      Assert.equal(response.ownProperties.a.enumerable, true);
-      Assert.equal(response.ownProperties.a.writable, true);
-      Assert.equal(response.ownProperties.a.value, "a");
+    const objClient = threadFront.pauseGrip(vars.c.value);
+    const response = await objClient.getPrototypeAndProperties();
+    Assert.equal(response.ownProperties.a.configurable, true);
+    Assert.equal(response.ownProperties.a.enumerable, true);
+    Assert.equal(response.ownProperties.a.writable, true);
+    Assert.equal(response.ownProperties.a.value, "a");
 
-      Assert.equal(response.ownProperties.b.configurable, true);
-      Assert.equal(response.ownProperties.b.enumerable, true);
-      Assert.equal(response.ownProperties.b.writable, true);
-      Assert.equal(response.ownProperties.b.value.type, "undefined");
-      Assert.equal(false, "class" in response.ownProperties.b.value);
+    Assert.equal(response.ownProperties.b.configurable, true);
+    Assert.equal(response.ownProperties.b.enumerable, true);
+    Assert.equal(response.ownProperties.b.writable, true);
+    Assert.equal(response.ownProperties.b.value.type, "undefined");
+    Assert.equal(false, "class" in response.ownProperties.b.value);
 
-      gThreadFront.resume().then(function() {
-        finishClient(gClient);
-      });
-    });
-  });
+    await threadFront.resume();
+  })
+);
 
+function evalCode(debuggee) {
   /* eslint-disable */
-  gDebuggee.eval("(" + function () {
-    function stopMe(number, bool, string, null_, undef, object) {
-      var a = 1;
-      var b = true;
-      var c = { a: "a", b: undefined };
-      debugger;
-    }
-    stopMe(42, true, "nasu", null, undefined, { foo: "bar" });
-  } + ")()");
+  debuggee.eval(
+    "(" +
+      function() {
+        function stopMe(number, bool, string, null_, undef, object) {
+          var a = 1;
+          var b = true;
+          var c = { a: "a", b: undefined };
+          debugger;
+        }
+        stopMe(42, true, "nasu", null, undefined, { foo: "bar" });
+      } +
+      ")()"
+  );
   /* eslint-enable */
 }

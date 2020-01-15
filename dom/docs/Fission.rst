@@ -100,11 +100,9 @@ The ``JSWindowActorParent`` and ``JSWindowActorChild`` base classes expose two m
 
 This has a similar signature as the ``sendAsyncMessage`` method for Message Managers::
 
-    sendAsyncMessage("SomeMessage", { key: "value" }, { transferredObject });
+    sendAsyncMessage("SomeMessage", { key: "value" });
 
 Like messages sent via the Message Manager, anything that can be serialized using the structured clone algorithm can be sent down through the second argument. Additionally, ``nsIPrincipal``'s can be sent without manually serializing and deserializing them.
-
-The third argument sends `Transferables`_ to the receiver, for example an ``ArrayBuffer``.
 
 .. note::
     Cross Process Object Wrappers (CPOWs) cannot be sent over JSWindowActors.
@@ -117,7 +115,7 @@ The third argument sends `Transferables`_ to the receiver, for example an ``Arra
 
 ``sendQuery`` improves upon ``sendAsyncMessage`` by returning a ``Promise``. The receiver of the message must then return a ``Promise`` that can eventually resolve into a value - at which time the ``sendQuery`` ``Promise`` resolves with that value.
 
-The ``sendQuery`` method arguments follow the same conventions as ``sendAsyncMessage``, with the second argument being a structured clone, and the third being for `Transferables`_.
+The ``sendQuery`` method arguments follow the same conventions as ``sendAsyncMessage``, with the second argument being a structured clone.
 
 ``receiveMessage``
 ``````````````````
@@ -331,7 +329,17 @@ Next, we declare the content events, if fired in a BrowsingContext, will cause t
 
 Next, we declare that ``PluginChild`` should observe the ``decoder-doctor-notification`` ``nsIObserver`` notification. When that observer notification fires, the ``PluginChild`` will be instantiated for all ``BrowsingContext``'s, and the ``observe`` method on the ``PluginChild`` implementation will be called.
 
-Finally, we say that the ``PluginChild`` actor should apply to ``allFrames``. This means that the ``PluginChild`` is allowed to be loaded in any subframe. If ``allFrames`` is set to false, the actor will only ever load in the top-level frame.
+Finally, we say that the ``PluginChild`` actor should apply to ``allFrames``. This means that the ``PluginChild`` is allowed to be loaded in any subframe. If ``allFrames`` is set to false (the default), the actor will only ever load in the top-level frame.
+
+Design considerations when adding a new JSWindowActor
+`````````````````````````````````````````````````````
+
+A few things worth bearing in mind when adding your own actor registration:
+
+- Any ``child`` or ``parent`` side you register **must** have a ``moduleURI`` property.
+- You do not need to have both ``child`` and ``parent`` modules, and should avoid having actor sides that do nothing but send messages. The process without a defined module will still get an actor, and you can send messages from that side, but cannot receive them via ``receiveMessage``. Note that you **can** also use ``sendQuery`` from this side, enabling you to handle a response from the other process despite not having a ``receiveMessage`` method.
+- Consider whether you really need ``allFrames`` - it'll save memory and CPU time if we don't need to instantiate the actor for subframes.
+- When copying/moving "Legacy" :ref:`fission.message-manager-actors`, remove their ``messages`` properties. They are no longer necessary.
 
 Using ContentDOMReference instead of CPOWs
 ``````````````````````````````````````````
@@ -347,7 +355,7 @@ How to start porting parent-process browser code to use JSWindowActors
 
 The :ref:`fission.message-manager-actors` work made it much easier to migrate away from framescripts towards something that is similar to ``JSWindowActors``. It did not, however, substantially change how the parent process interacted with those framescripts.
 
-So when porting code to work with ``JSWindowActors``, we find that this is often where the time goes - refactoring the parent process browser code to accomodate the new ``JSWindowActor`` model.
+So when porting code to work with ``JSWindowActors``, we find that this is often where the time goes - refactoring the parent process browser code to accommodate the new ``JSWindowActor`` model.
 
 Usually, the first thing to do is to find a reasonable name for your actor pair, and get them registered (see :ref:`fission.registering-a-new-jswindowactor`), even if the actors implementations themselves are nothing but unmodified subclasses of ``JSWindowActorParent`` and ``JSWindowActorChild``.
 
@@ -471,7 +479,6 @@ Minimal Example Actors
 
 .. _Electrolysis Project: https://wiki.mozilla.org/Electrolysis
 .. _IPC Actors: https://developer.mozilla.org/en-US/docs/Mozilla/IPDL/Tutorial
-.. _Transferables: https://developer.mozilla.org/en-US/docs/Web/API/Transferable
 .. _Context Menu Fission Port: https://hg.mozilla.org/mozilla-central/rev/adc60720b7b8
 .. _ContentDOMReference.jsm: https://searchfox.org/mozilla-central/source/toolkit/modules/ContentDOMReference.jsm
 .. _JSWindowActor.webidl: https://searchfox.org/mozilla-central/source/dom/chrome-webidl/JSWindowActor.webidl

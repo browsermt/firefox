@@ -49,6 +49,7 @@ void GPUChild::Init() {
       gfxConfig::GetValue(Feature::OPENGL_COMPOSITING);
   devicePrefs.advancedLayers() = gfxConfig::GetValue(Feature::ADVANCED_LAYERS);
   devicePrefs.useD2D1() = gfxConfig::GetValue(Feature::DIRECT2D);
+  devicePrefs.webGPU() = gfxConfig::GetValue(Feature::WEBGPU);
 
   nsTArray<LayerTreeIdMapping> mappings;
   LayerTreeOwnerTracker::Get()->Iterate(
@@ -232,7 +233,7 @@ void GPUChild::ActorDestroy(ActorDestroyReason aWhy) {
 
     Telemetry::Accumulate(
         Telemetry::SUBPROCESS_ABNORMAL_ABORT,
-        nsDependentCString(XRE_ChildProcessTypeToString(GeckoProcessType_GPU)),
+        nsDependentCString(XRE_GeckoProcessTypeToString(GeckoProcessType_GPU)),
         1);
 
     // Notify the Telemetry environment so that we can refresh and do a
@@ -268,7 +269,7 @@ mozilla::ipc::IPCResult GPUChild::RecvBHRThreadHang(
     // XXX: We should be able to avoid this potentially expensive copy here by
     // moving our deserialized argument.
     nsCOMPtr<nsIHangDetails> hangDetails =
-        new nsHangDetails(HangDetails(aDetails));
+        new nsHangDetails(HangDetails(aDetails), PersistedToDisk::No);
     obs->NotifyObservers(hangDetails, "bhr-thread-hang", nullptr);
   }
   return IPC_OK();

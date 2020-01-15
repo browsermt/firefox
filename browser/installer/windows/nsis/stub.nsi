@@ -1766,20 +1766,6 @@ Function CanWrite
 FunctionEnd
 
 Function LaunchApp
-!ifndef DEV_EDITION
-  FindWindow $0 "${WindowClass}"
-  ${If} $0 <> 0 ; integer comparison
-    StrCpy $FirefoxLaunchCode "1"
-
-    StrCpy $ProgressCompleted ${PROGRESS_BAR_TOTAL_STEPS}
-    Call SetProgressBars
-
-    MessageBox MB_OK|MB_ICONQUESTION "$(WARN_MANUALLY_CLOSE_APP_LAUNCH)"
-    Call SendPing
-    Return
-  ${EndIf}
-!endif
-
   StrCpy $FirefoxLaunchCode "2"
 
   ; Set the current working directory to the installation directory
@@ -1789,9 +1775,9 @@ Function LaunchApp
   ${GetOptions} "$0" "/UAC:" $1
   ${If} ${Errors}
     ${If} $CheckboxCleanupProfile == 1
-      ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -reset-profile -migration"
+      ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -reset-profile -migration -first-startup"
     ${Else}
-      ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\""
+      ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -first-startup"
     ${EndIf}
   ${Else}
     StrCpy $R1 $CheckboxCleanupProfile
@@ -1807,9 +1793,9 @@ Function LaunchAppFromElevatedProcess
   ; Set the current working directory to the installation directory
   SetOutPath "$INSTDIR"
   ${If} $R1 == 1
-    ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -reset-profile -migration"
+    ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -reset-profile -migration -first-startup"
   ${Else}
-    ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\""
+    ${ExecAndWaitForInputIdle} "$\"$INSTDIR\${FileMainEXE}$\" -first-startup"
   ${EndIf}
 FunctionEnd
 

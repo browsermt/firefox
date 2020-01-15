@@ -9,6 +9,8 @@
 #include "jit/Ion.h"
 #include "vm/JSScript.h"
 
+#include "vm/JSScript-inl.h"
+
 using namespace js;
 using namespace js::jit;
 
@@ -78,7 +80,11 @@ void OptimizationInfo::initWasmOptimizationInfo() {
 uint32_t OptimizationInfo::compilerWarmUpThreshold(JSScript* script,
                                                    jsbytecode* pc) const {
   MOZ_ASSERT(pc == nullptr || pc == script->code() ||
-             JSOp(*pc) == JSOP_LOOPENTRY);
+             JSOp(*pc) == JSOP_LOOPHEAD);
+
+  // The script must not start with a LOOPHEAD op or the code below would be
+  // wrong. See bug 1602681.
+  MOZ_ASSERT_IF(pc && JSOp(*pc) == JSOP_LOOPHEAD, pc > script->code());
 
   if (pc == script->code()) {
     pc = nullptr;
@@ -109,17 +115,17 @@ uint32_t OptimizationInfo::compilerWarmUpThreshold(JSScript* script,
   // It's more efficient to enter outer loops, rather than inner loops, via OSR.
   // To accomplish this, we use a slightly higher threshold for inner loops.
   // Note that the loop depth is always > 0 so we will prefer non-OSR over OSR.
-  uint32_t loopDepth = LoopEntryDepthHint(pc);
+  uint32_t loopDepth = LoopHeadDepthHint(pc);
   MOZ_ASSERT(loopDepth > 0);
   return warmUpThreshold + loopDepth * (baseCompilerWarmUpThreshold() / 10);
 }
 
 uint32_t OptimizationInfo::recompileWarmUpThreshold(JSScript* script,
                                                     jsbytecode* pc) const {
-  MOZ_ASSERT(pc == script->code() || *pc == JSOP_LOOPENTRY);
+  MOZ_ASSERT(pc == script->code() || *pc == JSOP_LOOPHEAD);
 
   uint32_t threshold = compilerWarmUpThreshold(script, pc);
-  if (*pc != JSOP_LOOPENTRY || JitOptions.eagerIonCompilation()) {
+  if (*pc != JSOP_LOOPHEAD || JitOptions.eagerIonCompilation()) {
     return threshold;
   }
 
@@ -129,7 +135,7 @@ uint32_t OptimizationInfo::recompileWarmUpThreshold(JSScript* script,
   // avoid invalidation completely). Use a very high recompilation threshold for
   // loop edges so that this only affects very long-running loops.
 
-  uint32_t loopDepth = LoopEntryDepthHint(pc);
+  uint32_t loopDepth = LoopHeadDepthHint(pc);
   MOZ_ASSERT(loopDepth > 0);
   return threshold + loopDepth * (baseCompilerWarmUpThreshold() / 10);
 }

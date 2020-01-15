@@ -27,6 +27,7 @@
 #include "nsReadableUtils.h"
 #include "nsIFileStreams.h"
 #include "nsILineInputStream.h"
+
 #include "nsNetCID.h"
 
 #ifdef ANDROID
@@ -269,6 +270,9 @@ SandboxBrokerPolicyFactory::SandboxBrokerPolicyFactory() {
 
   // Bug 1312678: radeonsi/Intel with DRI when using WebGL
   policy->AddDir(rdwr, "/dev/dri");
+
+  // Bug 1575985: WASM library sandbox needs RW access to /dev/null
+  policy->AddPath(rdwr, "/dev/null");
 
   // Read permissions
   policy->AddPath(rdonly, "/dev/urandom");

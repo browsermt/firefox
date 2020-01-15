@@ -1185,16 +1185,6 @@ void gfxMacPlatformFontList::InitSystemFontNames() {
     NSString* displayFamilyName = GetRealFamilyName(displaySys);
     nsCocoaUtils::GetStringForNSString(displayFamilyName, familyName);
     CopyUTF16toUTF8(familyName, mSystemDisplayFontFamilyName);
-
-#if DEBUG
-    // confirm that the optical size switch is at 20.0
-    NS_ASSERTION([textFamilyName compare:displayFamilyName] != NSOrderedSame,
-                 "system text/display fonts are the same!");
-    NSString* fam19 = GetRealFamilyName([NSFont systemFontOfSize:(kTextDisplayCrossover - 1.0)]);
-    NSString* fam20 = GetRealFamilyName([NSFont systemFontOfSize:kTextDisplayCrossover]);
-    NS_ASSERTION(fam19 && fam20 && [fam19 compare:fam20] != NSOrderedSame,
-                 "system text/display font size switch point is not as expected!");
-#endif
   }
 
 #ifdef DEBUG
@@ -1430,13 +1420,14 @@ bool gfxMacPlatformFontList::FindAndAddFamilies(mozilla::StyleGenericFontFamily 
   // search for special system font name, -apple-system
   if (SharedFontList()) {
     if (aFamily.EqualsLiteral(kSystemFont_system)) {
+      FindFamiliesFlags flags = aFlags | FindFamiliesFlags::eSearchHiddenFamilies;
       if (mUseSizeSensitiveSystemFont && aStyle &&
           (aStyle->size * aDevToCssSize) >= kTextDisplayCrossover) {
         return gfxPlatformFontList::FindAndAddFamilies(aGeneric, mSystemDisplayFontFamilyName,
-                                                       aOutput, aFlags, aStyle, aDevToCssSize);
+                                                       aOutput, flags, aStyle, aDevToCssSize);
       }
       return gfxPlatformFontList::FindAndAddFamilies(aGeneric, mSystemTextFontFamilyName, aOutput,
-                                                     aFlags, aStyle, aDevToCssSize);
+                                                     flags, aStyle, aDevToCssSize);
     }
   } else {
     if (aFamily.EqualsLiteral(kSystemFont_system)) {

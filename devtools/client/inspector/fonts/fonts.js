@@ -14,15 +14,21 @@ const { Provider } = require("devtools/client/shared/vendor/react-redux");
 const { debounce } = require("devtools/shared/debounce");
 const { ELEMENT_STYLE } = require("devtools/shared/specs/styles");
 
-const FontsApp = createFactory(require("./components/FontsApp"));
+const FontsApp = createFactory(
+  require("devtools/client/inspector/fonts/components/FontsApp")
+);
 
 const { LocalizationHelper } = require("devtools/shared/l10n");
 const INSPECTOR_L10N = new LocalizationHelper(
   "devtools/client/locales/inspector.properties"
 );
 
-const { parseFontVariationAxes } = require("./utils/font-utils");
-const { updateFonts } = require("./actions/fonts");
+const {
+  parseFontVariationAxes,
+} = require("devtools/client/inspector/fonts/utils/font-utils");
+const {
+  updateFonts,
+} = require("devtools/client/inspector/fonts/actions/fonts");
 const {
   applyInstance,
   resetFontEditor,
@@ -30,8 +36,10 @@ const {
   updateAxis,
   updateFontEditor,
   updateFontProperty,
-} = require("./actions/font-editor");
-const { updatePreviewText } = require("./actions/font-options");
+} = require("devtools/client/inspector/fonts/actions/font-editor");
+const {
+  updatePreviewText,
+} = require("devtools/client/inspector/fonts/actions/font-options");
 
 const FONT_PROPERTIES = [
   "font-family",
@@ -64,7 +72,8 @@ class FontInspector {
     // element. Font faces and font properties for this node will be shown in the editor.
     this.node = null;
     this.nodeComputedStyle = {};
-    this.pageStyle = this.inspector.pageStyle;
+    // The page style actor that will be providing the style information.
+    this.pageStyle = null;
     this.ruleViewTool = this.inspector.getPanel("ruleview");
     this.ruleView = this.ruleViewTool.view;
     this.selectedRule = null;
@@ -286,7 +295,6 @@ class FontInspector {
     // Round pixel values.
     return Math.round(out);
   }
-  /* eslint-enable complexity */
 
   /**
    * Destruction function called when the inspector is destroyed. Removes event listeners
@@ -372,11 +380,11 @@ class FontInspector {
       return [];
     }
 
-    let allFonts = await this.pageStyle
-      .getAllUsedFontFaces(options)
-      .catch(console.error);
-    if (!allFonts) {
-      allFonts = [];
+    const inspectorFronts = await this.inspector.getAllInspectorFronts();
+
+    let allFonts = [];
+    for (const { pageStyle } of inspectorFronts) {
+      allFonts = allFonts.concat(await pageStyle.getAllUsedFontFaces(options));
     }
 
     return allFonts;
@@ -484,7 +492,7 @@ class FontInspector {
     switch (unit) {
       case "rem":
         // Regardless of CSS property, always use the root document element for "rem".
-        node = await this.inspector.walker.documentElement();
+        node = await this.node.walkerFront.documentElement();
         break;
     }
 
@@ -743,18 +751,21 @@ class FontInspector {
    */
   onNewNode() {
     this.ruleView.off("property-value-updated", this.onRulePropertyUpdated);
-    // First, reset the selected node.
+
+    // First, reset the selected node and page style front.
     this.node = null;
+    this.pageStyle = null;
+
     // Then attempt to assign a selected node according to its type.
     const selection = this.inspector && this.inspector.selection;
     if (selection && selection.isConnected()) {
       if (selection.isElementNode()) {
         this.node = selection.nodeFront;
-      }
-
-      if (selection.isTextNode()) {
+      } else if (selection.isTextNode()) {
         this.node = selection.nodeFront.parentNode();
       }
+
+      this.pageStyle = this.node.inspectorFront.pageStyle;
     }
 
     if (this.isPanelVisible()) {
@@ -855,7 +866,7 @@ class FontInspector {
       if (show) {
         const node = isForCurrentElement
           ? this.node
-          : this.inspector.walker.rootNode;
+          : this.node.walkerFront.rootNode;
 
         await this.fontsHighlighter.show(node, {
           CSSFamilyName: font.CSSFamilyName,
@@ -932,7 +943,7 @@ class FontInspector {
     // If the Rule panel is not visible, the selected element's rule models may not have
     // been created yet. For example, in 2-pane mode when Fonts is opened as the default
     // panel. Select the current node to force the Rule view to create the rule models.
-    if (!this.ruleViewTool.isSidebarActive()) {
+    if (!this.ruleViewTool.isPanelVisible()) {
       await this.ruleView.selectElement(this.node, false);
     }
 

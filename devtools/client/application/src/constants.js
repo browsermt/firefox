@@ -19,6 +19,7 @@ const actionTypes = {
   UPDATE_WORKERS: "UPDATE_WORKERS",
 };
 
+// NOTE: these const values are used as part of CSS selectors - be mindful of the characters used
 const PAGE_TYPES = {
   MANIFEST: "manifest",
   SERVICE_WORKERS: "service-workers",
@@ -30,6 +31,12 @@ const MANIFEST_CATEGORIES = {
   IDENTITY: "identity",
   PRESENTATION: "presentation",
   ICONS: "icons",
+};
+
+const MANIFEST_MEMBER_VALUE_TYPES = {
+  COLOR: "color",
+  ICON: "icon",
+  STRING: "string",
 };
 
 const MANIFEST_ISSUE_LEVELS = {
@@ -45,6 +52,7 @@ module.exports = Object.assign(
     PAGE_TYPES,
     MANIFEST_CATEGORIES,
     MANIFEST_ISSUE_LEVELS,
+    MANIFEST_MEMBER_VALUE_TYPES,
   },
   actionTypes
 );

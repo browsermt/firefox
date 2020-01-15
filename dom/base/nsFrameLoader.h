@@ -22,9 +22,9 @@
 #include "mozilla/dom/BindingUtils.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/Element.h"
-#include "mozilla/dom/ParentSHistory.h"
 #include "mozilla/dom/RemoteBrowser.h"
 #include "mozilla/Attributes.h"
+#include "mozilla/ScrollbarPreferences.h"
 #include "mozilla/layers/LayersTypes.h"
 #include "nsStubMutationObserver.h"
 #include "Units.h"
@@ -93,22 +93,25 @@ class nsFrameLoader final : public nsStubMutationObserver,
                             public nsWrapperCache {
   friend class AutoResetInShow;
   friend class AutoResetInFrameSwap;
+  friend class nsFrameLoaderOwner;
   typedef mozilla::dom::Document Document;
+  typedef mozilla::dom::Element Element;
   typedef mozilla::dom::BrowserParent BrowserParent;
   typedef mozilla::dom::BrowserBridgeChild BrowserBridgeChild;
   typedef mozilla::dom::BrowsingContext BrowsingContext;
 
  public:
   // Called by Frame Elements to create a new FrameLoader.
-  static nsFrameLoader* Create(mozilla::dom::Element* aOwner,
-                               mozilla::dom::BrowsingContext* aOpener,
-                               bool aNetworkCreated);
+  static already_AddRefed<nsFrameLoader> Create(Element* aOwner,
+                                                BrowsingContext* aOpener,
+                                                bool aNetworkCreated);
 
   // Called by nsFrameLoaderOwner::ChangeRemoteness when switching out
   // FrameLoaders.
-  static nsFrameLoader* Create(mozilla::dom::Element* aOwner,
-                               BrowsingContext* aPreservedBrowsingContext,
-                               const mozilla::dom::RemotenessOptions& aOptions);
+  static already_AddRefed<nsFrameLoader> Recreate(Element* aOwner,
+                                                  BrowsingContext* aContext,
+                                                  const nsAString& aRemoteType,
+                                                  bool aNetworkCreated);
 
   NS_DECLARE_STATIC_IID_ACCESSOR(NS_FRAMELOADER_IID)
 
@@ -118,12 +121,10 @@ class nsFrameLoader final : public nsStubMutationObserver,
   NS_DECL_NSIMUTATIONOBSERVER_ATTRIBUTECHANGED
   nsresult CheckForRecursiveLoad(nsIURI* aURI);
   nsresult ReallyStartLoading();
-  void StartDestroy();
+  void StartDestroy(bool aForProcessSwitch);
   void DestroyDocShell();
   void DestroyComplete();
-  nsIDocShell* GetExistingDocShell() const {
-    return mBrowsingContext ? mBrowsingContext->GetDocShell() : nullptr;
-  }
+  nsIDocShell* GetExistingDocShell() const { return mDocShell; }
   mozilla::dom::InProcessBrowserChildMessageManager*
   GetBrowserChildMessageManager() const {
     return mChildMessageManager;
@@ -187,7 +188,7 @@ class nsFrameLoader final : public nsStubMutationObserver,
    * Destroy the frame loader and everything inside it. This will
    * clear the weak owner content reference.
    */
-  void Destroy();
+  void Destroy(bool aForProcessSwitch = false);
 
   void ActivateRemoteFrame(mozilla::ErrorResult& aRv);
 
@@ -234,6 +235,8 @@ class nsFrameLoader final : public nsStubMutationObserver,
 
   bool IsDead() const { return mDestroyCalled; }
 
+  bool IsNetworkCreated() const { return mNetworkCreated; }
+
   /**
    * Is this a frame loader for a bona fide <iframe mozbrowser>?
    * <xul:browser> is not a mozbrowser, so this is false for that case.
@@ -256,18 +259,14 @@ class nsFrameLoader final : public nsStubMutationObserver,
    * Called from the layout frame associated with this frame loader;
    * this notifies us to hook up with the widget and view.
    */
-  MOZ_CAN_RUN_SCRIPT_BOUNDARY bool Show(int32_t marginWidth,
-                                        int32_t marginHeight,
-                                        int32_t scrollbarPrefX,
-                                        int32_t scrollbarPrefY,
-                                        nsSubDocumentFrame* frame);
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY bool Show(nsSubDocumentFrame*);
 
   void MaybeShowFrame();
 
   /**
    * Called when the margin properties of the containing frame are changed.
    */
-  void MarginsChanged(uint32_t aMarginWidth, uint32_t aMarginHeight);
+  void MarginsChanged();
 
   /**
    * Called from the layout frame associated with this frame loader, when
@@ -343,8 +342,6 @@ class nsFrameLoader final : public nsStubMutationObserver,
 
   mozilla::dom::Element* GetOwnerContent() { return mOwnerContent; }
 
-  mozilla::dom::ParentSHistory* GetParentSHistory() { return mParentSHistory; }
-
   /**
    * Tell this FrameLoader to use a particular remote browser.
    *
@@ -406,15 +403,10 @@ class nsFrameLoader final : public nsStubMutationObserver,
  private:
   nsFrameLoader(mozilla::dom::Element* aOwner,
                 mozilla::dom::BrowsingContext* aBrowsingContext,
-                bool aNetworkCreated);
-  nsFrameLoader(mozilla::dom::Element* aOwner,
-                mozilla::dom::BrowsingContext* aBrowsingContext,
-                const mozilla::dom::RemotenessOptions& aOptions);
+                const nsAString& aRemoteType, bool aNetworkCreated);
   ~nsFrameLoader();
 
   void SetOwnerContent(mozilla::dom::Element* aContent);
-
-  bool ShouldUseRemoteProcess();
 
   /**
    * Get our owning element's app manifest URL, or return the empty string if
@@ -429,10 +421,7 @@ class nsFrameLoader final : public nsStubMutationObserver,
   nsresult MaybeCreateDocShell();
   nsresult EnsureMessageManager();
   nsresult ReallyLoadFrameScripts();
-  nsDocShell* GetDocShell() const {
-    return mBrowsingContext ? nsDocShell::Cast(mBrowsingContext->GetDocShell())
-                            : nullptr;
-  }
+  nsDocShell* GetDocShell() const { return mDocShell; }
 
   // Updates the subdocument position and size. This gets called only
   // when we have our own in-process DocShell.
@@ -508,11 +497,10 @@ class nsFrameLoader final : public nsStubMutationObserver,
 
   uint64_t mChildID;
   RefPtr<mozilla::dom::RemoteBrowser> mRemoteBrowser;
+  RefPtr<nsDocShell> mDocShell;
 
   // Holds the last known size of the frame.
   mozilla::ScreenIntSize mLazySize;
-
-  RefPtr<mozilla::dom::ParentSHistory> mParentSHistory;
 
   RefPtr<mozilla::dom::TabListener> mSessionStoreListener;
 

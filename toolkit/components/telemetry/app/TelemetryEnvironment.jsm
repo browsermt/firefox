@@ -49,6 +49,11 @@ ChromeUtils.defineModuleGetter(
   "UpdateUtils",
   "resource://gre/modules/UpdateUtils.jsm"
 );
+ChromeUtils.defineModuleGetter(
+  this,
+  "fxAccounts",
+  "resource://gre/modules/FxAccounts.jsm"
+);
 
 // The maximum length of a string (e.g. description) in the addons section.
 const MAX_ADDON_STRING_LENGTH = 100;
@@ -177,10 +182,19 @@ var TelemetryEnvironment = {
   },
 
   // Policy to use when saving preferences. Exported for using them in tests.
-  RECORD_PREF_STATE: 1, // Don't record the preference value
-  RECORD_PREF_VALUE: 2, // We only record user-set prefs.
-  RECORD_DEFAULTPREF_VALUE: 3, // We only record default pref if set
-  RECORD_DEFAULTPREF_STATE: 4, // We only record if the pref exists
+  // Reports "<user-set>" if there is a value set on the user branch
+  RECORD_PREF_STATE: 1,
+
+  // Reports the value set on the user branch, if one is set
+  RECORD_PREF_VALUE: 2,
+
+  // Reports the active value (set on either the user or default branch)
+  // for this pref, if one is set
+  RECORD_DEFAULTPREF_VALUE: 3,
+
+  // Reports "<set>" if a value for this pref is defined on either the user
+  // or default branch
+  RECORD_DEFAULTPREF_STATE: 4,
 
   // Testing method
   async testWatchPreferences(prefMap) {
@@ -239,10 +253,6 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["browser.startup.page", { what: RECORD_PREF_VALUE }],
   ["toolkit.cosmeticAnimations.enabled", { what: RECORD_PREF_VALUE }],
   ["browser.urlbar.suggest.searches", { what: RECORD_PREF_VALUE }],
-  [
-    "browser.urlbar.userMadeSearchSuggestionsChoice",
-    { what: RECORD_PREF_VALUE },
-  ],
   ["devtools.chrome.enabled", { what: RECORD_PREF_VALUE }],
   ["devtools.debugger.enabled", { what: RECORD_PREF_VALUE }],
   ["devtools.debugger.remote-enabled", { what: RECORD_PREF_VALUE }],
@@ -256,7 +266,6 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["extensions.blocklist.url", { what: RECORD_PREF_VALUE }],
   ["extensions.formautofill.addresses.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.formautofill.creditCards.enabled", { what: RECORD_PREF_VALUE }],
-  ["extensions.htmlaboutaddons.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.legacy.enabled", { what: RECORD_PREF_VALUE }],
   ["extensions.strictCompatibility", { what: RECORD_PREF_VALUE }],
   ["extensions.update.enabled", { what: RECORD_PREF_VALUE }],
@@ -302,6 +311,7 @@ const DEFAULT_ENVIRONMENT_PREFS = new Map([
   ["security.pki.mitm_detected", { what: RECORD_PREF_VALUE }],
   ["security.mixed_content.block_active_content", { what: RECORD_PREF_VALUE }],
   ["security.mixed_content.block_display_content", { what: RECORD_PREF_VALUE }],
+  ["security.tls.version.enable-deprecated", { what: RECORD_PREF_VALUE }],
   ["xpinstall.signatures.required", { what: RECORD_PREF_VALUE }],
 ]);
 
@@ -327,6 +337,7 @@ const SESSIONSTORE_WINDOWS_RESTORED_TOPIC = "sessionstore-windows-restored";
 const PREF_CHANGED_TOPIC = "nsPref:changed";
 const BLOCKLIST_LOADED_TOPIC = "plugin-blocklist-loaded";
 const AUTO_UPDATE_PREF_CHANGE_TOPIC = "auto-update-config-change";
+const SERVICES_INFO_CHANGE_TOPIC = "sync-ui-state:update";
 
 /**
  * Enforces the parameter to a boolean value.
@@ -751,8 +762,8 @@ EnvironmentAddonBuilder.prototype = {
       changed:
         !this._environment._currentEnvironment.addons ||
         !ObjectUtils.deepEqual(
-          addons,
-          this._environment._currentEnvironment.addons
+          addons.activeAddons,
+          this._environment._currentEnvironment.addons.activeAddons
         ),
     };
 
@@ -762,8 +773,8 @@ EnvironmentAddonBuilder.prototype = {
         this._environment._currentEnvironment,
         myScope
       );
-      this._environment._currentEnvironment.addons = addons;
     }
+    this._environment._currentEnvironment.addons = addons;
 
     return result;
   },
@@ -1099,9 +1110,28 @@ EnvironmentCache.prototype = {
    * This gets called when the delayed init completes.
    */
   async delayedInit() {
+    this._processData = await Services.sysinfo.processInfo;
+    let processData = await Services.sysinfo.processInfo;
+    // Remove isWow64 and isWowARM64 from processData
+    // to strip it down to just CPU info
+    delete processData.isWow64;
+    delete processData.isWowARM64;
+
+    let oldEnv = null;
+    if (!this._initTask) {
+      oldEnv = this.currentEnvironment;
+    }
+
+    this._cpuData = this._getCPUData();
+    // Augment the return value from the promises with cached values
+    this._cpuData = { ...processData, ...this._cpuData };
+
+    this._currentEnvironment.system.cpu = this._getCPUData();
+
     if (AppConstants.platform == "win") {
       this._hddData = await Services.sysinfo.diskInfo;
-      let oldEnv = null;
+      let osData = await Services.sysinfo.osInfo;
+
       if (!this._initTask) {
         // We've finished creating the initial env, so notify for the update
         // This is all a bit awkward because `currentEnvironment` clones
@@ -1111,10 +1141,22 @@ EnvironmentCache.prototype = {
         // instead of all the consumers.
         oldEnv = this.currentEnvironment;
       }
+
+      this._osData = this._getOSData();
+
+      // Augment the return values from the promises with cached values
+      this._osData = Object.assign(osData, this._osData);
+
+      this._currentEnvironment.system.os = this._getOSData();
       this._currentEnvironment.system.hdd = this._getHDDData();
-      if (!this._initTask) {
-        this._onEnvironmentChange("hdd-info", oldEnv);
-      }
+
+      // Windows only values stored in processData
+      this._currentEnvironment.system.isWow64 = this._getProcessData().isWow64;
+      this._currentEnvironment.system.isWowARM64 = this._getProcessData().isWowARM64;
+    }
+
+    if (!this._initTask) {
+      this._onEnvironmentChange("system-info", oldEnv);
     }
   },
 
@@ -1350,6 +1392,7 @@ EnvironmentCache.prototype = {
     Services.obs.addObserver(this, SEARCH_ENGINE_MODIFIED_TOPIC);
     Services.obs.addObserver(this, SEARCH_SERVICE_TOPIC);
     Services.obs.addObserver(this, AUTO_UPDATE_PREF_CHANGE_TOPIC);
+    Services.obs.addObserver(this, SERVICES_INFO_CHANGE_TOPIC);
   },
 
   _removeObservers() {
@@ -1366,13 +1409,14 @@ EnvironmentCache.prototype = {
     Services.obs.removeObserver(this, SEARCH_ENGINE_MODIFIED_TOPIC);
     Services.obs.removeObserver(this, SEARCH_SERVICE_TOPIC);
     Services.obs.removeObserver(this, AUTO_UPDATE_PREF_CHANGE_TOPIC);
+    Services.obs.removeObserver(this, SERVICES_INFO_CHANGE_TOPIC);
   },
 
   observe(aSubject, aTopic, aData) {
     this._log.trace("observe - aTopic: " + aTopic + ", aData: " + aData);
     switch (aTopic) {
       case SEARCH_ENGINE_MODIFIED_TOPIC:
-        if (aData != "engine-default") {
+        if (aData != "engine-default" && aData != "engine-default-private") {
           return;
         }
         // Record the new default search choice and send the change notification.
@@ -1422,32 +1466,10 @@ EnvironmentCache.prototype = {
       case AUTO_UPDATE_PREF_CHANGE_TOPIC:
         this._currentEnvironment.settings.update.autoDownload = aData == "true";
         break;
+      case SERVICES_INFO_CHANGE_TOPIC:
+        this._updateServicesInfo();
+        break;
     }
-  },
-
-  /**
-   * Get the default search engine.
-   * @return {String} Returns the search engine identifier, "NONE" if no default search
-   *         engine is defined or "UNDEFINED" if no engine identifier or name can be found.
-   */
-  _getDefaultSearchEngine() {
-    let engine;
-    try {
-      engine = Services.search.defaultEngine;
-    } catch (e) {}
-
-    let name;
-    if (!engine) {
-      name = "NONE";
-    } else if (engine.identifier) {
-      name = engine.identifier;
-    } else if (engine.name) {
-      name = "other-" + engine.name;
-    } else {
-      name = "UNDEFINED";
-    }
-
-    return name;
   },
 
   /**
@@ -1473,9 +1495,23 @@ EnvironmentCache.prototype = {
 
     // Make sure we have a settings section.
     this._currentEnvironment.settings = this._currentEnvironment.settings || {};
+
     // Update the search engine entry in the current environment.
-    this._currentEnvironment.settings.defaultSearchEngine = this._getDefaultSearchEngine();
-    this._currentEnvironment.settings.defaultSearchEngineData = await Services.search.getDefaultEngineInfo();
+    const defaultEngineInfo = await Services.search.getDefaultEngineInfo();
+    this._currentEnvironment.settings.defaultSearchEngine =
+      defaultEngineInfo.defaultSearchEngine;
+    this._currentEnvironment.settings.defaultSearchEngineData = {
+      ...defaultEngineInfo.defaultSearchEngineData,
+    };
+    if ("defaultPrivateSearchEngine" in defaultEngineInfo) {
+      this._currentEnvironment.settings.defaultPrivateSearchEngine =
+        defaultEngineInfo.defaultPrivateSearchEngine;
+    }
+    if ("defaultPrivateSearchEngineData" in defaultEngineInfo) {
+      this._currentEnvironment.settings.defaultPrivateSearchEngineData = {
+        ...defaultEngineInfo.defaultPrivateSearchEngineData,
+      };
+    }
 
     // Record the cohort identifier used for search defaults A/B testing.
     if (Services.prefs.prefHasUserValue(PREF_SEARCH_COHORT)) {
@@ -1769,6 +1805,42 @@ EnvironmentCache.prototype = {
     this._currentEnvironment.settings.intl = getIntlSettings();
     Policy._intlLoaded = true;
   },
+  // This exists as a separate function for testing.
+  async _getFxaSignedInUser() {
+    return fxAccounts.getSignedInUser();
+  },
+
+  async _updateServicesInfo() {
+    let syncEnabled = false;
+    let accountEnabled = false;
+    let weaveService = Cc["@mozilla.org/weave/service;1"].getService()
+      .wrappedJSObject;
+    syncEnabled = weaveService && weaveService.enabled;
+    if (syncEnabled) {
+      // All sync users are account users, definitely.
+      accountEnabled = true;
+    } else {
+      // Not all account users are sync users. See if they're signed into FxA.
+      try {
+        let user = await this._getFxaSignedInUser();
+        if (user) {
+          accountEnabled = true;
+        }
+      } catch (e) {
+        // We don't know. This might be a transient issue which will clear
+        // itself up later, but the information in telemetry is quite possibly stale
+        // (this is called from a change listener), so clear it out to avoid
+        // reporting data which might be wrong until we can figure it out.
+        delete this._currentEnvironment.services;
+        this._log.error("_updateServicesInfo() caught error", e);
+        return;
+      }
+    }
+    this._currentEnvironment.services = {
+      accountEnabled,
+      syncEnabled,
+    };
+  },
 
   /**
    * Get the partner data in object form.
@@ -1796,22 +1868,17 @@ EnvironmentCache.prototype = {
     return partnerData;
   },
 
+  _cpuData: null,
   /**
    * Get the CPU information.
    * @return Object containing the CPU information data.
    */
-  _getCpuData() {
-    let cpuData = {
-      count: getSysinfoProperty("cpucount", null),
-      cores: getSysinfoProperty("cpucores", null),
-      vendor: getSysinfoProperty("cpuvendor", null),
-      family: getSysinfoProperty("cpufamily", null),
-      model: getSysinfoProperty("cpumodel", null),
-      stepping: getSysinfoProperty("cpustepping", null),
-      l2cacheKB: getSysinfoProperty("cpucachel2", null),
-      l3cacheKB: getSysinfoProperty("cpucachel3", null),
-      speedMHz: getSysinfoProperty("cpuspeed", null),
-    };
+  _getCPUData() {
+    if (this._cpuData) {
+      return this._cpuData;
+    }
+
+    this._cpuData = {};
 
     const CPU_EXTENSIONS = [
       "hasMMX",
@@ -1839,9 +1906,21 @@ EnvironmentCache.prototype = {
       }
     }
 
-    cpuData.extensions = availableExts;
+    this._cpuData.extensions = availableExts;
 
-    return cpuData;
+    return this._cpuData;
+  },
+
+  _processData: null,
+  /**
+   * Get the process information.
+   * @return Object containing the process information data.
+   */
+  _getProcessData() {
+    if (this._processData) {
+      return this._processData;
+    }
+    return {};
   },
 
   /**
@@ -1862,19 +1941,23 @@ EnvironmentCache.prototype = {
     };
   },
 
+  _osData: null,
   /**
    * Get the OS information.
    * @return Object containing the OS data.
    */
   _getOSData() {
-    let data = {
+    if (this._osData) {
+      return this._osData;
+    }
+    this._osData = {
       name: forceToStringOrNull(getSysinfoProperty("name", null)),
       version: forceToStringOrNull(getSysinfoProperty("version", null)),
       locale: forceToStringOrNull(getSystemLocale()),
     };
 
     if (AppConstants.platform == "android") {
-      data.kernelVersion = forceToStringOrNull(
+      this._osData.kernelVersion = forceToStringOrNull(
         getSysinfoProperty("kernel_version", null)
       );
     } else if (AppConstants.platform === "win") {
@@ -1883,13 +1966,13 @@ EnvironmentCache.prototype = {
         "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
 
       let versionInfo = getWindowsVersionInfo();
-      data.servicePackMajor = versionInfo.servicePackMajor;
-      data.servicePackMinor = versionInfo.servicePackMinor;
-      data.windowsBuildNumber = versionInfo.buildNumber;
+      this._osData.servicePackMajor = versionInfo.servicePackMajor;
+      this._osData.servicePackMinor = versionInfo.servicePackMinor;
+      this._osData.windowsBuildNumber = versionInfo.buildNumber;
       // We only need the UBR if we're at or above Windows 10.
       if (
-        typeof data.version === "string" &&
-        Services.vc.compare(data.version, "10") >= 0
+        typeof this._osData.version === "string" &&
+        Services.vc.compare(this._osData.version, "10") >= 0
       ) {
         // Query the UBR key and only add it to the environment if it's available.
         // |readRegKey| doesn't throw, but rather returns 'undefined' on error.
@@ -1899,12 +1982,11 @@ EnvironmentCache.prototype = {
           "UBR",
           Ci.nsIWindowsRegKey.WOW64_64
         );
-        data.windowsUBR = ubr !== undefined ? ubr : null;
+        this._osData.windowsUBR = ubr !== undefined ? ubr : null;
       }
-      data.installYear = getSysinfoProperty("installYear", null);
     }
 
-    return data;
+    return this._osData;
   },
 
   _hddData: null,
@@ -2022,7 +2104,7 @@ EnvironmentCache.prototype = {
     let data = {
       memoryMB,
       virtualMaxMB: virtualMB,
-      cpu: this._getCpuData(),
+      cpu: this._getCPUData(),
       os: this._getOSData(),
       hdd: this._getHDDData(),
       gfx: this._getGFXData(),
@@ -2030,8 +2112,7 @@ EnvironmentCache.prototype = {
     };
 
     if (AppConstants.platform === "win") {
-      data.isWow64 = getSysinfoProperty("isWow64", null);
-      data.isWowARM64 = getSysinfoProperty("isWowARM64", null);
+      data = { ...this._getProcessData(), ...data };
     } else if (AppConstants.platform == "android") {
       data.device = this._getDeviceData();
     }

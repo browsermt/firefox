@@ -46,7 +46,7 @@ class VideoConverterListener {
 
 // An async video frame format converter.
 //
-// Input is typically a MediaStreamTrackListener driven by MediaStreamGraph.
+// Input is typically a MediaTrackListener driven by MediaTrackGraph.
 //
 // Output is passed through to all added VideoConverterListeners on a TaskQueue
 // thread whenever a frame is converted.
@@ -360,7 +360,10 @@ class VideoFrameConverter {
     rtc::scoped_refptr<webrtc::I420Buffer> buffer =
         mBufferPool.CreateBuffer(aFrame.mSize.width, aFrame.mSize.height);
     if (!buffer) {
-      MOZ_DIAGNOSTIC_ASSERT(++mFramesDropped <= 100, "Buffers must be leaking");
+#ifdef MOZ_DIAGNOSTIC_ASSERT_ENABLED
+      ++mFramesDropped;
+#endif
+      MOZ_DIAGNOSTIC_ASSERT(mFramesDropped <= 100, "Buffers must be leaking");
       MOZ_LOG(gVideoFrameConverterLog, LogLevel::Warning,
               ("Creating a buffer failed"));
       return;
@@ -391,7 +394,7 @@ class VideoFrameConverter {
   // Used to pace future frames close to their rendering-time. Thread-safe.
   const RefPtr<MediaTimer> mPacingTimer;
 
-  // Written and read from the queueing thread (normally MSG).
+  // Written and read from the queueing thread (normally MTG).
   // Last time we queued a frame in the pacer
   TimeStamp mLastFrameQueuedForPacing;
 

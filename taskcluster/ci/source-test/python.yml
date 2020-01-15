@@ -87,7 +87,7 @@ mochitest-harness:
     worker:
         by-platform:
             linux64.*:
-                docker-image: {in-tree: "desktop1604-test"}
+                docker-image: {in-tree: "ubuntu1804-test"}
                 max-run-time: 3600
     run:
         using: run-task
@@ -139,7 +139,21 @@ mozharness:
         cache-dotcache: true
         cwd: '{checkout}/testing/mozharness'
         command: >
-            /usr/local/bin/tox -e py27-hg4.3
+            /usr/local/bin/tox -e py27-hg5.2
+    when:
+        files-changed:
+            - 'testing/mozharness/**'
+
+mozharness-py3:
+    description: mozharness integration tests
+    treeherder:
+        symbol: py3(mh)
+    run:
+        using: run-task
+        cache-dotcache: true
+        cwd: '{checkout}/testing/mozharness'
+        command: >
+            /usr/local/bin/tox -e py36-hg5.2
     when:
         files-changed:
             - 'testing/mozharness/**'
@@ -150,9 +164,9 @@ mozlint:
         - linux64/opt
         - macosx1014-64/opt
         - windows10-64/opt
-    python-version: [2]
+    python-version: [3]
     treeherder:
-        symbol: ml
+        symbol: mozlint
     run:
         using: python-test
         subsuite: mozlint
@@ -204,8 +218,9 @@ raptor:
     description: testing/raptor unit tests
     platform:
         - linux64/opt
+        - macosx1014-64/opt
         - windows10-64/opt
-    python-version: [2]
+    python-version: [2, 3]
     treeherder:
         symbol: rap
     run:
@@ -228,7 +243,7 @@ reftest-harness:
     worker:
         by-platform:
             linux64.*:
-                docker-image: {in-tree: "desktop1604-test"}
+                docker-image: {in-tree: "ubuntu1804-test"}
                 max-run-time: 3600
     run:
         using: run-task
@@ -270,13 +285,6 @@ tryselect:
             - 'taskcluster/ci/test/**'
             - 'taskcluster/taskgraph/transforms/**'
             - 'tools/tryselect/**'
-    fetches:
-        toolchain:
-            by-platform:
-                linux64.*:
-                    - linux64-node
-                windows10-64.*:
-                    - win64-node
 
 mozbuild:
     description: mozbuild unit tests
@@ -311,3 +319,20 @@ mozbuild:
             - 'python/mozversioncontrol/**'
             - 'testing/mozbase/**'
             - 'testing/xpcshell/xpcshellcommandline.py'
+
+condprof:
+    description: testing/condprofile unit tests
+    platform:
+        - linux64/opt
+        - macosx1014-64/opt
+        - windows10-64/opt
+    python-version: [2]
+    treeherder:
+        symbol: condprof
+    run:
+        using: python-test
+        subsuite: condprof
+    when:
+        files-changed:
+            - 'testing/condprofile/condprof**'
+            - 'testing/condprofile/setup.py'

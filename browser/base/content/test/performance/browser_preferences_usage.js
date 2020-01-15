@@ -210,6 +210,41 @@ add_task(async function navigate_around() {
     },
   };
 
+  if (SpecialPowers.useRemoteSubframes) {
+    // We access this when considering starting a new content process.
+    // Because there is no complete list of content process types,
+    // caching this is not trivial. Opening 50 different content
+    // processes and throwing them away immediately is a bit artificial;
+    // we're more likely to keep some around so this shouldn't be quite
+    // this bad in practice. Fixing this is
+    // https://bugzilla.mozilla.org/show_bug.cgi?id=1600266
+    whitelist["dom.ipc.processCount.webIsolated"] = {
+      min: 50,
+      max: 51,
+    };
+    // This pref is only accessed in automation to speed up tests.
+    whitelist["dom.ipc.keepProcessesAlive.webIsolated.perOrigin"] = {
+      min: 50,
+      max: 51,
+    };
+    if (AppConstants.platform == "linux") {
+      // The following 3 sandbox prefs are covered by
+      // https://bugzilla.mozilla.org/show_bug.cgi?id=1600189
+      whitelist["security.sandbox.content.write_path_whitelist"] = {
+        min: 50,
+        max: 51,
+      };
+      whitelist["security.sandbox.content.read_path_whitelist"] = {
+        min: 50,
+        max: 51,
+      };
+      whitelist["security.sandbox.content.force-namespace"] = {
+        min: 50,
+        max: 51,
+      };
+    }
+  }
+
   Services.prefs.resetStats();
 
   let tab = await BrowserTestUtils.openNewForegroundTab(
@@ -220,17 +255,17 @@ add_task(async function navigate_around() {
   );
 
   let urls = [
-    "http://example.com",
-    "https://example.com",
-    "http://example.org",
-    "https://example.org",
+    "http://example.com/",
+    "https://example.com/",
+    "http://example.org/",
+    "https://example.org/",
   ];
 
   for (let i = 0; i < 50; i++) {
     let url = urls[i % urls.length];
     info(`Navigating to ${url}...`);
     await BrowserTestUtils.loadURI(tab.linkedBrowser, url);
-    await BrowserTestUtils.browserLoaded(tab.linkedBrowser);
+    await BrowserTestUtils.browserLoaded(tab.linkedBrowser, false, url);
     info(`Loaded ${url}.`);
   }
 

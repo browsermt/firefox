@@ -29,7 +29,6 @@
 #include "mozilla/dom/ScriptSettings.h"
 #include "mozilla/dom/BrowserHost.h"
 
-#include "nsIDocShellTreeItem.h"
 #include "nsIDocShellTreeOwner.h"
 #include "mozilla/dom/Event.h"
 #include "mozilla/dom/EventTarget.h"
@@ -37,7 +36,6 @@
 #include "mozilla/dom/Document.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsIPropertyBag2.h"
-#include "nsIServiceManager.h"
 #include "nsPIDOMWindow.h"
 #include "nsIWebBrowserChrome.h"
 #include "nsReadableUtils.h"
@@ -45,7 +43,7 @@
 #include "nsGlobalWindow.h"
 
 #ifdef MOZ_XUL
-#  include "nsIXULWindow.h"
+#  include "nsIAppWindow.h"
 #endif
 
 using namespace mozilla;
@@ -82,33 +80,23 @@ ENameValueFlag RootAccessible::Name(nsString& aName) const {
   return eNameOK;
 }
 
-role RootAccessible::NativeRole() const {
-  // If it's a <dialog> or <wizard>, use roles::DIALOG instead
-  dom::Element* rootElm = mDocumentNode->GetRootElement();
-  if (rootElm &&
-      rootElm->IsAnyOfXULElements(nsGkAtoms::dialog, nsGkAtoms::wizard))
-    return roles::DIALOG;
-
-  return DocAccessibleWrap::NativeRole();
-}
-
 // RootAccessible protected member
 #ifdef MOZ_XUL
 uint32_t RootAccessible::GetChromeFlags() const {
   // Return the flag set for the top level window as defined
   // by nsIWebBrowserChrome::CHROME_WINDOW_[FLAGNAME]
-  // Not simple: nsIXULWindow is not just a QI from nsIDOMWindow
+  // Not simple: nsIAppWindow is not just a QI from nsIDOMWindow
   nsCOMPtr<nsIDocShell> docShell = nsCoreUtils::GetDocShellFor(mDocumentNode);
   NS_ENSURE_TRUE(docShell, 0);
   nsCOMPtr<nsIDocShellTreeOwner> treeOwner;
   docShell->GetTreeOwner(getter_AddRefs(treeOwner));
   NS_ENSURE_TRUE(treeOwner, 0);
-  nsCOMPtr<nsIXULWindow> xulWin(do_GetInterface(treeOwner));
-  if (!xulWin) {
+  nsCOMPtr<nsIAppWindow> appWin(do_GetInterface(treeOwner));
+  if (!appWin) {
     return 0;
   }
   uint32_t chromeFlags;
-  xulWin->GetChromeFlags(&chromeFlags);
+  appWin->GetChromeFlags(&chromeFlags);
   return chromeFlags;
 }
 #endif
@@ -348,6 +336,15 @@ void RootAccessible::ProcessDOMEvent(Event* aDOMEvent, nsINode* aTarget) {
     if (FocusMgr()->HasDOMFocus(targetNode)) {
       nsCOMPtr<nsIDOMXULMultiSelectControlElement> multiSel =
           targetNode->AsElement()->AsXULMultiSelectControl();
+      if (!multiSel) {
+        // This shouldn't be possible. All XUL trees should have
+        // nsIDOMXULMultiSelectControlElement, and the tree is focused, so it
+        // shouldn't be dying. Nevertheless, this sometimes happens in the wild
+        // (bug 1597043).
+        MOZ_ASSERT_UNREACHABLE(
+            "XUL tree doesn't have nsIDOMXULMultiSelectControlElement");
+        return;
+      }
       nsAutoString selType;
       multiSel->GetSelType(selType);
       if (selType.IsEmpty() || !selType.EqualsLiteral("single")) {

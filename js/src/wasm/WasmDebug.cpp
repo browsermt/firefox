@@ -25,6 +25,7 @@
 #include "jit/ExecutableAllocator.h"
 #include "jit/MacroAssembler.h"
 #include "wasm/WasmInstance.h"
+#include "wasm/WasmStubs.h"
 #include "wasm/WasmValidate.h"
 
 #include "gc/FreeOp-inl.h"
@@ -41,6 +42,20 @@ DebugState::DebugState(const Code& code, const Module& module)
       enterFrameTrapsEnabled_(false),
       enterAndLeaveFrameTrapsCounter_(0) {
   MOZ_ASSERT(code.metadata().debugEnabled);
+}
+
+void DebugState::trace(JSTracer* trc) {
+  for (auto iter = breakpointSites_.iter(); !iter.done(); iter.next()) {
+    WasmBreakpointSite* site = iter.get().value();
+    site->trace(trc);
+  }
+}
+
+void DebugState::finalize(JSFreeOp* fop) {
+  for (auto iter = breakpointSites_.iter(); !iter.done(); iter.next()) {
+    WasmBreakpointSite* site = iter.get().value();
+    site->delete_(fop);
+  }
 }
 
 static const uint32_t DefaultBinarySourceColumnNumber = 1;
@@ -112,7 +127,6 @@ bool DebugState::incrementStepperCount(JSContext* cx, uint32_t funcIndex) {
   AutoWritableJitCode awjc(
       cx->runtime(), code_->segment(Tier::Debug).base() + codeRange.begin(),
       codeRange.end() - codeRange.begin());
-  AutoFlushICache afc("Code::incrementStepperCount");
 
   for (const CallSite& callSite : callSites(Tier::Debug)) {
     if (callSite.kind() != CallSite::Breakpoint) {
@@ -126,7 +140,7 @@ bool DebugState::incrementStepperCount(JSContext* cx, uint32_t funcIndex) {
   return true;
 }
 
-bool DebugState::decrementStepperCount(JSFreeOp* fop, uint32_t funcIndex) {
+void DebugState::decrementStepperCount(JSFreeOp* fop, uint32_t funcIndex) {
   const CodeRange& codeRange =
       codeRanges(Tier::Debug)[funcToCodeRangeIndex(funcIndex)];
   MOZ_ASSERT(codeRange.isFunction());
@@ -135,7 +149,7 @@ bool DebugState::decrementStepperCount(JSFreeOp* fop, uint32_t funcIndex) {
   StepperCounters::Ptr p = stepperCounters_.lookup(funcIndex);
   MOZ_ASSERT(p);
   if (--p->value()) {
-    return true;
+    return;
   }
 
   stepperCounters_.remove(p);
@@ -143,7 +157,6 @@ bool DebugState::decrementStepperCount(JSFreeOp* fop, uint32_t funcIndex) {
   AutoWritableJitCode awjc(
       fop->runtime(), code_->segment(Tier::Debug).base() + codeRange.begin(),
       codeRange.end() - codeRange.begin());
-  AutoFlushICache afc("Code::decrementStepperCount");
 
   for (const CallSite& callSite : callSites(Tier::Debug)) {
     if (callSite.kind() != CallSite::Breakpoint) {
@@ -155,7 +168,6 @@ bool DebugState::decrementStepperCount(JSFreeOp* fop, uint32_t funcIndex) {
       toggleDebugTrap(offset, enabled);
     }
   }
-  return true;
 }
 
 bool DebugState::hasBreakpointTrapAtOffset(uint32_t offset) {
@@ -181,9 +193,6 @@ void DebugState::toggleBreakpointTrap(JSRuntime* rt, uint32_t offset,
   }
 
   AutoWritableJitCode awjc(rt, codeSegment.base(), codeSegment.length());
-  AutoFlushICache afc("Code::toggleBreakpointTrap");
-  AutoFlushICache::setRange(uintptr_t(codeSegment.base()),
-                            codeSegment.length());
   toggleDebugTrap(debugTrapOffset, enabled);
 }
 
@@ -203,7 +212,7 @@ WasmBreakpointSite* DebugState::getOrCreateBreakpointSite(JSContext* cx,
 
   WasmBreakpointSiteMap::AddPtr p = breakpointSites_.lookupForAdd(offset);
   if (!p) {
-    site = cx->new_<WasmBreakpointSite>(instance, offset);
+    site = cx->new_<WasmBreakpointSite>(instance->object(), offset);
     if (!site) {
       return nullptr;
     }
@@ -216,6 +225,8 @@ WasmBreakpointSite* DebugState::getOrCreateBreakpointSite(JSContext* cx,
 
     AddCellMemory(instance->object(), sizeof(WasmBreakpointSite),
                   MemoryUse::BreakpointSite);
+
+    toggleBreakpointTrap(cx->runtime(), offset, true);
   } else {
     site = p->value();
   }
@@ -233,24 +244,32 @@ void DebugState::destroyBreakpointSite(JSFreeOp* fop, Instance* instance,
   fop->delete_(instance->objectUnbarriered(), p->value(),
                MemoryUse::BreakpointSite);
   breakpointSites_.remove(p);
+  toggleBreakpointTrap(fop->runtime(), offset, false);
 }
 
 void DebugState::clearBreakpointsIn(JSFreeOp* fop, WasmInstanceObject* instance,
                                     js::Debugger* dbg, JSObject* handler) {
   MOZ_ASSERT(instance);
+
+  // Breakpoints hold wrappers in the instance's compartment for the handler.
+  // Make sure we don't try to search for the unwrapped handler.
+  MOZ_ASSERT_IF(handler, instance->compartment() == handler->compartment());
+
   if (breakpointSites_.empty()) {
     return;
   }
   for (WasmBreakpointSiteMap::Enum e(breakpointSites_); !e.empty();
        e.popFront()) {
     WasmBreakpointSite* site = e.front().value();
+    MOZ_ASSERT(site->instanceObject == instance);
+
     Breakpoint* nextbp;
     for (Breakpoint* bp = site->firstBreakpoint(); bp; bp = nextbp) {
       nextbp = bp->nextInSite();
-      if (bp->asWasm()->wasmInstance == instance &&
-          (!dbg || bp->debugger == dbg) &&
+      MOZ_ASSERT(bp->site == site);
+      if ((!dbg || bp->debugger == dbg) &&
           (!handler || bp->getHandler() == handler)) {
-        bp->destroy(fop, Breakpoint::MayDestroySite::False);
+        bp->delete_(fop);
       }
     }
     if (site->isEmpty()) {
@@ -304,9 +323,6 @@ void DebugState::adjustEnterAndLeaveFrameTrapsState(JSContext* cx,
   const ModuleSegment& codeSegment = code_->segment(Tier::Debug);
   AutoWritableJitCode awjc(cx->runtime(), codeSegment.base(),
                            codeSegment.length());
-  AutoFlushICache afc("Code::adjustEnterAndLeaveFrameTrapsState");
-  AutoFlushICache::setRange(uintptr_t(codeSegment.base()),
-                            codeSegment.length());
   for (const CallSite& callSite : callSites(Tier::Debug)) {
     if (callSite.kind() != CallSite::EnterFrame &&
         callSite.kind() != CallSite::LeaveFrame) {
@@ -327,9 +343,15 @@ void DebugState::ensureEnterFrameTrapsState(JSContext* cx, bool enabled) {
 }
 
 bool DebugState::debugGetLocalTypes(uint32_t funcIndex, ValTypeVector* locals,
-                                    size_t* argsLength) {
+                                    size_t* argsLength,
+                                    StackResults* stackResults) {
   const ValTypeVector& args = metadata().debugFuncArgTypes[funcIndex];
+  const ValTypeVector& results = metadata().debugFuncReturnTypes[funcIndex];
+  ResultType resultType(ResultType::Vector(results));
   *argsLength = args.length();
+  *stackResults = ABIResultIter::HasStackResults(resultType)
+                      ? StackResults::HasStackResults
+                      : StackResults::NoStackResults;
   if (!locals->appendAll(args)) {
     return false;
   }
@@ -345,8 +367,9 @@ bool DebugState::debugGetLocalTypes(uint32_t funcIndex, ValTypeVector* locals,
   return DecodeValidatedLocalEntries(d, locals);
 }
 
-ExprType DebugState::debugGetResultType(uint32_t funcIndex) {
-  return metadata().debugFuncReturnTypes[funcIndex];
+bool DebugState::debugGetResultTypes(uint32_t funcIndex,
+                                     ValTypeVector* results) {
+  return results->appendAll(metadata().debugFuncReturnTypes[funcIndex]);
 }
 
 bool DebugState::getGlobal(Instance& instance, uint32_t globalIndex,
@@ -355,7 +378,7 @@ bool DebugState::getGlobal(Instance& instance, uint32_t globalIndex,
 
   if (global.isConstant()) {
     LitVal value = global.constantValue();
-    switch (value.type().code()) {
+    switch (value.type().kind()) {
       case ValType::I32:
         vp.set(Int32Value(value.i32()));
         break;
@@ -380,7 +403,7 @@ bool DebugState::getGlobal(Instance& instance, uint32_t globalIndex,
   if (global.isIndirect()) {
     dataPtr = *static_cast<void**>(dataPtr);
   }
-  switch (global.type().code()) {
+  switch (global.type().kind()) {
     case ValType::I32: {
       vp.set(Int32Value(*static_cast<int32_t*>(dataPtr)));
       break;

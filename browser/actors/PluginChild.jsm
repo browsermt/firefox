@@ -335,7 +335,7 @@ class PluginChild extends JSWindowActorChild {
           return;
         }
         evt.preventDefault();
-        if (callbackArgs.length == 0) {
+        if (!callbackArgs.length) {
           callbackArgs = [evt];
         }
         self[callbackName].apply(self, callbackArgs);
@@ -351,7 +351,7 @@ class PluginChild extends JSWindowActorChild {
         }
         if (evt.keyCode == evt.DOM_VK_RETURN) {
           evt.preventDefault();
-          if (callbackArgs.length == 0) {
+          if (!callbackArgs.length) {
             callbackArgs = [evt];
           }
           evt.preventDefault();
@@ -707,8 +707,7 @@ class PluginChild extends JSWindowActorChild {
   }
 
   onOverlayClick(event) {
-    let document = event.target.ownerDocument;
-    let plugin = document.getBindingParent(event.target);
+    let plugin = event.target.containingShadowRoot.host;
     let overlay = this.getPluginUI(plugin, "main");
     // Have to check that the target is not the link to update the plugin
     if (
@@ -803,7 +802,7 @@ class PluginChild extends JSWindowActorChild {
           Ci.nsIObjectLoadingContent.TYPE_PLUGIN
       );
 
-      if (plugins.length == 0) {
+      if (!plugins.length) {
         this.removeNotification();
         return;
       }
@@ -951,8 +950,6 @@ class PluginChild extends JSWindowActorChild {
   }
 
   setCrashedNPAPIPluginState({ pluginElement, state, pluginName }) {
-    // Force a layout flush so the binding is attached.
-    pluginElement.clientTop;
     let overlay = this.getPluginUI(pluginElement, "main");
     let statusDiv = this.getPluginUI(pluginElement, "submitStatus");
     let optInCB = this.getPluginUI(pluginElement, "submitURLOptIn");

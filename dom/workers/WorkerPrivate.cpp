@@ -49,10 +49,10 @@
 #include "nsNetUtil.h"
 #include "nsIMemoryReporter.h"
 #include "nsIPermissionManager.h"
-#include "nsIRandomGenerator.h"
 #include "nsIScriptError.h"
 #include "nsIURI.h"
 #include "nsIURL.h"
+#include "nsIUUIDGenerator.h"
 #include "nsPrintfCString.h"
 #include "nsProxyRelease.h"
 #include "nsQueryObject.h"
@@ -1468,6 +1468,12 @@ void WorkerPrivate::EnableDebugger() {
 void WorkerPrivate::DisableDebugger() {
   AssertIsOnParentThread();
 
+  // RegisterDebuggerMainThreadRunnable might be dispatched but not executed.
+  // Wait for its execution before unregistraion.
+  if (!NS_IsMainThread()) {
+    WaitForIsDebuggerRegistered(true);
+  }
+
   if (NS_FAILED(UnregisterWorkerDebugger(this))) {
     NS_WARNING("Failed to unregister worker debugger!");
   }
@@ -2111,12 +2117,12 @@ bool IsNewWorkerSecureContext(const WorkerPrivate* const aParent,
 
 }  // namespace
 
-WorkerPrivate::WorkerPrivate(WorkerPrivate* aParent,
-                             const nsAString& aScriptURL, bool aIsChromeWorker,
-                             WorkerType aWorkerType,
-                             const nsAString& aWorkerName,
-                             const nsACString& aServiceWorkerScope,
-                             WorkerLoadInfo& aLoadInfo, nsString&& aId)
+WorkerPrivate::WorkerPrivate(
+    WorkerPrivate* aParent, const nsAString& aScriptURL, bool aIsChromeWorker,
+    WorkerType aWorkerType, const nsAString& aWorkerName,
+    const nsACString& aServiceWorkerScope, WorkerLoadInfo& aLoadInfo,
+    nsString&& aId, const nsID& aAgentClusterId,
+    const nsILoadInfo::CrossOriginOpenerPolicy aAgentClusterOpenerPolicy)
     : mMutex("WorkerPrivate Mutex"),
       mCondVar(mMutex, "WorkerPrivate CondVar"),
       mParent(aParent),
@@ -2137,6 +2143,8 @@ WorkerPrivate::WorkerPrivate(WorkerPrivate* aParent,
       mLoadingWorkerScript(false),
       mCreationTimeStamp(TimeStamp::Now()),
       mCreationTimeHighRes((double)PR_Now() / PR_USEC_PER_MSEC),
+      mReportedUseCounters(false),
+      mAgentClusterId(aAgentClusterId),
       mWorkerThreadAccessible(aParent),
       mPostSyncLoopOperations(0),
       mParentWindowPaused(false),
@@ -2152,7 +2160,8 @@ WorkerPrivate::WorkerPrivate(WorkerPrivate* aParent,
       mDebuggerReady(true),
       mIsInAutomation(false),
       mPerformanceCounter(nullptr),
-      mId(std::move(aId)) {
+      mId(std::move(aId)),
+      mAgentClusterOpenerPolicy(aAgentClusterOpenerPolicy) {
   MOZ_ASSERT_IF(!IsDedicatedWorker(), NS_IsMainThread());
 
   if (aParent) {
@@ -2175,10 +2184,16 @@ WorkerPrivate::WorkerPrivate(WorkerPrivate* aParent,
 
     RuntimeService::GetDefaultJSSettings(mJSSettings);
 
-    mJSSettings.chrome.realmOptions.creationOptions().setClampAndJitterTime(
+    mJSSettings.chrome.realmOptions.behaviors().setClampAndJitterTime(
         !UsesSystemPrincipal());
-    mJSSettings.content.realmOptions.creationOptions().setClampAndJitterTime(
+    mJSSettings.content.realmOptions.behaviors().setClampAndJitterTime(
         !UsesSystemPrincipal());
+
+    mJSSettings.chrome.realmOptions.creationOptions().setToSourceEnabled(
+        UsesSystemPrincipal());
+    mJSSettings.content.realmOptions.creationOptions().setToSourceEnabled(
+        UsesSystemPrincipal());
+
 
     if (mIsSecureContext) {
       mJSSettings.chrome.realmOptions.creationOptions().setSecureContext(true);
@@ -2308,9 +2323,42 @@ already_AddRefed<WorkerPrivate> WorkerPrivate::Constructor(
 
   MOZ_ASSERT(runtimeService);
 
-  RefPtr<WorkerPrivate> worker = new WorkerPrivate(
-      parent, aScriptURL, aIsChromeWorker, aWorkerType, aWorkerName,
-      aServiceWorkerScope, *aLoadInfo, std::move(aId));
+  nsILoadInfo::CrossOriginOpenerPolicy agentClusterCoop =
+      nsILoadInfo::OPENER_POLICY_NULL;
+  nsID agentClusterId;
+  if (parent) {
+    MOZ_ASSERT(aWorkerType == WorkerType::WorkerTypeDedicated);
+
+    agentClusterId = parent->AgentClusterId();
+    agentClusterCoop = parent->mAgentClusterOpenerPolicy;
+  } else {
+    AssertIsOnMainThread();
+
+    if (aWorkerType == WorkerType::WorkerTypeService ||
+        aWorkerType == WorkerType::WorkerTypeShared) {
+      agentClusterId = aLoadInfo->mAgentClusterId;
+    } else if (aLoadInfo->mWindow) {
+      Document* doc = aLoadInfo->mWindow->GetExtantDoc();
+      MOZ_DIAGNOSTIC_ASSERT(doc);
+      RefPtr<DocGroup> docGroup = doc->GetDocGroup();
+
+      agentClusterId = docGroup ? docGroup->AgentClusterId()
+                                : nsContentUtils::GenerateUUID();
+
+      BrowsingContext* bc = aLoadInfo->mWindow->GetBrowsingContext();
+      MOZ_DIAGNOSTIC_ASSERT(bc);
+      agentClusterCoop = bc->Top()->GetOpenerPolicy();
+    } else {
+      // If the window object was failed to be set into the WorkerLoadInfo, we
+      // make the worker into another agent cluster group instead of failures.
+      agentClusterId = nsContentUtils::GenerateUUID();
+    }
+  }
+
+  RefPtr<WorkerPrivate> worker =
+      new WorkerPrivate(parent, aScriptURL, aIsChromeWorker, aWorkerType,
+                        aWorkerName, aServiceWorkerScope, *aLoadInfo,
+                        std::move(aId), agentClusterId, agentClusterCoop);
 
   // Gecko contexts always have an explicitly-set default locale (set by
   // XPJSRuntime::Initialize for the main thread, set by
@@ -2729,6 +2777,12 @@ void WorkerPrivate::DoRunLoop(JSContext* aCx) {
              !(debuggerRunnablesPending = !mDebuggerQueue.IsEmpty()) &&
              !(normalRunnablesPending = NS_HasPendingEvents(mThread)) &&
              !(mStatus != Running && !HasActiveWorkerRefs())) {
+        // We pop out to this loop when there are no pending events.
+        // If we don't reset these, we may not re-enter ProcessNextEvent()
+        // until we have events to process, and it may seem like we have
+        // an event running for a very long time.
+        mThread->SetRunningEventDelay(TimeDuration(), TimeStamp());
+
         WaitForWorkerEvents();
       }
 
@@ -2956,6 +3010,8 @@ bool WorkerPrivate::EnsureClientSource() {
   data->mClientSource = ClientManager::CreateSource(
       type, mWorkerHybridEventTarget, GetPrincipalInfo());
   MOZ_DIAGNOSTIC_ASSERT(data->mClientSource);
+
+  data->mClientSource->SetAgentClusterId(mAgentClusterId);
 
   if (data->mFrozen) {
     data->mClientSource->Freeze();
@@ -3394,6 +3450,9 @@ void WorkerPrivate::ClearMainEventQueue(WorkerRanOrNot aRanOrNot) {
     MOZ_ASSERT(currentThread);
 
     NS_ProcessPendingEvents(currentThread);
+
+    // We are about to destroy worker, report all use counters.
+    ReportUseCounters();
   }
 
   MOZ_ASSERT(mCancelAllPendingRunnables);
@@ -3812,6 +3871,73 @@ void WorkerPrivate::DispatchCancelingRunnable() {
   rr->Dispatch();
 }
 
+void WorkerPrivate::ReportUseCounters() {
+  AssertIsOnWorkerThread();
+
+  static const bool kDebugUseCounters = false;
+
+  if (mReportedUseCounters) {
+    return;
+  }
+  mReportedUseCounters = true;
+
+  if (Telemetry::HistogramUseCounterWorkerCount <= 0 || IsChromeWorker()) {
+    return;
+  }
+
+  const size_t type = Type();
+  switch (type) {
+    case WorkerTypeDedicated:
+      Telemetry::Accumulate(Telemetry::DEDICATED_WORKER_DESTROYED, 1);
+      break;
+    case WorkerTypeShared:
+      Telemetry::Accumulate(Telemetry::SHARED_WORKER_DESTROYED, 1);
+      break;
+    case WorkerTypeService:
+      Telemetry::Accumulate(Telemetry::SERVICE_WORKER_DESTROYED, 1);
+      break;
+    default:
+      MOZ_ASSERT(false, "Unknown worker type");
+      return;
+  }
+
+  if (kDebugUseCounters) {
+    nsAutoCString path(Domain());
+    path.AppendLiteral("(");
+    NS_ConvertUTF16toUTF8 script(ScriptURL());
+    path.Append(script);
+    path.AppendPrintf(", 0x%p)", static_cast<void*>(this));
+    printf("-- Worker use counters for %s --\n", path.get());
+  }
+
+  static_assert(
+      static_cast<size_t>(UseCounterWorker::Count) * 3 ==
+          static_cast<size_t>(Telemetry::HistogramUseCounterWorkerCount),
+      "There should be three histograms (dedicated and shared and "
+      "servie) for each worker use counter");
+  const size_t count = static_cast<size_t>(UseCounterWorker::Count);
+  const size_t factor =
+      static_cast<size_t>(Telemetry::HistogramUseCounterWorkerCount) / count;
+  MOZ_ASSERT(factor > type);
+
+  for (size_t c = 0; c < count; ++c) {
+    // Histograms for worker use counters use the same order as the worker types
+    // , so we can use the worker type to index to corresponding histogram.
+    Telemetry::HistogramID id = static_cast<Telemetry::HistogramID>(
+        Telemetry::HistogramFirstUseCounterWorker + c * factor + type);
+    MOZ_ASSERT(id <= Telemetry::HistogramLastUseCounterWorker);
+
+    if (bool value = GetUseCounter(static_cast<UseCounterWorker>(c))) {
+      Telemetry::Accumulate(id, 1);
+
+      if (kDebugUseCounters) {
+        const char* name = Telemetry::GetHistogramName(id);
+        printf("  %s  #%d: %d\n", name, id, value);
+      }
+    }
+  }
+}
+
 void WorkerPrivate::StopSyncLoop(nsIEventTarget* aSyncLoopTarget,
                                  bool aResult) {
   AssertIsOnWorkerThread();
@@ -3880,6 +4006,7 @@ void WorkerPrivate::PostMessageToParent(
     JSContext* aCx, JS::Handle<JS::Value> aMessage,
     const Sequence<JSObject*>& aTransferable, ErrorResult& aRv) {
   AssertIsOnWorkerThread();
+  MOZ_DIAGNOSTIC_ASSERT(IsDedicatedWorker());
 
   JS::Rooted<JS::Value> transferable(aCx, JS::UndefinedValue());
 
@@ -3905,7 +4032,11 @@ void WorkerPrivate::PostMessageToParent(
         MarkerTracingType::START);
   }
 
-  runnable->Write(aCx, aMessage, transferable, JS::CloneDataPolicy(), aRv);
+  JS::CloneDataPolicy clonePolicy;
+  if (IsSharedMemoryAllowed()) {
+    clonePolicy.allowSharedMemory();
+  }
+  runnable->Write(aCx, aMessage, transferable, clonePolicy, aRv);
 
   if (isTimelineRecording) {
     end = MakeUnique<WorkerTimelineMarker>(
@@ -4521,17 +4652,22 @@ void WorkerPrivate::UpdateContextOptionsInternal(
 void WorkerPrivate::UpdateLanguagesInternal(
     const nsTArray<nsString>& aLanguages) {
   WorkerGlobalScope* globalScope = GlobalScope();
-  if (globalScope) {
-    RefPtr<WorkerNavigator> nav = globalScope->GetExistingNavigator();
-    if (nav) {
-      nav->SetLanguages(aLanguages);
-    }
+  RefPtr<WorkerNavigator> nav = globalScope->GetExistingNavigator();
+  if (nav) {
+    nav->SetLanguages(aLanguages);
   }
 
   MOZ_ACCESS_THREAD_BOUND(mWorkerThreadAccessible, data);
   for (uint32_t index = 0; index < data->mChildWorkers.Length(); index++) {
     data->mChildWorkers[index]->UpdateLanguages(aLanguages);
   }
+
+  RefPtr<Event> event = NS_NewDOMEvent(globalScope, nullptr, nullptr);
+
+  event->InitEvent(NS_LITERAL_STRING("languagechange"), false, false);
+  event->SetTrusted(true);
+
+  globalScope->DispatchEvent(*event);
 }
 
 void WorkerPrivate::UpdateJSWorkerMemoryParameterInternal(JSContext* aCx,
@@ -4713,8 +4849,8 @@ void WorkerPrivate::EndCTypesCall() {
   SetGCTimerMode(PeriodicTimer);
 }
 
-bool WorkerPrivate::ConnectMessagePort(
-    JSContext* aCx, const MessagePortIdentifier& aIdentifier) {
+bool WorkerPrivate::ConnectMessagePort(JSContext* aCx,
+                                       UniqueMessagePortId& aIdentifier) {
   AssertIsOnWorkerThread();
 
   WorkerGlobalScope* globalScope = GlobalScope();
@@ -4722,7 +4858,7 @@ bool WorkerPrivate::ConnectMessagePort(
   JS::Rooted<JSObject*> jsGlobal(aCx, globalScope->GetWrapper());
   MOZ_ASSERT(jsGlobal);
 
-  // This MessagePortIdentifier is used to create a new port, still connected
+  // This UniqueMessagePortId is used to create a new port, still connected
   // with the other one, but in the worker thread.
   ErrorResult rv;
   RefPtr<MessagePort> port = MessagePort::Create(globalScope, aIdentifier, rv);
@@ -4746,7 +4882,7 @@ bool WorkerPrivate::ConnectMessagePort(
   }
 
   RefPtr<MessageEvent> event = MessageEvent::Constructor(
-      globalObject, NS_LITERAL_STRING("connect"), init, rv);
+      globalObject, NS_LITERAL_STRING("connect"), init);
 
   event->SetTrusted(true);
 
@@ -4924,6 +5060,28 @@ const nsAString& WorkerPrivate::Id() {
   MOZ_ASSERT(!mId.IsEmpty());
 
   return mId;
+}
+
+bool WorkerPrivate::IsSharedMemoryAllowed() const {
+  AssertIsOnWorkerThread();
+
+  if (StaticPrefs::
+          dom_postMessage_sharedArrayBuffer_bypassCOOP_COEP_insecure_enabled()) {
+    return true;
+  }
+
+  return CrossOriginIsolated();
+}
+
+bool WorkerPrivate::CrossOriginIsolated() const {
+  AssertIsOnWorkerThread();
+
+  if (!StaticPrefs::dom_postMessage_sharedArrayBuffer_withCOOP_COEP()) {
+    return false;
+  }
+
+  return mAgentClusterOpenerPolicy ==
+         nsILoadInfo::OPENER_POLICY_SAME_ORIGIN_EMBEDDER_POLICY_REQUIRE_CORP;
 }
 
 NS_IMPL_ADDREF(WorkerPrivate::EventTarget)

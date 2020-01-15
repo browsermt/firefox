@@ -15,7 +15,6 @@
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/Unused.h"
-#include "nsIXULRuntime.h"
 #include "mozJSComponentLoader.h"
 
 #include "mozilla/dom/BindingUtils.h"
@@ -118,13 +117,6 @@ bool XPCWrappedNativeScope::GetComponentsJSObject(JSContext* cx,
   return true;
 }
 
-void XPCWrappedNativeScope::ForcePrivilegedComponents() {
-  nsCOMPtr<nsIXPCComponents> c = do_QueryInterface(mComponents);
-  if (!c) {
-    mComponents = new nsXPCComponents(this);
-  }
-}
-
 static bool DefineSubcomponentProperty(JSContext* aCx, HandleObject aGlobal,
                                        nsISupports* aSubcomponent,
                                        const nsID* aIID,
@@ -149,14 +141,8 @@ bool XPCWrappedNativeScope::AttachComponentsObject(JSContext* aCx) {
 
   RootedObject global(aCx, CurrentGlobalOrNull(aCx));
 
-  // The global Components property is non-configurable if it's a full
-  // nsXPCComponents object. That way, if it's an nsXPCComponentsBase,
-  // enableUniversalXPConnect can upgrade it later.
-  unsigned attrs = JSPROP_READONLY | JSPROP_RESOLVING;
+  const unsigned attrs = JSPROP_READONLY | JSPROP_RESOLVING | JSPROP_PERMANENT;
   nsCOMPtr<nsIXPCComponents> c = do_QueryInterface(mComponents);
-  if (c) {
-    attrs |= JSPROP_PERMANENT;
-  }
 
   RootedId id(aCx,
               XPCJSContext::Get()->GetStringID(XPCJSContext::IDX_COMPONENTS));
@@ -188,19 +174,6 @@ bool XPCWrappedNativeScope::AttachComponentsObject(JSContext* aCx) {
   return true;
 }
 
-JSObject* XPCWrappedNativeScope::EnsureContentXBLScope(JSContext* cx) {
-  JS::RootedObject global(cx, CurrentGlobalOrNull(cx));
-  MOZ_ASSERT(js::IsObjectInContextCompartment(global, cx));
-  MOZ_ASSERT(!IsContentXBLScope());
-  MOZ_ASSERT(strcmp(js::GetObjectClass(global)->name,
-                    "nsXBLPrototypeScript compilation scope"));
-
-  // We can probably remove EnsureContentXBLScope and clean up all its callers,
-  // but a bunch (all?) of those callers will just go away when we remove XBL
-  // support, so it's simpler to just leave it here as a no-op.
-  return global;
-}
-
 bool XPCWrappedNativeScope::XBLScopeStateMatches(nsIPrincipal* aPrincipal) {
   return mAllowContentXBLScope ==
          !RemoteXULForbidsXBLScopeForPrincipal(aPrincipal);
@@ -214,25 +187,12 @@ bool XPCWrappedNativeScope::AllowContentXBLScope(Realm* aRealm) {
 }
 
 namespace xpc {
-JSObject* GetXBLScope(JSContext* cx, JSObject* contentScopeArg) {
-  JS::RootedObject contentScope(cx, contentScopeArg);
-  JSAutoRealm ar(cx, contentScope);
-  XPCWrappedNativeScope* nativeScope = ObjectScope(contentScope);
-
-  RootedObject scope(cx, nativeScope->EnsureContentXBLScope(cx));
-  NS_ENSURE_TRUE(scope, nullptr);  // See bug 858642.
-
-  scope = js::UncheckedUnwrap(scope);
-  JS::ExposeObjectToActiveJS(scope);
-  return scope;
-}
-
 JSObject* GetUAWidgetScope(JSContext* cx, JSObject* contentScopeArg) {
   JS::RootedObject contentScope(cx, contentScopeArg);
   JSAutoRealm ar(cx, contentScope);
   nsIPrincipal* principal = GetObjectPrincipal(contentScope);
 
-  if (nsContentUtils::IsSystemPrincipal(principal)) {
+  if (principal->IsSystemPrincipal()) {
     return JS::GetNonCCWObjectGlobal(contentScope);
   }
 
@@ -410,10 +370,7 @@ void XPCWrappedNativeScope::SystemIsBeingShutDown() {
     }
     for (auto i = cur->mWrappedNativeMap->Iter(); !i.Done(); i.Next()) {
       auto entry = static_cast<Native2WrappedNativeMap::Entry*>(i.Get());
-      XPCWrappedNative* wrapper = entry->value;
-      if (wrapper->IsValid()) {
-        wrapper->SystemIsBeingShutDown();
-      }
+      entry->value->SystemIsBeingShutDown();
       i.Remove();
     }
 

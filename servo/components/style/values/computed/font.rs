@@ -9,15 +9,18 @@ use crate::gecko_bindings::sugar::refptr::RefPtr;
 #[cfg(feature = "gecko")]
 use crate::gecko_bindings::{bindings, structs};
 use crate::values::animated::{ToAnimatedValue, ToAnimatedZero};
-use crate::values::computed::{Angle, Context, Integer, Length, NonNegativeLength, NonNegativePercentage};
+use crate::values::computed::{
+    Angle, Context, Integer, Length, NonNegativeLength, NonNegativePercentage,
+};
 use crate::values::computed::{Number, Percentage, ToComputedValue};
-use crate::values::generics::{font as generics, NonNegative};
 use crate::values::generics::font::{FeatureTagValue, FontSettings, VariationValue};
-use crate::values::specified::font::{self as specified, KeywordInfo, MAX_FONT_WEIGHT, MIN_FONT_WEIGHT};
+use crate::values::generics::{font as generics, NonNegative};
+use crate::values::specified::font::{
+    self as specified, KeywordInfo, MAX_FONT_WEIGHT, MIN_FONT_WEIGHT,
+};
 use crate::values::specified::length::{FontBaseSize, NoCalcLength};
 use crate::values::CSSFloat;
 use crate::Atom;
-use app_units::Au;
 use byteorder::{BigEndian, ByteOrder};
 use cssparser::{serialize_identifier, CssStringWriter, Parser};
 #[cfg(feature = "gecko")]
@@ -144,15 +147,16 @@ impl FontWeight {
 
 impl FontSize {
     /// The actual computed font size.
-    pub fn size(self) -> Au {
-        self.size.into()
+    #[inline]
+    pub fn size(&self) -> Length {
+        self.size.0
     }
 
     #[inline]
     /// Get default value of font size.
     pub fn medium() -> Self {
         Self {
-            size: Au::from_px(specified::FONT_MEDIUM_PX).into(),
+            size: NonNegative(Length::new(specified::FONT_MEDIUM_PX as CSSFloat)),
             keyword_info: Some(KeywordInfo::medium()),
         }
     }

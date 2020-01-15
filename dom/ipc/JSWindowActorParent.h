@@ -36,7 +36,7 @@ class JSWindowActorParent final : public JSWindowActor {
                        JS::Handle<JSObject*> aGivenProto) override;
 
   static already_AddRefed<JSWindowActorParent> Constructor(
-      GlobalObject& aGlobal, ErrorResult& aRv) {
+      GlobalObject& aGlobal) {
     return MakeAndAddRef<JSWindowActorParent>();
   }
 
@@ -51,6 +51,7 @@ class JSWindowActorParent final : public JSWindowActor {
  protected:
   void SendRawMessage(const JSWindowActorMessageMeta& aMeta,
                       ipc::StructuredCloneData&& aData,
+                      ipc::StructuredCloneData&& aStack,
                       ErrorResult& aRv) override;
 
  private:

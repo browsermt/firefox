@@ -27,8 +27,8 @@ function* do_run_test() {
   Services.prefs.setIntPref("network.cookie.cookieBehavior", 0);
 
   // Start the cookieservice, to force creation of a database.
-  // Get the sessionEnumerator to join the initialization in cookie thread
-  Services.cookiemgr.sessionEnumerator;
+  // Get the sessionCookies to join the initialization in cookie thread
+  Services.cookiemgr.sessionCookies;
 
   // Open a database connection now, after synchronous initialization has
   // completed. We may not be able to open one later once asynchronous writing
@@ -87,11 +87,11 @@ function* do_run_test() {
   // remove some of the cookies, in both reverse and forward order
   for (let i = 100; i-- > 0; ) {
     let host = i.toString() + ".com";
-    Services.cookiemgr.remove(host, "oh", "/", false, {});
+    Services.cookiemgr.remove(host, "oh", "/", {});
   }
   for (let i = CMAX - 100; i < CMAX; ++i) {
     let host = i.toString() + ".com";
-    Services.cookiemgr.remove(host, "oh", "/", false, {});
+    Services.cookiemgr.remove(host, "oh", "/", {});
   }
 
   // check the count

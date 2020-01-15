@@ -19,8 +19,10 @@ XPCOMUtils.defineLazyModuleGetters(this, {
   fxAccounts: "resource://gre/modules/FxAccounts.jsm",
   FXA_PWDMGR_HOST: "resource://gre/modules/FxAccountsCommon.js",
   FXA_PWDMGR_REALM: "resource://gre/modules/FxAccountsCommon.js",
+  AddonManager: "resource://gre/modules/AddonManager.jsm",
   LoginBreaches: "resource:///modules/LoginBreaches.jsm",
   LoginHelper: "resource://gre/modules/LoginHelper.jsm",
+  PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.jsm",
 });
 
 XPCOMUtils.defineLazyServiceGetter(
@@ -40,8 +42,8 @@ let idToTextMap = new Map([
 
 const MONITOR_API_ENDPOINT = "https://monitor.firefox.com/user/breach-stats";
 
-// TODO: there will be a monitor-specific scope for FxA access tokens, which we should be
-// using once it's implemented. See: https://github.com/mozilla/blurts-server/issues/1128
+const SECURE_PROXY_ADDON_ID = "secure-proxy@mozilla.com";
+
 const SCOPE_MONITOR = [
   "profile:uid",
   "https://identity.mozilla.com/apps/monitor",
@@ -70,6 +72,7 @@ var AboutProtectionsHandler = {
     "FetchContentBlockingEvents",
     "FetchMonitorData",
     "FetchUserLoginsData",
+    "GetShowProxyCard",
   ],
 
   init() {
@@ -170,12 +173,11 @@ var AboutProtectionsHandler = {
    *         The login data.
    */
   async getLoginData() {
-    let syncedDevices = [];
     let hasFxa = false;
 
     try {
-      if ((hasFxa = await fxAccounts.accountStatus())) {
-        syncedDevices = await fxAccounts.getDeviceList();
+      if ((hasFxa = !!(await fxAccounts.getSignedInUser()))) {
+        await fxAccounts.device.refreshDeviceList();
       }
     } catch (e) {
       Cu.reportError("There was an error fetching login data: ", e.message);
@@ -188,7 +190,9 @@ var AboutProtectionsHandler = {
     return {
       hasFxa,
       numLogins: userFacingLogins,
-      numSyncedDevices: syncedDevices.length,
+      numSyncedDevices: fxAccounts.device.recentDeviceList
+        ? fxAccounts.device.recentDeviceList.length
+        : 0,
     };
   },
 
@@ -210,7 +214,7 @@ var AboutProtectionsHandler = {
     let token = await this.getMonitorScopedOAuthToken();
 
     try {
-      if ((await fxAccounts.accountStatus()) && token) {
+      if (token) {
         monitorData = await this.fetchUserBreachStats(token);
 
         // Get the stats for number of potentially breached Lockwise passwords if no master
@@ -221,6 +225,10 @@ var AboutProtectionsHandler = {
             logins
           );
         }
+        // Send back user's email so the protections report can direct them to the proper
+        // OAuth flow on Monitor.
+        const { email } = await fxAccounts.getSignedInUser();
+        userEmail = email;
       } else {
         // If no account exists, then the user is not logged in with an fxAccount.
         monitorData = {
@@ -279,6 +287,27 @@ var AboutProtectionsHandler = {
   },
 
   /**
+   * The proxy card will only show if the user is in the US, has the browser language in "en-US",
+   * and does not yet have Proxy installed.
+   */
+  async shouldShowProxyCard() {
+    const region = Services.prefs.getCharPref("browser.search.region");
+    const languages = Services.prefs.getComplexValue(
+      "intl.accept_languages",
+      Ci.nsIPrefLocalizedString
+    );
+    const alreadyInstalled = await AddonManager.getAddonByID(
+      SECURE_PROXY_ADDON_ID
+    );
+
+    return (
+      region.toLowerCase() === "us" &&
+      !alreadyInstalled &&
+      languages.data.toLowerCase().includes("en-us")
+    );
+  },
+
+  /**
    * Sends a response from message target.
    *
    * @param {Object}  target
@@ -299,7 +328,9 @@ var AboutProtectionsHandler = {
     let win = aMessage.target.browser.ownerGlobal;
     switch (aMessage.name) {
       case "OpenAboutLogins":
-        win.openTrustedLinkIn("about:logins", "tab");
+        LoginHelper.openPasswordManager(win, {
+          entryPoint: "aboutprotections",
+        });
         break;
       case "OpenContentBlockingPreferences":
         win.openPreferences("privacy-trackingprotection", {
@@ -310,13 +341,38 @@ var AboutProtectionsHandler = {
         win.openTrustedLinkIn("about:preferences#sync", "tab");
         break;
       case "FetchContentBlockingEvents":
+        let dataToSend = {};
+        let weekdays = Services.intl.getDisplayNames(undefined, {
+          style: "short",
+          keys: [
+            "dates/gregorian/weekdays/sunday",
+            "dates/gregorian/weekdays/monday",
+            "dates/gregorian/weekdays/tuesday",
+            "dates/gregorian/weekdays/wednesday",
+            "dates/gregorian/weekdays/thursday",
+            "dates/gregorian/weekdays/friday",
+            "dates/gregorian/weekdays/saturday",
+            "dates/gregorian/weekdays/sunday",
+          ],
+        });
+        weekdays = Object.values(weekdays.values);
+        dataToSend.weekdays = weekdays;
+
+        if (PrivateBrowsingUtils.isWindowPrivate(win)) {
+          dataToSend.isPrivate = true;
+          this.sendMessage(
+            aMessage.target,
+            "SendContentBlockingRecords",
+            dataToSend
+          );
+          return;
+        }
         let sumEvents = await TrackingDBService.sumAllEvents();
         let earliestDate = await TrackingDBService.getEarliestRecordedDate();
         let eventsByDate = await TrackingDBService.getEventsByDateRange(
           aMessage.data.from,
           aMessage.data.to
         );
-        let dataToSend = {};
         let largest = 0;
 
         for (let result of eventsByDate) {
@@ -335,22 +391,6 @@ var AboutProtectionsHandler = {
         dataToSend.largest = largest;
         dataToSend.earliestDate = earliestDate;
         dataToSend.sumEvents = sumEvents;
-
-        let weekdays = Services.intl.getDisplayNames(undefined, {
-          style: "short",
-          keys: [
-            "dates/gregorian/weekdays/sunday",
-            "dates/gregorian/weekdays/monday",
-            "dates/gregorian/weekdays/tuesday",
-            "dates/gregorian/weekdays/wednesday",
-            "dates/gregorian/weekdays/thursday",
-            "dates/gregorian/weekdays/friday",
-            "dates/gregorian/weekdays/saturday",
-            "dates/gregorian/weekdays/sunday",
-          ],
-        });
-        weekdays = Object.values(weekdays.values);
-        dataToSend.weekdays = weekdays;
 
         this.sendMessage(
           aMessage.target,
@@ -375,6 +415,10 @@ var AboutProtectionsHandler = {
       case "ClearMonitorCache":
         this.monitorResponse = null;
         break;
+      case "GetShowProxyCard":
+        if (await this.shouldShowProxyCard()) {
+          this.sendMessage(aMessage.target, "SendShowProxyCard");
+        }
     }
   },
 };

@@ -22,7 +22,6 @@
 #include "mozilla/TextEventDispatcher.h"
 #include "mozilla/TextEvents.h"
 #include "mozilla/WindowsVersion.h"
-#include "nsIXULRuntime.h"
 #include "nsWindow.h"
 #include "nsPrintfCString.h"
 
@@ -905,6 +904,9 @@ class GetInputScopeString : public nsAutoCString {
           break;
         case IS_XML:
           AppendLiteral("IS_XML");
+          break;
+        case IS_PRIVATE:
+          AppendLiteral("IS_PRIVATE");
           break;
         default:
           AppendPrintf("Unknown Value(%d)", inputScope);
@@ -1913,7 +1915,8 @@ bool TSFTextStore::Init(nsWindowBase* aWidget, const InputContext& aContext) {
     return false;
   }
 
-  SetInputScope(aContext.mHTMLInputType, aContext.mHTMLInputInputmode);
+  SetInputScope(aContext.mHTMLInputType, aContext.mHTMLInputInputmode,
+                aContext.mInPrivateBrowsing);
 
   // Create document manager
   RefPtr<ITfThreadMgr> threadMgr = sThreadMgr;
@@ -3958,8 +3961,14 @@ bool TSFTextStore::ShouldSetInputScopeOfURLBarToDefault() {
 }
 
 void TSFTextStore::SetInputScope(const nsString& aHTMLInputType,
-                                 const nsString& aHTMLInputInputMode) {
+                                 const nsString& aHTMLInputInputMode,
+                                 bool aInPrivateBrowsing) {
   mInputScopes.Clear();
+
+  if (aInPrivateBrowsing) {
+    mInputScopes.AppendElement(IS_PRIVATE);
+  }
+
   if (aHTMLInputType.IsEmpty() || aHTMLInputType.EqualsLiteral("text")) {
     if (aHTMLInputInputMode.EqualsLiteral("url")) {
       mInputScopes.AppendElement(IS_URL);
@@ -4807,7 +4816,7 @@ bool TSFTextStore::MaybeHackNoErrorLayoutBugs(LONG& aACPStart, LONG& aACPEnd) {
         MOZ_ASSERT(TSFStaticSink::IsATOKReferringNativeCaretActive());
         return false;
       }
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case TextInputProcessorID::eATOK2016:
     case TextInputProcessorID::eATOKUnknown:
       if (!TSFPrefs::DoNotReturnNoLayoutErrorToATOKOfCompositionString()) {
@@ -6718,7 +6727,8 @@ void TSFTextStore::SetInputContext(nsWindowBase* aWidget,
     if (sEnabledTextStore) {
       RefPtr<TSFTextStore> textStore(sEnabledTextStore);
       textStore->SetInputScope(aContext.mHTMLInputType,
-                               aContext.mHTMLInputInputmode);
+                               aContext.mHTMLInputInputmode,
+                               aContext.mInPrivateBrowsing);
     }
     return;
   }

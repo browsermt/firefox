@@ -25,6 +25,7 @@
 #include "js/Utility.h"
 #include "js/Vector.h"
 #include "threading/ProtectedData.h"  // js::ZoneData
+#include "util/DiagnosticAssertions.h"
 #include "vm/Shape.h"
 #include "vm/TypeSet.h"
 
@@ -178,7 +179,6 @@ class PreliminaryObjectArray {
   PreliminaryObjectArray() = default;
 
   void registerNewObject(PlainObject* res);
-  void unregisterObject(PlainObject* obj);
 
   JSObject* get(size_t i) const {
     MOZ_ASSERT(i < COUNT);
@@ -186,7 +186,6 @@ class PreliminaryObjectArray {
   }
 
   bool full() const;
-  bool empty() const;
   void sweep();
 };
 

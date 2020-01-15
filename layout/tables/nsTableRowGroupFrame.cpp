@@ -304,19 +304,15 @@ void nsTableRowGroupFrame::PlaceChild(
 void nsTableRowGroupFrame::InitChildReflowInput(nsPresContext& aPresContext,
                                                 bool aBorderCollapse,
                                                 ReflowInput& aReflowInput) {
-  nsMargin collapseBorder;
-  nsMargin padding(0, 0, 0, 0);
-  nsMargin* pCollapseBorder = nullptr;
-  if (aBorderCollapse) {
-    nsTableRowFrame* rowFrame = do_QueryFrame(aReflowInput.mFrame);
-    if (rowFrame) {
+  nsMargin border;
+  if (nsTableRowFrame* rowFrame = do_QueryFrame(aReflowInput.mFrame)) {
+    if (aBorderCollapse) {
       WritingMode wm = GetWritingMode();
-      LogicalMargin border = rowFrame->GetBCBorderWidth(wm);
-      collapseBorder = border.GetPhysicalMargin(wm);
-      pCollapseBorder = &collapseBorder;
+      border = rowFrame->GetBCBorderWidth(wm).GetPhysicalMargin(wm);
     }
   }
-  aReflowInput.Init(&aPresContext, Nothing(), pCollapseBorder, &padding);
+  const nsMargin padding;
+  aReflowInput.Init(&aPresContext, Nothing(), &border, &padding);
 }
 
 static void CacheRowBSizesForPrinting(nsPresContext* aPresContext,
@@ -874,7 +870,7 @@ nscoord nsTableRowGroupFrame::CollapseRowGroupIfNecessary(nscoord aBTotalOffset,
   nsTableFrame* tableFrame = GetTableFrame();
   nsSize containerSize = tableFrame->GetSize();
   const nsStyleVisibility* groupVis = StyleVisibility();
-  bool collapseGroup = (NS_STYLE_VISIBILITY_COLLAPSE == groupVis->mVisible);
+  bool collapseGroup = StyleVisibility::Collapse == groupVis->mVisible;
   if (collapseGroup) {
     tableFrame->SetNeedToCollapse(true);
   }
@@ -1108,8 +1104,8 @@ nsresult nsTableRowGroupFrame::SplitRowGroup(nsPresContext* aPresContext,
   nsTableRowFrame* prevRowFrame = nullptr;
   aDesiredSize.Height() = 0;
 
-  nscoord availWidth = aReflowInput.AvailableWidth();
-  nscoord availHeight = aReflowInput.AvailableHeight();
+  const nscoord availWidth = aReflowInput.AvailableWidth();
+  const nscoord availHeight = aReflowInput.AvailableHeight();
 
   const bool borderCollapse = aTableFrame->IsBorderCollapse();
 
@@ -1241,22 +1237,15 @@ nsresult nsTableRowGroupFrame::SplitRowGroup(nsPresContext* aPresContext,
         NS_ASSERTION(!contRow,
                      "We should not have created a continuation if none of "
                      "this row fits");
-        if (!aRowForcedPageBreak && ShouldAvoidBreakInside(aReflowInput)) {
+        if (!prevRowFrame ||
+            (!aRowForcedPageBreak && ShouldAvoidBreakInside(aReflowInput))) {
           aStatus.SetInlineLineBreakBeforeAndReset();
           break;
         }
-        if (prevRowFrame) {
-          spanningRowBottom = prevRowFrame->GetNormalRect().YMost();
-          lastRowThisPage = prevRowFrame;
-          aStatus.Reset();
-          aStatus.SetIncomplete();
-        } else {
-          // We can't push children, so let our parent reflow us again with more
-          // space
-          aDesiredSize.Height() = rowRect.YMost();
-          aStatus.Reset();
-          break;
-        }
+        spanningRowBottom = prevRowFrame->GetNormalRect().YMost();
+        lastRowThisPage = prevRowFrame;
+        aStatus.Reset();
+        aStatus.SetIncomplete();
       }
       // reflow the cells with rowspan >1 that occur on the page
 
@@ -1332,8 +1321,17 @@ nsresult nsTableRowGroupFrame::SplitRowGroup(nsPresContext* aPresContext,
         }
       }
       if (aStatus.IsIncomplete() && !contRow) {
-        nsTableRowFrame* nextRow = lastRowThisPage->GetNextRow();
-        if (nextRow) {
+        if (nsTableRowFrame* nextRow = lastRowThisPage->GetNextRow()) {
+          PushChildren(nextRow, lastRowThisPage);
+        }
+      } else if (aStatus.IsComplete() && lastRowThisPage) {
+        // Our size from the unconstrained reflow exceeded the constrained
+        // available space but our size in the constrained reflow is Complete.
+        // This can happen when a non-zero block-end margin is suppressed in
+        // nsBlockFrame::ComputeFinalSize.
+        if (nsTableRowFrame* nextRow = lastRowThisPage->GetNextRow()) {
+          aStatus.Reset();
+          aStatus.SetIncomplete();
           PushChildren(nextRow, lastRowThisPage);
         }
       }
@@ -1381,7 +1379,7 @@ void nsTableRowGroupFrame::Reflow(nsPresContext* aPresContext,
   nsTableFrame* tableFrame = GetTableFrame();
   TableRowGroupReflowInput state(aReflowInput, tableFrame);
   const nsStyleVisibility* groupVis = StyleVisibility();
-  bool collapseGroup = (NS_STYLE_VISIBILITY_COLLAPSE == groupVis->mVisible);
+  bool collapseGroup = StyleVisibility::Collapse == groupVis->mVisible;
   if (collapseGroup) {
     tableFrame->SetNeedToCollapse(true);
   }

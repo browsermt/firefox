@@ -12,14 +12,11 @@
 
 #include "nsISupportsUtils.h"
 #include "nsIWeakReference.h"
-#include "nsIComponentManager.h"
-#include "nsIServiceManager.h"
 #include "nsWeakReference.h"
 #include "nsIInterfaceRequestor.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsComponentManagerUtils.h"
 #include "nsServiceManagerUtils.h"
-#include "nsAutoPtr.h"
 #include "mozilla/Attributes.h"
 
 #define NS_ITESTSERVICE_IID                          \

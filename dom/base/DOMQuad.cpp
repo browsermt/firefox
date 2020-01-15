@@ -9,6 +9,7 @@
 #include "mozilla/dom/DOMQuadBinding.h"
 #include "mozilla/dom/DOMPoint.h"
 #include "mozilla/dom/DOMRect.h"
+#include "mozilla/dom/DOMRectBinding.h"
 #include <algorithm>
 
 using namespace mozilla;
@@ -64,8 +65,7 @@ already_AddRefed<DOMQuad> DOMQuad::Constructor(const GlobalObject& aGlobal,
                                                const DOMPointInit& aP1,
                                                const DOMPointInit& aP2,
                                                const DOMPointInit& aP3,
-                                               const DOMPointInit& aP4,
-                                               ErrorResult& aRV) {
+                                               const DOMPointInit& aP4) {
   RefPtr<DOMQuad> obj = new DOMQuad(aGlobal.GetAsSupports());
   obj->mPoints[0] = DOMPoint::FromPoint(aGlobal, aP1);
   obj->mPoints[1] = DOMPoint::FromPoint(aGlobal, aP2);
@@ -75,8 +75,7 @@ already_AddRefed<DOMQuad> DOMQuad::Constructor(const GlobalObject& aGlobal,
 }
 
 already_AddRefed<DOMQuad> DOMQuad::Constructor(const GlobalObject& aGlobal,
-                                               const DOMRectReadOnly& aRect,
-                                               ErrorResult& aRV) {
+                                               const DOMRectReadOnly& aRect) {
   CSSPoint points[4];
   Float x = aRect.X(), y = aRect.Y(), w = aRect.Width(), h = aRect.Height();
   points[0] = CSSPoint(x, y);

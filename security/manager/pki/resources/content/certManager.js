@@ -332,8 +332,8 @@ function editCerts() {
   getSelectedCerts();
 
   for (let cert of selected_certs) {
-    window.openDialog(
-      "chrome://pippki/content/editcacert.xul",
+    window.docShell.rootTreeItem.domWindow.openDialog(
+      "chrome://pippki/content/editcacert.xhtml",
       "",
       "chrome,centerscreen,modal",
       cert
@@ -460,8 +460,8 @@ function deleteCerts() {
   let retVals = {
     deleteConfirmed: false,
   };
-  window.openDialog(
-    "chrome://pippki/content/deletecert.xul",
+  window.docShell.rootTreeItem.domWindow.openDialog(
+    "chrome://pippki/content/deletecert.xhtml",
     "",
     "chrome,centerscreen,modal",
     selTabID,
@@ -533,8 +533,8 @@ async function addEmailCert() {
 }
 
 function addException() {
-  window.openDialog(
-    "chrome://pippki/content/exceptionDialog.xul",
+  window.docShell.rootTreeItem.domWindow.openDialog(
+    "chrome://pippki/content/exceptionDialog.xhtml",
     "",
     "chrome,centerscreen,modal"
   );

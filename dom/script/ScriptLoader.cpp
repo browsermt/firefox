@@ -14,6 +14,7 @@
 #include "prsystem.h"
 #include "jsapi.h"
 #include "jsfriendapi.h"
+#include "js/Array.h"  // JS::GetArrayLength
 #include "js/CompilationAndEvaluation.h"
 #include "js/MemoryFunctions.h"
 #include "js/Modules.h"  // JS::FinishDynamicModuleImport, JS::{G,S}etModuleResolveHook, JS::Get{ModulePrivate,ModuleScript,RequestedModule{s,Specifier,SourcePos}}, JS::SetModule{DynamicImport,Metadata}Hook
@@ -39,21 +40,21 @@
 #include "nsGlobalWindowInner.h"
 #include "nsIScriptGlobalObject.h"
 #include "nsIScriptContext.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsIPrincipal.h"
 #include "nsJSPrincipals.h"
 #include "nsContentPolicyUtils.h"
+#include "nsIClassifiedChannel.h"
 #include "nsIHttpChannel.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsIClassOfService.h"
 #include "nsICacheInfoChannel.h"
 #include "nsITimedChannel.h"
 #include "nsIScriptElement.h"
+#include "nsISupportsPriority.h"
 #include "nsIDocShell.h"
 #include "nsContentUtils.h"
 #include "nsUnicharUtils.h"
 #include "nsAutoPtr.h"
-#include "nsIXPConnect.h"
 #include "nsError.h"
 #include "nsThreadUtils.h"
 #include "nsDocShellCID.h"
@@ -325,7 +326,7 @@ nsresult ScriptLoader::CheckContentPolicy(Document* aDocument,
     nsCOMPtr<Element> element = do_QueryInterface(aContext);
     if (element && element->IsHTMLElement()) {
       nsAutoString cspNonce;
-      element->GetAttribute(NS_LITERAL_STRING("nonce"), cspNonce);
+      element->GetAttr(nsGkAtoms::nonce, cspNonce);
       secCheckLoadInfo->SetCspNonce(cspNonce);
     }
   }
@@ -351,24 +352,15 @@ bool ScriptLoader::IsAboutPageLoadingChromeURI(ScriptLoadRequest* aRequest) {
   if (!aRequest->TriggeringPrincipal()->GetIsContentPrincipal()) {
     return false;
   }
-
-  // if the triggering uri is not of scheme about:, there is nothing to do
-  nsCOMPtr<nsIURI> triggeringURI;
-  nsresult rv =
-      aRequest->TriggeringPrincipal()->GetURI(getter_AddRefs(triggeringURI));
-  NS_ENSURE_SUCCESS(rv, false);
-
-  if (!triggeringURI->SchemeIs("about")) {
+  if (!aRequest->TriggeringPrincipal()->SchemeIs("about")) {
     return false;
   }
+  // if the triggering uri is not of scheme about:, there is nothing to do
 
   // if the about: page is linkable from content, there is nothing to do
-  nsCOMPtr<nsIAboutModule> aboutMod;
-  rv = NS_GetAboutModule(triggeringURI, getter_AddRefs(aboutMod));
-  NS_ENSURE_SUCCESS(rv, false);
-
   uint32_t aboutModuleFlags = 0;
-  rv = aboutMod->GetURIFlags(triggeringURI, &aboutModuleFlags);
+  nsresult rv =
+      aRequest->TriggeringPrincipal()->GetAboutModuleFlags(&aboutModuleFlags);
   NS_ENSURE_SUCCESS(rv, false);
 
   if (aboutModuleFlags & nsIAboutModule::MAKE_LINKABLE) {
@@ -679,7 +671,7 @@ static nsresult ResolveRequestedModules(ModuleLoadRequest* aRequest,
   MOZ_ASSERT(requestedModules);
 
   uint32_t length;
-  if (!JS_GetArrayLength(cx, requestedModules, &length)) {
+  if (!JS::GetArrayLength(cx, requestedModules, &length)) {
     return NS_ERROR_FAILURE;
   }
 
@@ -1332,7 +1324,7 @@ nsresult ScriptLoader::StartLoad(ScriptLoadRequest* aRequest) {
     nsCOMPtr<Element> element = do_QueryInterface(context);
     if (element && element->IsHTMLElement()) {
       nsAutoString cspNonce;
-      element->GetAttribute(NS_LITERAL_STRING("nonce"), cspNonce);
+      element->GetAttr(nsGkAtoms::nonce, cspNonce);
       nsCOMPtr<nsILoadInfo> loadInfo = channel->LoadInfo();
       loadInfo->SetCspNonce(cspNonce);
     }
@@ -1377,7 +1369,18 @@ nsresult ScriptLoader::StartLoad(ScriptLoadRequest* aRequest) {
 
   nsCOMPtr<nsIClassOfService> cos(do_QueryInterface(channel));
   if (cos) {
-    if (aRequest->mScriptFromHead && aRequest->IsBlockingScript()) {
+    if (aRequest->IsLinkPreloadScript()) {
+      // This is <link rel="preload" as="script"> initiated speculative load,
+      // put it to the group that is not blocked by leaders and doesn't block
+      // follower at the same time. Giving it a much higher priority will make
+      // this request be processed ahead of other Unblocked requests, but with
+      // the same weight as Leaders.  This will make us behave similar way for
+      // both http2 and http1.
+      cos->AddClassFlags(nsIClassOfService::Unblocked);
+      if (nsCOMPtr<nsISupportsPriority> sp = do_QueryInterface(channel)) {
+        sp->AdjustPriority(nsISupportsPriority::PRIORITY_HIGHEST);
+      }
+    } else if (aRequest->mScriptFromHead && aRequest->IsBlockingScript()) {
       // synchronous head scripts block loading of most other non js/css
       // content such as images, Leader implicitely disallows tailing
       cos->AddClassFlags(nsIClassOfService::Leader);
@@ -1627,7 +1630,7 @@ bool ScriptLoader::ProcessExternalScript(nsIScriptElement* aElement,
     // It's possible these attributes changed since we started the preload so
     // update them here.
     request->SetScriptMode(aElement->GetScriptDeferred(),
-                           aElement->GetScriptAsync());
+                           aElement->GetScriptAsync(), false);
 
     AccumulateCategorical(LABELS_DOM_SCRIPT_PRELOAD_RESULT::Used);
   } else {
@@ -1654,7 +1657,7 @@ bool ScriptLoader::ProcessExternalScript(nsIScriptElement* aElement,
                                 ourCORSMode, sriMetadata, referrerPolicy);
     request->mIsInline = false;
     request->SetScriptMode(aElement->GetScriptDeferred(),
-                           aElement->GetScriptAsync());
+                           aElement->GetScriptAsync(), false);
     // keep request->mScriptFromHead to false so we don't treat non preloaded
     // scripts as blockers for full page load. See bug 792438.
 
@@ -1803,7 +1806,7 @@ bool ScriptLoader::ProcessInlineScript(nsIScriptElement* aElement,
   // inline classic scripts ignore both these attributes.
   MOZ_ASSERT(!aElement->GetScriptDeferred());
   MOZ_ASSERT_IF(!request->IsModuleRequest(), !aElement->GetScriptAsync());
-  request->SetScriptMode(false, aElement->GetScriptAsync());
+  request->SetScriptMode(false, aElement->GetScriptAsync(), false);
 
   LOG(("ScriptLoadRequest (%p): Created request for inline script",
        request.get()));
@@ -2122,7 +2125,7 @@ nsresult ScriptLoader::AttemptAsyncScriptCompile(ScriptLoadRequest* aRequest,
     MOZ_ASSERT(aRequest->IsSource());
     if (!JS::DecodeBinASTOffThread(
             cx, options, aRequest->ScriptBinASTData().begin(),
-            aRequest->ScriptBinASTData().length(),
+            aRequest->ScriptBinASTData().length(), JS::BinASTFormat::Multipart,
             OffThreadScriptLoaderCallback, static_cast<void*>(runnable))) {
       return NS_ERROR_OUT_OF_MEMORY;
     }
@@ -2370,8 +2373,6 @@ void ScriptLoader::ProcessDynamicImport(ModuleLoadRequest* aRequest) {
   if (NS_FAILED(rv)) {
     FinishDynamicImport(aRequest, rv);
   }
-
-  return;
 }
 
 void ScriptLoader::FireScriptAvailable(nsresult aResult,
@@ -2572,6 +2573,29 @@ class MOZ_RAII AutoSetProcessingScriptTag {
   ~AutoSetProcessingScriptTag() { mContext->SetProcessingScriptTag(mOldTag); }
 };
 
+static void ReportStreamAndParseTelemetry(JS::Handle<JSScript*> aScript,
+                                          TimeDuration aStreamingTime) {
+  using namespace mozilla::Telemetry;
+  if (!aStreamingTime) {
+    Accumulate(DOM_SCRIPT_IS_STREAMED, false);
+    return;
+  }
+  Accumulate(DOM_SCRIPT_IS_STREAMED, true);
+  TimeDuration parseTime;
+  TimeDuration emitTime;
+  JS_ReportFirstCompileTime(aScript, parseTime, emitTime);
+
+  double st = aStreamingTime.ToMilliseconds();
+  double pt = parseTime.ToMilliseconds();
+  double et = emitTime.ToMilliseconds();
+  double total = st + pt + et;
+  double spt = st + std::max(pt - st, double(0)) + et;
+  Accumulate(DOM_SCRIPT_LOAD_STREAM_TIME_PERCENT, 100 * st / total);
+  Accumulate(DOM_SCRIPT_LOAD_PARSE_TIME_PERCENT, 100 * pt / total);
+  Accumulate(DOM_SCRIPT_LOAD_EMIT_TIME_PERCENT, 100 * et / total);
+  Accumulate(DOM_SCRIPT_LOAD_STREAMPARSE_ESTIMATE_PERCENT, 100 * spt / total);
+}
+
 static nsresult ExecuteCompiledScript(JSContext* aCx,
                                       ScriptLoadRequest* aRequest,
                                       nsJSUtils::ExecutionContext& aExec) {
@@ -2581,6 +2605,11 @@ static nsresult ExecuteCompiledScript(JSContext* aCx,
     // disabled for the global.
     return NS_OK;
   }
+
+  // Report telemetry about streaming, parsing and emitting code for the given
+  // script. These telemetry are used to analyze whether it would be beneficial
+  // to use a streaming parser.
+  ReportStreamAndParseTelemetry(script, aRequest->mStreamingTime);
 
   // Create a ClassicScript object and associate it with the JSScript.
   RefPtr<ClassicScript> classicScript =
@@ -3573,7 +3602,10 @@ nsresult ScriptLoader::PrepareLoadedRequest(ScriptLoadRequest* aRequest,
       aRequest->mSourceMapURL = NS_ConvertUTF8toUTF16(sourceMapURL);
     }
 
-    if (httpChannel->IsThirdPartyTrackingResource()) {
+    nsCOMPtr<nsIClassifiedChannel> classifiedChannel = do_QueryInterface(req);
+    MOZ_ASSERT(classifiedChannel);
+    if (classifiedChannel &&
+        classifiedChannel->IsThirdPartyTrackingResource()) {
       aRequest->SetIsTracking();
     }
   }
@@ -3701,6 +3733,7 @@ void ScriptLoader::PreloadURI(nsIURI* aURI, const nsAString& aCharset,
                               const nsAString& aCrossOrigin,
                               const nsAString& aIntegrity, bool aScriptFromHead,
                               bool aAsync, bool aDefer, bool aNoModule,
+                              bool aLinkPreload,
                               const ReferrerPolicy aReferrerPolicy) {
   NS_ENSURE_TRUE_VOID(mDocument);
   // Check to see if scripts has been turned off.
@@ -3739,7 +3772,7 @@ void ScriptLoader::PreloadURI(nsIURI* aURI, const nsAString& aCharset,
       Element::StringToCORSMode(aCrossOrigin), sriMetadata, aReferrerPolicy);
   request->mIsInline = false;
   request->mScriptFromHead = aScriptFromHead;
-  request->SetScriptMode(aDefer, aAsync);
+  request->SetScriptMode(aDefer, aAsync, aLinkPreload);
   request->SetIsPreloadRequest();
 
   if (LOG_ENABLED()) {

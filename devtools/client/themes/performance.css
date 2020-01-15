@@ -144,6 +144,10 @@
   line-height: 0;
 }
 
+#recordings-pane .devtools-toolbar .devtools-button {
+  height: calc(var(--theme-toolbar-height) - 2px);
+}
+
 .theme-sidebar {
   position: relative;
 }
@@ -447,14 +451,14 @@
  */
 
 #waterfall-tree {
-  /* DE-XUL: convert this to display: flex once index.xul is converted to HTML */
+  /* DE-XUL: convert this to display: flex once index.xhtml is converted to HTML */
   display: -moz-box;
   -moz-box-orient: vertical;
   -moz-box-flex: 1;
 }
 
 .waterfall-markers {
-  /* DE-XUL: convert this to display: flex once index.xul is converted to HTML */
+  /* DE-XUL: convert this to display: flex once index.xhtml is converted to HTML */
   display: -moz-box;
   -moz-box-orient: vertical;
   -moz-box-flex: 1;
@@ -500,7 +504,7 @@
  */
 
 .waterfall-markers .tree {
-  /* DE-XUL: convert this to display: flex once index.xul is converted to HTML */
+  /* DE-XUL: convert this to display: flex once index.xhtml is converted to HTML */
   display: -moz-box;
   -moz-box-orient: vertical;
   -moz-box-flex: 1;

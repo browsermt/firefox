@@ -10,10 +10,8 @@
 #include "prenv.h"
 #include "nsExceptionHandler.h"
 #include "nsHashKeys.h"
-#include "nsICrashReporter.h"
 #include "nsVersionComparator.h"
 #include "AndroidBridge.h"
-#include "nsIWindowWatcher.h"
 #include "nsServiceManagerUtils.h"
 
 #include "mozilla/Preferences.h"
@@ -206,6 +204,9 @@ void GfxInfo::EnsureInitialized() {
 
   AddCrashReportAnnotations();
 
+  mScreenInfo.mScreenDimensions =
+      mozilla::AndroidBridge::Bridge()->getScreenSize();
+
   mInitialized = true;
 }
 
@@ -223,14 +224,14 @@ GfxInfo::GetAdapterDescription2(nsAString& aAdapterDescription) {
 }
 
 NS_IMETHODIMP
-GfxInfo::GetAdapterRAM(nsAString& aAdapterRAM) {
+GfxInfo::GetAdapterRAM(uint32_t* aAdapterRAM) {
   EnsureInitialized();
-  aAdapterRAM.Truncate();
+  *aAdapterRAM = 0;
   return NS_OK;
 }
 
 NS_IMETHODIMP
-GfxInfo::GetAdapterRAM2(nsAString& aAdapterRAM) {
+GfxInfo::GetAdapterRAM2(uint32_t* aAdapterRAM) {
   EnsureInitialized();
   return NS_ERROR_FAILURE;
 }
@@ -329,6 +330,29 @@ NS_IMETHODIMP
 GfxInfo::GetIsGPU2Active(bool* aIsGPU2Active) {
   EnsureInitialized();
   return NS_ERROR_FAILURE;
+}
+
+NS_IMETHODIMP
+GfxInfo::GetDisplayInfo(nsTArray<nsString>& aDisplayInfo) {
+  EnsureInitialized();
+  nsString displayInfo;
+  displayInfo.AppendPrintf("%dx%d",
+                           (int32_t)mScreenInfo.mScreenDimensions.width,
+                           (int32_t)mScreenInfo.mScreenDimensions.height);
+  aDisplayInfo.AppendElement(displayInfo);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfo::GetDisplayWidth(nsTArray<uint32_t>& aDisplayWidth) {
+  aDisplayWidth.AppendElement((uint32_t)mScreenInfo.mScreenDimensions.width);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfo::GetDisplayHeight(nsTArray<uint32_t>& aDisplayHeight) {
+  aDisplayHeight.AppendElement((uint32_t)mScreenInfo.mScreenDimensions.height);
+  return NS_OK;
 }
 
 void GfxInfo::AddCrashReportAnnotations() {
@@ -499,19 +523,25 @@ nsresult GfxInfo::GetFeatureStatusImpl(
 
     if (aFeature == FEATURE_WEBRTC_HW_ACCELERATION_ENCODE) {
       if (mozilla::AndroidBridge::Bridge()) {
-        *aStatus = WebRtcHwEncodeSupported();
+        *aStatus = WebRtcHwVp8EncodeSupported();
         aFailureId = "FEATURE_FAILURE_WEBRTC_ENCODE";
         return NS_OK;
       }
     }
     if (aFeature == FEATURE_WEBRTC_HW_ACCELERATION_DECODE) {
       if (mozilla::AndroidBridge::Bridge()) {
-        *aStatus = WebRtcHwDecodeSupported();
+        *aStatus = WebRtcHwVp8DecodeSupported();
         aFailureId = "FEATURE_FAILURE_WEBRTC_DECODE";
         return NS_OK;
       }
     }
-
+    if (aFeature == FEATURE_WEBRTC_HW_ACCELERATION_H264) {
+      if (mozilla::AndroidBridge::Bridge()) {
+        *aStatus = WebRtcHwH264Supported();
+        aFailureId = "FEATURE_FAILURE_WEBRTC_H264";
+        return NS_OK;
+      }
+    }
     if (aFeature == FEATURE_VP8_HW_DECODE ||
         aFeature == FEATURE_VP9_HW_DECODE) {
       NS_LossyConvertUTF16toASCII model(mModel);
@@ -522,6 +552,30 @@ nsresult GfxInfo::GetFeatureStatusImpl(
       if (isBlocked) {
         *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
         aFailureId = "FEATURE_FAILURE_VPx";
+      } else {
+        *aStatus = nsIGfxInfo::FEATURE_STATUS_OK;
+      }
+      return NS_OK;
+    }
+
+    if (aFeature == FEATURE_WEBRENDER) {
+      bool isUnblocked = false;
+#ifndef NIGHTLY_BUILD
+      // Only allow pixels on non nightly builds
+      NS_LossyConvertUTF16toASCII model(mModel);
+      isUnblocked |= model.Find("Pixel 2", /*ignoreCase*/ true) >=
+                         0 ||  // Find substring to include all Pixel 2 models
+                     model.Find("Pixel 3", /*ignoreCase*/ true) >=
+                         0;  // Find substring to include all Pixel 3 models
+#else
+      // On nightly enable all Adreno GPUs
+      const nsCString& gpu = mGLStrings->Renderer();
+      isUnblocked |= gpu.Find("Adreno (TM) 5", /*ignoreCase*/ true) >= 0 ||
+                     gpu.Find("Adreno (TM) 6", /*ignoreCase*/ true) >= 0;
+#endif
+      if (!isUnblocked) {
+        *aStatus = nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
+        aFailureId = "FEATURE_FAILURE_WEBRENDER_BLOCKED_DEVICE";
       } else {
         *aStatus = nsIGfxInfo::FEATURE_STATUS_OK;
       }
@@ -573,10 +627,10 @@ static void SetCachedFeatureVal(int32_t aFeature, uint32_t aOsVer,
   Preferences::SetInt(FeatureCacheValuePrefName(aFeature).get(), aStatus);
 }
 
-int32_t GfxInfo::WebRtcHwEncodeSupported() {
+int32_t GfxInfo::WebRtcHwVp8EncodeSupported() {
   MOZ_ASSERT(mozilla::AndroidBridge::Bridge());
 
-  // The Android side of this caclulation is very slow, so we cache the result
+  // The Android side of this calculation is very slow, so we cache the result
   // in preferences, invalidating if the OS version changes.
 
   int32_t status = 0;
@@ -585,7 +639,7 @@ int32_t GfxInfo::WebRtcHwEncodeSupported() {
     return status;
   }
 
-  status = mozilla::AndroidBridge::Bridge()->GetHWEncoderCapability()
+  status = mozilla::AndroidBridge::Bridge()->HasHWVP8Encoder()
                ? nsIGfxInfo::FEATURE_STATUS_OK
                : nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
 
@@ -595,7 +649,7 @@ int32_t GfxInfo::WebRtcHwEncodeSupported() {
   return status;
 }
 
-int32_t GfxInfo::WebRtcHwDecodeSupported() {
+int32_t GfxInfo::WebRtcHwVp8DecodeSupported() {
   MOZ_ASSERT(mozilla::AndroidBridge::Bridge());
 
   // The Android side of this caclulation is very slow, so we cache the result
@@ -607,7 +661,7 @@ int32_t GfxInfo::WebRtcHwDecodeSupported() {
     return status;
   }
 
-  status = mozilla::AndroidBridge::Bridge()->GetHWDecoderCapability()
+  status = mozilla::AndroidBridge::Bridge()->HasHWVP8Decoder()
                ? nsIGfxInfo::FEATURE_STATUS_OK
                : nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
 
@@ -616,6 +670,29 @@ int32_t GfxInfo::WebRtcHwDecodeSupported() {
 
   return status;
 }
+
+int32_t GfxInfo::WebRtcHwH264Supported() {
+  MOZ_ASSERT(mozilla::AndroidBridge::Bridge());
+
+  // The Android side of this calculation is very slow, so we cache the result
+  // in preferences, invalidating if the OS version changes.
+
+  int32_t status = 0;
+  if (GetCachedFeatureVal(FEATURE_WEBRTC_HW_ACCELERATION_H264,
+                          mOSVersionInteger, status)) {
+    return status;
+  }
+
+  status = mozilla::AndroidBridge::Bridge()->HasHWH264()
+               ? nsIGfxInfo::FEATURE_STATUS_OK
+               : nsIGfxInfo::FEATURE_BLOCKED_DEVICE;
+
+  SetCachedFeatureVal(FEATURE_WEBRTC_HW_ACCELERATION_H264, mOSVersionInteger,
+                      status);
+
+  return status;
+}
+
 #ifdef DEBUG
 
 // Implement nsIGfxInfoDebug

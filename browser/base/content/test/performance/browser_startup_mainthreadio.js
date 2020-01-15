@@ -232,11 +232,6 @@ const startupPhases = {
       stat: 1,
     },
     {
-      path: "XCurProcD:blocklist.xml",
-      condition: WIN,
-      stat: 1,
-    },
-    {
       // bug 1534745
       path: "ProfD:cookies.sqlite-journal",
       condition: !LINUX,
@@ -261,7 +256,7 @@ const startupPhases = {
       // bug 975996
       path: "ProfD:permissions.sqlite",
       condition: WIN || MAC,
-      fsync: 7,
+      fsync: 8,
       read: 2,
       stat: 1,
       write: 10,
@@ -270,9 +265,9 @@ const startupPhases = {
       // bug 975996
       path: "ProfD:permissions.sqlite-journal",
       condition: WIN || MAC,
-      fsync: 7,
-      stat: 26,
-      write: 38,
+      fsync: 8,
+      stat: 28,
+      write: 40,
     },
     {
       // bug 975996
@@ -333,12 +328,6 @@ const startupPhases = {
   // This means that any I/O at this point delayed first paint.
   "before first paint": [
     {
-      // bug 1541226
-      path: "ProfD:",
-      condition: WIN,
-      stat: 1,
-    },
-    {
       // bug 1545119
       path: "OldUpdRootD:",
       condition: WIN,
@@ -351,63 +340,8 @@ const startupPhases = {
       stat: 1,
     },
     {
-      // bug 1545123
-      path: "ProfD:pluginreg.dat",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:pluginreg.dat.tmp",
-      stat: 1,
-      write: 64,
-      close: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:plugins",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "APlugns:",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
+      // bug 1586808
       path: "UserPlugins.parent:",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "UserPlugins:",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:plugins/nptest.dll",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:plugins/npsecondtest.dll",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:plugins/npthirdtest.dll",
-      condition: WIN,
-      stat: 1,
-    },
-    {
-      // bug 1545123
-      path: "ProfD:plugins/npswftest.dll",
       condition: WIN,
       stat: 1,
     },
@@ -423,8 +357,16 @@ const startupPhases = {
       condition: WIN,
       stat: 1,
     },
+    // Bug 1547693
     {
       path: "*WindowsApps/microsoft.windowscommunicationsapps*",
+      condition: WIN,
+      ignoreIfUnused: true,
+      stat: 3,
+    },
+    // Bug 1545167
+    {
+      path: "*Microsoft.MicrosoftEdge*",
       condition: WIN,
       ignoreIfUnused: true,
       stat: 3,
@@ -494,14 +436,14 @@ const startupPhases = {
       path: "ProfD:cert9.db-journal",
       condition: WIN,
       canonicalize: true,
-      stat: 2,
+      stat: 3,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
       path: "ProfD:cert9.db-wal",
       condition: WIN,
       canonicalize: true,
-      stat: 2,
+      stat: 3,
     },
     {
       // bug 1370516 - NSS should be initialized off main thread.
@@ -845,6 +787,7 @@ add_task(async function() {
       entry => !("condition" in entry) || entry.condition
     );
     startupPhases[phase].forEach(entry => {
+      entry.listedPath = entry.path;
       entry.path = expandWhitelistPath(entry.path, entry.canonicalize);
     });
   }
@@ -934,6 +877,7 @@ add_task(async function() {
       for (let op in entry) {
         if (
           [
+            "listedPath",
             "path",
             "condition",
             "canonicalize",
@@ -954,7 +898,10 @@ add_task(async function() {
         ok(entry[op] >= 0, `${message} ${phase}`);
       }
       if (!("_used" in entry) && !entry.ignoreIfUnused) {
-        ok(false, `unused whitelist entry ${phase}: ${entry.path}`);
+        ok(
+          false,
+          `unused whitelist entry ${phase}: ${entry.path} (${entry.listedPath})`
+        );
         shouldPass = false;
       }
     }

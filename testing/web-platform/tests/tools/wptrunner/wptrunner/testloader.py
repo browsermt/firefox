@@ -5,6 +5,8 @@ from abc import ABCMeta, abstractmethod
 from six.moves.queue import Empty
 from collections import defaultdict, deque
 from multiprocessing import Queue
+from six import ensure_binary, iteritems
+from six.moves import xrange
 
 from . import manifestinclude
 from . import manifestexpected
@@ -49,7 +51,7 @@ class HashChunker(TestChunker):
     def __call__(self, manifest):
         chunk_index = self.chunk_number - 1
         for test_type, test_path, tests in manifest:
-            h = int(hashlib.md5(test_path).hexdigest(), 16)
+            h = int(hashlib.md5(ensure_binary(test_path)).hexdigest(), 16)
             if h % self.total_chunks == chunk_index:
                 yield test_type, test_path, tests
 
@@ -63,12 +65,14 @@ class DirectoryHashChunker(TestChunker):
     def __call__(self, manifest):
         chunk_index = self.chunk_number - 1
         for test_type, test_path, tests in manifest:
-            h = int(hashlib.md5(os.path.dirname(test_path)).hexdigest(), 16)
+            h = int(hashlib.md5(ensure_binary(os.path.dirname(test_path))).hexdigest(), 16)
             if h % self.total_chunks == chunk_index:
                 yield test_type, test_path, tests
 
 
 class TestFilter(object):
+    """Callable that restricts the set of tests in a given manifest according
+    to initial criteria"""
     def __init__(self, test_manifests, include=None, exclude=None, manifest_path=None, explicit=False):
         if manifest_path is None or include or explicit:
             self.manifest = manifestinclude.IncludeManifest.create()
@@ -122,7 +126,7 @@ class ManifestLoader(object):
 
     def load(self):
         rv = {}
-        for url_base, paths in self.test_paths.iteritems():
+        for url_base, paths in iteritems(self.test_paths):
             manifest_file = self.load_manifest(url_base=url_base,
                                                **paths)
             path_data = {"url_base": url_base}
@@ -147,6 +151,7 @@ def iterfilter(filters, iter):
 
 
 class TestLoader(object):
+    """Loads tests according to a WPT manifest and any associated expectation files"""
     def __init__(self,
                  test_manifests,
                  test_types,
@@ -233,7 +238,7 @@ class TestLoader(object):
             manifest_items = self.chunker(manifest_items)
 
         for test_type, test_path, tests in manifest_items:
-            manifest_file = manifests_by_url_base[iter(tests).next().url_base]
+            manifest_file = manifests_by_url_base[next(iter(tests)).url_base]
             metadata_path = self.manifests[manifest_file]["metadata_path"]
 
             inherit_metadata, test_metadata = self.load_metadata(manifest_file, metadata_path, test_path)

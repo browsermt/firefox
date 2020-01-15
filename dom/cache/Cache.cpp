@@ -6,6 +6,7 @@
 
 #include "mozilla/dom/cache/Cache.h"
 
+#include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject
 #include "mozilla/dom/Headers.h"
 #include "mozilla/dom/InternalResponse.h"
 #include "mozilla/dom/Promise.h"
@@ -79,9 +80,8 @@ static bool IsValidPutResponseStatus(Response& aResponse,
                                      ErrorResult& aRv) {
   if ((aPolicy == PutStatusPolicy::RequireOK && !aResponse.Ok()) ||
       aResponse.Status() == 206) {
-    uint32_t t = static_cast<uint32_t>(aResponse.Type());
-    NS_ConvertASCIItoUTF16 type(ResponseTypeValues::strings[t].value,
-                                ResponseTypeValues::strings[t].length);
+    NS_ConvertASCIItoUTF16 type(
+        ResponseTypeValues::GetString(aResponse.Type()));
     nsAutoString status;
     status.AppendInt(aResponse.Status());
     nsAutoString url;
@@ -129,7 +129,7 @@ class Cache::FetchHandler final : public PromiseNativeHandler {
     responseList.SetCapacity(mRequestList.Length());
 
     bool isArray;
-    if (NS_WARN_IF(!JS_IsArrayObject(aCx, aValue, &isArray) || !isArray)) {
+    if (NS_WARN_IF(!JS::IsArrayObject(aCx, aValue, &isArray) || !isArray)) {
       Fail();
       return;
     }
@@ -137,7 +137,7 @@ class Cache::FetchHandler final : public PromiseNativeHandler {
     JS::Rooted<JSObject*> obj(aCx, &aValue.toObject());
 
     uint32_t length;
-    if (NS_WARN_IF(!JS_GetArrayLength(aCx, obj, &length))) {
+    if (NS_WARN_IF(!JS::GetArrayLength(aCx, obj, &length))) {
       Fail();
       return;
     }
@@ -214,11 +214,7 @@ class Cache::FetchHandler final : public PromiseNativeHandler {
  private:
   ~FetchHandler() {}
 
-  void Fail() {
-    ErrorResult rv;
-    rv.ThrowTypeError<MSG_FETCH_FAILED>();
-    mPromise->MaybeReject(rv);
-  }
+  void Fail() { mPromise->MaybeRejectWithTypeError<MSG_FETCH_FAILED>(); }
 
   RefPtr<CacheWorkerRef> mWorkerRef;
   RefPtr<Cache> mCache;
@@ -368,9 +364,8 @@ already_AddRefed<Promise> Cache::AddAll(
         return nullptr;
       }
     } else {
-      requestOrString.SetAsUSVString().Rebind(
-          aRequestList[i].GetAsUSVString().Data(),
-          aRequestList[i].GetAsUSVString().Length());
+      requestOrString.SetAsUSVString().ShareOrDependUpon(
+          aRequestList[i].GetAsUSVString());
     }
 
     RefPtr<Request> request =

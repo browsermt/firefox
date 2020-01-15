@@ -6,7 +6,7 @@ use api::{NormalBorder, PremultipliedColorF, Shadow};
 use api::units::*;
 use crate::border::create_border_segments;
 use crate::border::NormalBorderAu;
-use crate::display_list_flattener::{CreateShadow, IsVisible};
+use crate::scene_building::{CreateShadow, IsVisible};
 use crate::frame_builder::{FrameBuildingState};
 use crate::gpu_cache::{GpuCache, GpuDataRequest};
 use crate::intern;
@@ -249,7 +249,7 @@ impl ImageBorderData {
 
         common.opacity = if let Some(image_properties) = image_properties {
             PrimitiveOpacity {
-                is_opaque: image_properties.descriptor.is_opaque,
+                is_opaque: image_properties.descriptor.is_opaque(),
             }
         } else {
             PrimitiveOpacity::opaque()

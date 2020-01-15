@@ -13,12 +13,16 @@
 #include "gc/Zone.h"
 #include "jit/JitFrames.h"
 #include "proxy/Proxy.h"
+#include "util/DiagnosticAssertions.h"
 #include "vm/BigIntType.h"
+#include "vm/GlobalObject.h"
 #include "vm/HelperThreads.h"
 #include "vm/Interpreter.h"
 #include "vm/Iteration.h"
 #include "vm/Realm.h"
 #include "vm/SymbolType.h"
+
+#include "vm/Activation-inl.h"  // js::Activation::hasWasmExitFP
 
 namespace js {
 
@@ -30,7 +34,16 @@ class ContextChecks {
   JS::Zone* zone() const { return cx->zone(); }
 
  public:
-  explicit ContextChecks(JSContext* cx) : cx(cx) {}
+  explicit ContextChecks(JSContext* cx) : cx(cx) {
+#ifdef DEBUG
+    if (realm()) {
+      GlobalObject* global = realm()->unsafeUnbarrieredMaybeGlobal();
+      if (global) {
+        checkObject(global);
+      }
+    }
+#endif
+  }
 
   /*
    * Set a breakpoint here (break js::ContextChecks::fail) to debug
@@ -69,10 +82,14 @@ class ContextChecks {
 
   void check(JSObject* obj, int argIndex) {
     if (obj) {
-      JS::AssertObjectIsNotGray(obj);
-      MOZ_ASSERT(!js::gc::IsAboutToBeFinalizedUnbarriered(&obj));
+      checkObject(obj);
       check(obj->compartment(), argIndex);
     }
+  }
+
+  void checkObject(JSObject* obj) {
+    JS::AssertObjectIsNotGray(obj);
+    MOZ_ASSERT(!js::gc::IsAboutToBeFinalizedUnbarriered(&obj));
   }
 
   template <typename T>
@@ -304,7 +321,13 @@ inline void JSContext::minorGC(JS::GCReason reason) {
 }
 
 inline bool JSContext::runningWithTrustedPrincipals() {
-  return !realm() || realm()->principals() == runtime()->trustedPrincipals();
+  if (!realm()) {
+    return true;
+  }
+  if (!runtime()->trustedPrincipals()) {
+    return false;
+  }
+  return realm()->principals() == runtime()->trustedPrincipals();
 }
 
 inline void JSContext::enterRealm(JS::Realm* realm) {

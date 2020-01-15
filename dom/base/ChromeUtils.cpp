@@ -26,6 +26,8 @@
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/IdleDeadline.h"
 #include "mozilla/dom/JSWindowActorService.h"
+#include "mozilla/dom/MediaControlUtils.h"
+#include "mozilla/dom/MediaControlService.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/ReportingHeader.h"
 #include "mozilla/dom/UnionTypes.h"
@@ -412,8 +414,8 @@ void ChromeUtils::Import(const GlobalObject& aGlobal,
 
   NS_ConvertUTF16toUTF8 registryLocation(aResourceURI);
 
-  AUTO_PROFILER_LABEL_DYNAMIC_NSCSTRING("ChromeUtils::Import", OTHER,
-                                        registryLocation);
+  AUTO_PROFILER_LABEL_DYNAMIC_NSCSTRING_NONSENSITIVE("ChromeUtils::Import",
+                                                     OTHER, registryLocation);
 
   JSContext* cx = aGlobal.Context();
 
@@ -672,12 +674,11 @@ void ChromeUtils::ClearRecentJSDevError(GlobalObject&) {
     return WebIDLProcType::_webidl
 
 static WebIDLProcType ProcTypeToWebIDL(mozilla::ProcType aType) {
-  // |strings| contains an extra non-enum value, so subtract one.
   // Max is the value of the last enum, not the length, so add one.
-  static_assert(ArrayLength(WebIDLProcTypeValues::strings) - 1 ==
-                    static_cast<size_t>(ProcType::Max) + 1,
-                "In order for this static cast to be okay, "
-                "WebIDLProcType must match ProcType exactly");
+  static_assert(
+      WebIDLProcTypeValues::Count == static_cast<size_t>(ProcType::Max) + 1,
+      "In order for this static cast to be okay, "
+      "WebIDLProcType must match ProcType exactly");
 
   switch (aType) {
     PROCTYPE_TO_WEBIDL_CASE(Web, Web);
@@ -694,6 +695,9 @@ static WebIDLProcType ProcTypeToWebIDL(mozilla::ProcType aType) {
     PROCTYPE_TO_WEBIDL_CASE(RDD, Rdd);
     PROCTYPE_TO_WEBIDL_CASE(Socket, Socket);
     PROCTYPE_TO_WEBIDL_CASE(RemoteSandboxBroker, RemoteSandboxBroker);
+#ifdef MOZ_ENABLE_FORKSERVER
+    PROCTYPE_TO_WEBIDL_CASE(ForkServer, ForkServer);
+#endif
     PROCTYPE_TO_WEBIDL_CASE(Unknown, Unknown);
   }
 
@@ -763,7 +767,7 @@ already_AddRefed<Promise> ChromeUtils::RequestProcInfo(GlobalObject& aGlobal,
                       // Converting the Content Type into a ProcType
                       nsAutoString processType;
                       processType.Assign(contentParent->GetRemoteType());
-                      if (processType.EqualsLiteral(DEFAULT_REMOTE_TYPE)) {
+                      if (IsWebRemoteType(processType)) {
                         type = mozilla::ProcType::Web;
                       } else if (processType.EqualsLiteral(FILE_REMOTE_TYPE)) {
                         type = mozilla::ProcType::File;
@@ -804,6 +808,11 @@ already_AddRefed<Promise> ChromeUtils::RequestProcInfo(GlobalObject& aGlobal,
                     case GeckoProcessType::GeckoProcessType_RemoteSandboxBroker:
                       type = mozilla::ProcType::RemoteSandboxBroker;
                       break;
+#ifdef MOZ_ENABLE_FORKSERVER
+                    case GeckoProcessType::GeckoProcessType_ForkServer:
+                      type = mozilla::ProcType::ForkServer;
+                      break;
+#endif
                     default:
                       // Leave the default Unknown value in |type|.
                       break;
@@ -1164,6 +1173,16 @@ void ChromeUtils::PrivateNoteIntentionalCrash(const GlobalObject& aGlobal,
     return;
   }
   aError.Throw(NS_ERROR_NOT_IMPLEMENTED);
+}
+
+/* static */
+void ChromeUtils::GenerateMediaControlKeysTestEvent(
+    const GlobalObject& aGlobal, MediaControlKeysTestEvent aEvent) {
+  RefPtr<MediaControlService> service = MediaControlService::GetService();
+  if (service) {
+    service->GenerateMediaControlKeysTestEvent(
+        ConvertMediaControlKeysTestEventToMediaControlKeysEvent(aEvent));
+  }
 }
 
 }  // namespace dom

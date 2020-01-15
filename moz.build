@@ -28,6 +28,10 @@ with Files('CLOBBER'):
 with Files('*configure*'):
     BUG_COMPONENT = ('Firefox Build System', 'General')
 
+with Files("docs/**"):
+    BUG_COMPONENT = ("Firefox Build System", "Generated Documentation")
+    SCHEDULES.exclusive = ['docs']
+
 with Files('mach'):
     BUG_COMPONENT = ('Firefox Build System', 'Mach Core')
 
@@ -38,7 +42,7 @@ with Files('GNUmakefile'):
     BUG_COMPONENT = ('Firefox Build System', 'General')
 
 with Files('*gradle*'):
-    BUG_COMPONENT = ('Firefox for Android', 'Build Config & IDE Support')
+    BUG_COMPONENT = ('Firefox for Android', 'General')
     SCHEDULES.exclusive = ['android']
 
 with Files('*.json'):
@@ -72,33 +76,43 @@ with Files("**/*.md"):
 
 with Files("**/reftest.list"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['reftest']
 
 with Files("**/crashtest*.list"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['reftest']
 
 with Files("**/mochitest.ini"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['mochitest']
 
 with Files("**/browser.ini"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['mochitest']
 
 with Files("**/chrome.ini"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['mochitest']
 
 with Files("**/xpcshell.ini"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['xpcshell']
 
 with Files("**/reftest*/**"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['reftest']
 
 with Files("**/crashtest*/**"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['reftest']
 
 with Files("**/mochitest*/**"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['mochitest']
 
 with Files("**/xpcshell/**"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
+    SCHEDULES.exclusive = ['xpcshell']
 
 with Files("**/tests/**"):
     SCHEDULES.inclusive += ['test-verify', 'test-verify-gpu']
@@ -126,10 +140,12 @@ if CONFIG['ENABLE_CLANG_PLUGIN']:
 DIRS += [
     'config',
     'python',
-    'taskcluster',
     'testing/mozbase',
     'third_party/python',
 ]
+
+if not CONFIG['JS_STANDALONE']:
+    DIRS += ['taskcluster']
 
 if not CONFIG['JS_STANDALONE'] or not CONFIG['MOZ_BUILD_APP']:
     CONFIGURE_DEFINE_FILES += [
@@ -153,16 +169,6 @@ if not CONFIG['JS_STANDALONE'] or not CONFIG['MOZ_BUILD_APP']:
         'build',
     ]
 
-if CONFIG['PGO_PROFILE_PATH']:
-    profdata_gen = ('merged.profdata.stub', 'merged.profdata')
-    GENERATED_FILES += [
-        profdata_gen
-    ]
-    GENERATED_FILES[profdata_gen].script = 'build/merge_profdata.py'
-    GENERATED_FILES[profdata_gen].inputs = [
-        '/' + CONFIG['PGO_PROFILE_PATH'],
-    ]
-
 DIRS += [
     'mfbt',
 ]
@@ -176,5 +182,7 @@ else:
 OBJDIR_PP_FILES['.cargo'] += ['.cargo/config.in']
 
 DEFINES['top_srcdir'] = TOPSRCDIR
+
+SPHINX_TREES['contributing'] = 'docs/contributing'
 
 include('build/templates.mozbuild')

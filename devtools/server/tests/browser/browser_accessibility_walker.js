@@ -68,7 +68,7 @@ add_task(async function() {
       checkA11yFront(parent, {}, a11yDoc);
     },
     () =>
-      ContentTask.spawn(browser, null, () =>
+      SpecialPowers.spawn(browser, [], () =>
         content.document
           .getElementById("button")
           .setAttribute("aria-label", "Renamed")
@@ -84,7 +84,7 @@ add_task(async function() {
     "reorder",
     front => checkA11yFront(front, {}, a11yDoc),
     () =>
-      ContentTask.spawn(browser, null, () => {
+      SpecialPowers.spawn(browser, [], () => {
         const input = content.document.createElement("input");
         input.type = "text";
         input.title = "This is a tooltip";
@@ -95,18 +95,6 @@ add_task(async function() {
 
   docChildren = await a11yDoc.children();
   is(docChildren.length, 5, "Root doc should have correct number of children");
-
-  // Ensure destory event is emitted by walker when cached accessible's raw
-  // accessible gets destroyed.
-  await emitA11yEvent(
-    a11yWalker,
-    "accessible-destroy",
-    destroyedFront => checkA11yFront(destroyedFront, {}, accessibleFront),
-    () =>
-      ContentTask.spawn(browser, null, () =>
-        content.document.getElementById("button").remove()
-      )
-  );
 
   let shown = await a11yWalker.highlightAccessible(docChildren[0]);
   ok(shown, "AccessibleHighlighter highlighted the node");

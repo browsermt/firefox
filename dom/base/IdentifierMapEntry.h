@@ -17,6 +17,7 @@
 #include "mozilla/Move.h"
 #include "mozilla/dom/TreeOrderedArray.h"
 
+#include "nsAutoPtr.h"
 #include "nsCOMPtr.h"
 #include "nsAtom.h"
 #include "nsHashKeys.h"
@@ -24,6 +25,7 @@
 #include "nsTHashtable.h"
 
 class nsIContent;
+class nsINode;
 class nsContentList;
 class nsBaseContentList;
 

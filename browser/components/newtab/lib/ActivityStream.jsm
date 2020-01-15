@@ -310,14 +310,7 @@ const PREFS_CONFIG = new Map([
     "telemetry.structuredIngestion.endpoint",
     {
       title: "Structured Ingestion telemetry server endpoint",
-      value: "https://incoming.telemetry.mozilla.org/submit/activity-stream",
-    },
-  ],
-  [
-    "telemetry.ping.endpoint",
-    {
-      title: "Telemetry server endpoint",
-      value: "https://tiles.services.mozilla.com/v4/links/activity-stream",
+      value: "https://incoming.telemetry.mozilla.org/submit",
     },
   ],
   [
@@ -458,33 +451,31 @@ const PREFS_CONFIG = new Map([
         type: "remote-settings",
         bucket: "cfr-fxa",
         frequency: { custom: [{ period: "daily", cap: 1 }] },
+        updateCycleInMs: 3600000,
       }),
     },
   ],
   // See browser/app/profile/firefox.js for other ASR preferences. They must be defined there to enable roll-outs.
   [
+    "discoverystream.flight.blocks",
+    {
+      title: "Track flight blocks",
+      skipBroadcast: true,
+      value: "{}",
+    },
+  ],
+  [
     "discoverystream.config",
     {
       title: "Configuration for the new pocket new tab",
       getValue: ({ geo, locale }) => {
-        // PLEASE NOTE:
-        // hardcoded_layout in `lib/DiscoveryStreamFeed.jsm` only works for en-* and requires refactoring for non english locales
-        const dsEnablementMatrix = {
-          US: ["en-CA", "en-GB", "en-US"],
-          CA: ["en-CA", "en-GB", "en-US"],
-        };
-
-        // Verify that the current geo & locale combination is enabled
-        const isEnabled =
-          !!dsEnablementMatrix[geo] && dsEnablementMatrix[geo].includes(locale);
-
         return JSON.stringify({
           api_key_pref: "extensions.pocket.oAuthConsumerKey",
           collapsible: true,
-          enabled: isEnabled,
+          enabled: true,
           show_spocs: showSpocs({ geo }),
           hardcoded_layout: true,
-          personalized: false,
+          personalized: true,
           // This is currently an exmple layout used for dev purposes.
           layout_endpoint:
             "https://getpocket.cdn.mozilla.net/v3/newtab/layout?version=1&consumer_key=$apiKey&layout_variant=basic",
@@ -498,6 +489,14 @@ const PREFS_CONFIG = new Map([
       title:
         "Endpoint prefixes (comma-separated) that are allowed to be requested",
       value: "https://getpocket.cdn.mozilla.net/,https://spocs.getpocket.com/",
+    },
+  ],
+  [
+    "discoverystream.engagementLabelEnabled",
+    {
+      title:
+        "Allow the display of engagement labels for discovery stream components (eg: Trending, Popular, etc)",
+      value: false,
     },
   ],
   [
@@ -641,6 +640,25 @@ this.ActivityStream = class ActivityStream {
       this._updateDynamicPrefs();
       this._defaultPrefs.init();
 
+      // Look for outdated user pref values that might have been accidentally
+      // persisted when restoring the original pref value at the end of an
+      // experiment across versions with a different default value.
+      const DS_CONFIG =
+        "browser.newtabpage.activity-stream.discoverystream.config";
+      if (
+        Services.prefs.prefHasUserValue(DS_CONFIG) &&
+        [
+          // Firefox 66
+          `{"api_key_pref":"extensions.pocket.oAuthConsumerKey","enabled":false,"show_spocs":true,"layout_endpoint":"https://getpocket.com/v3/newtab/layout?version=1&consumer_key=$apiKey&layout_variant=basic"}`,
+          // Firefox 67
+          `{"api_key_pref":"extensions.pocket.oAuthConsumerKey","enabled":false,"show_spocs":true,"layout_endpoint":"https://getpocket.cdn.mozilla.net/v3/newtab/layout?version=1&consumer_key=$apiKey&layout_variant=basic"}`,
+          // Firefox 68
+          `{"api_key_pref":"extensions.pocket.oAuthConsumerKey","collapsible":true,"enabled":false,"show_spocs":true,"hardcoded_layout":true,"personalized":false,"layout_endpoint":"https://getpocket.cdn.mozilla.net/v3/newtab/layout?version=1&consumer_key=$apiKey&layout_variant=basic"}`,
+        ].includes(Services.prefs.getStringPref(DS_CONFIG))
+      ) {
+        Services.prefs.clearUserPref(DS_CONFIG);
+      }
+
       // Hook up the store and let all feeds and pages initialize
       this.store.init(
         this.feeds,
@@ -720,11 +738,25 @@ this.ActivityStream = class ActivityStream {
 
     // Update the pref config of those with dynamic values
     for (const pref of PREFS_CONFIG.keys()) {
+      // Only need to process dynamic prefs
       const prefConfig = PREFS_CONFIG.get(pref);
       if (!prefConfig.getValue) {
         continue;
       }
 
+      // Have the dynamic pref just reuse using existing default, e.g., those
+      // set via Autoconfig or policy
+      try {
+        const existingDefault = this._defaultPrefs.get(pref);
+        if (existingDefault !== undefined && prefConfig.value === undefined) {
+          prefConfig.getValue = () => existingDefault;
+        }
+      } catch (ex) {
+        // We get NS_ERROR_UNEXPECTED for prefs that have a user value (causing
+        // default branch to believe there's a type) but no actual default value
+      }
+
+      // Compute the dynamic value (potentially generic based on dummy geo)
       const newValue = prefConfig.getValue({
         geo: this.geo,
         locale: this.locale,

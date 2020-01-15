@@ -49,6 +49,8 @@ class nsCycleCollectionISupports {
 NS_DEFINE_STATIC_IID_ACCESSOR(nsCycleCollectionISupports,
                               NS_CYCLECOLLECTIONISUPPORTS_IID)
 
+class nsWrapperCache;
+
 namespace JS {
 template <class T>
 class Heap;
@@ -66,7 +68,7 @@ struct TraceCallbacks {
                      void* aClosure) const = 0;
   virtual void Trace(JS::Heap<JSObject*>* aPtr, const char* aName,
                      void* aClosure) const = 0;
-  virtual void Trace(JSObject** aPtr, const char* aName,
+  virtual void Trace(nsWrapperCache* aPtr, const char* aName,
                      void* aClosure) const = 0;
   virtual void Trace(JS::TenuredHeap<JSObject*>* aPtr, const char* aName,
                      void* aClosure) const = 0;
@@ -94,7 +96,7 @@ struct TraceCallbackFunc : public TraceCallbacks {
                      void* aClosure) const override;
   virtual void Trace(JS::Heap<JSObject*>* aPtr, const char* aName,
                      void* aClosure) const override;
-  virtual void Trace(JSObject** aPtr, const char* aName,
+  virtual void Trace(nsWrapperCache* aPtr, const char* aName,
                      void* aClosure) const override;
   virtual void Trace(JS::TenuredHeap<JSObject*>* aPtr, const char* aName,
                      void* aClosure) const override;
@@ -345,7 +347,7 @@ NS_DEFINE_STATIC_IID_ACCESSOR(nsXPCOMCycleCollectionParticipant,
 
 // The default implementation of this class template is empty, because it
 // should never be used: see the partial specializations below.
-template <typename T, bool IsXPCOM = mozilla::IsBaseOf<nsISupports, T>::value>
+template <typename T, bool IsXPCOM = std::is_base_of<nsISupports, T>::value>
 struct DowncastCCParticipantImpl {};
 
 // Specialization for XPCOM CC participants

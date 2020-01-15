@@ -15,12 +15,10 @@
 #include "mozilla/StaticPrefs_nglayout.h"
 #include "mozilla/TypedEnumBits.h"
 #include "nsBoundingMetrics.h"
-#include "nsChangeHint.h"
 #include "mozilla/layout/FrameChildList.h"
 #include "mozilla/layers/ScrollableLayerGuid.h"
 #include "nsThreadUtils.h"
 #include "nsCSSPropertyIDSet.h"
-#include "nsStyleConsts.h"
 #include "nsGkAtoms.h"
 #include "mozilla/gfx/2D.h"
 #include "Units.h"
@@ -47,6 +45,7 @@ class nsIScrollableFrame;
 class nsRegion;
 class nsDisplayListBuilder;
 enum class nsDisplayListBuilderMode : uint8_t;
+enum nsChangeHint : uint32_t;
 class nsDisplayItem;
 class nsFontMetrics;
 class nsFontFaceList;
@@ -103,25 +102,21 @@ class Layer;
 namespace mozilla {
 
 struct DisplayPortPropertyData {
-  DisplayPortPropertyData(const nsRect& aRect, uint32_t aPriority)
-      : mRect(aRect), mPriority(aPriority) {}
+  DisplayPortPropertyData(const nsRect& aRect, uint32_t aPriority,
+                          bool aPainted)
+      : mRect(aRect), mPriority(aPriority), mPainted(aPainted) {}
   nsRect mRect;
   uint32_t mPriority;
+  bool mPainted;
 };
 
 struct DisplayPortMarginsPropertyData {
   DisplayPortMarginsPropertyData(const ScreenMargin& aMargins,
-                                 uint32_t aPriority)
-      : mMargins(aMargins), mPriority(aPriority) {}
+                                 uint32_t aPriority, bool aPainted)
+      : mMargins(aMargins), mPriority(aPriority), mPainted(aPainted) {}
   ScreenMargin mMargins;
   uint32_t mPriority;
-};
-
-struct MotionPathData {
-  gfx::Point mTranslate;
-  float mRotate;
-  // The delta value between transform-origin and offset-anchor.
-  gfx::Point mShift;
+  bool mPainted;
 };
 
 }  // namespace mozilla
@@ -220,12 +215,25 @@ class nsLayoutUtils {
    * defaulting to the scrollport.
    */
   static bool GetDisplayPort(nsIContent* aContent, nsRect* aResult,
-                             RelativeTo aRelativeTo = RelativeTo::ScrollPort);
+                             RelativeTo aRelativeTo = RelativeTo::ScrollPort,
+                             bool* aOutPainted = nullptr);
 
   /**
    * Check whether the given element has a displayport.
    */
   static bool HasDisplayPort(nsIContent* aContent);
+
+  /**
+   * Check whether the given element has a displayport that has already
+   * been sent to the compositor via a layers or WR transaction.
+   */
+  static bool HasPaintedDisplayPort(nsIContent* aContent);
+
+  /**
+   * Mark the displayport of a given element as having been sent to
+   * the compositor via a layers or WR transaction.
+   */
+  static void MarkDisplayPortAsPainted(nsIContent* aContent);
 
   /**
    * Check whether the given frame has a displayport. It returns false
@@ -304,7 +312,8 @@ class nsLayoutUtils {
   /**
    * Get the critical display port for the given element.
    */
-  static bool GetCriticalDisplayPort(nsIContent* aContent, nsRect* aResult);
+  static bool GetCriticalDisplayPort(nsIContent* aContent, nsRect* aResult,
+                                     bool* aOutPainted = nullptr);
 
   /**
    * Check whether the given element has a critical display port.
@@ -316,7 +325,8 @@ class nsLayoutUtils {
    * GetCriticalDisplayPort. Otherwise, delegates to GetDisplayPort.
    */
   static bool GetHighResolutionDisplayPort(nsIContent* aContent,
-                                           nsRect* aResult);
+                                           nsRect* aResult,
+                                           bool* aOutPainted = nullptr);
 
   /**
    * Remove the displayport for the given element.
@@ -605,6 +615,12 @@ class nsLayoutUtils {
       Layer* aLayer, const nsIFrame* aViewportFrame, const nsRect& aAnchorRect,
       const nsIFrame* aFixedPosFrame, nsPresContext* aPresContext,
       const ContainerLayerParameters& aContainerParameters);
+
+  static mozilla::SideBits GetSideBitsAndAdjustAnchorForFixedPositionContent(
+      const nsIFrame* aViewportFrame, const nsIFrame* aFixedPosFrame,
+      mozilla::LayerPoint* aAnchor, const Rect* aAnchorRect);
+  static mozilla::SideBits GetSideBitsForFixedPositionContent(
+      const nsIFrame* aFixedPosFrame);
 
   /**
    * Get the scroll id for the root scrollframe of the presshell of the given
@@ -1406,10 +1422,16 @@ class nsLayoutUtils {
   static nsIFrame* GetDisplayListParent(nsIFrame* aFrame);
 
   /**
-   * Get a frame's next-in-flow, or, if it doesn't have one, its
+   * Get a frame's previous continuation, or, if it doesn't have one, its
+   * previous block-in-inline-split sibling.
+   */
+  static nsIFrame* GetPrevContinuationOrIBSplitSibling(const nsIFrame* aFrame);
+
+  /**
+   * Get a frame's next continuation, or, if it doesn't have one, its
    * block-in-inline-split sibling.
    */
-  static nsIFrame* GetNextContinuationOrIBSplitSibling(nsIFrame* aFrame);
+  static nsIFrame* GetNextContinuationOrIBSplitSibling(const nsIFrame* aFrame);
 
   /**
    * Get the first frame in the continuation-plus-ib-split-sibling chain
@@ -2332,6 +2354,17 @@ class nsLayoutUtils {
                                         mozilla::EffectSet* aEffectSet);
 
   /**
+   * A variant of the above HasAnimationOfPropertySet. This is especially for
+   * tranform-like properties with motion-path.
+   * For transform-like properties with motion-path, we need to check if
+   * offset-path has effect. If we don't have any animation on offset-path and
+   * offset-path is none, there is no effective motion-path, and so we don't
+   * care other offset-* properties. In this case, this function only checks the
+   * rest of transform-like properties (i.e. transform/translate/rotate/scale).
+   */
+  static bool HasAnimationOfTransformAndMotionPath(const nsIFrame* aFrame);
+
+  /**
    * Returns true if |aFrame| has an animation of |aProperty| which is
    * not overridden by !important rules.
    */
@@ -2978,10 +3011,29 @@ class nsLayoutUtils {
   static ComputedStyle* StyleForScrollbar(nsIFrame* aScrollbarPart);
 
   /**
-   * Generate the motion path transform result.
+   * Returns true if |aFrame| is scrolled out of view by a scrollable element in
+   * a cross-process ancestor document.
+   * Note this function only works for frames in out-of-process iframes.
    **/
-  static mozilla::Maybe<mozilla::MotionPathData> ResolveMotionPath(
-      const nsIFrame* aFrame);
+  static bool FrameIsScrolledOutOfViewInCrossProcess(const nsIFrame* aFrame);
+
+  /**
+   * Similar to above FrameIsScrolledOutViewInCrossProcess but returns true even
+   * if |aFrame| is not fully scrolled out of view and its visible area width or
+   * height is smaller than |aMargin|.
+   **/
+  static bool FrameIsMostlyScrolledOutOfViewInCrossProcess(
+      const nsIFrame* aFrame, nscoord aMargin);
+
+  /**
+   * Expand the height of |aSize| to the size of `vh` units.
+   *
+   * With dynamic toolbar(s) the height for `vh` units is greater than the
+   * ICB height, we need to expand it in some places.
+   **/
+  template <typename SizeType>
+  static SizeType ExpandHeightForViewportUnits(nsPresContext* aPresContext,
+                                               const SizeType& aSize);
 
  private:
   /**
@@ -3033,6 +3085,23 @@ template <typename PointType, typename RectType, typename CoordType>
   }
 
   return false;
+}
+
+template <typename SizeType>
+/* static */ SizeType nsLayoutUtils::ExpandHeightForViewportUnits(
+    nsPresContext* aPresContext, const SizeType& aSize) {
+  nsSize sizeForViewportUnits = aPresContext->GetSizeForViewportUnits();
+
+  // |aSize| might be the size expanded to the minimum-scale size whereas the
+  // size for viewport units is not scaled so that we need to expand the |aSize|
+  // height with the aspect ratio of the size for viewport units instead of just
+  // expanding to the size for viewport units.
+  float ratio = (float)sizeForViewportUnits.height / sizeForViewportUnits.width;
+
+  MOZ_ASSERT(aSize.height <=
+             NSCoordSaturatingNonnegativeMultiply(aSize.width, ratio));
+  return SizeType(aSize.width,
+                  NSCoordSaturatingNonnegativeMultiply(aSize.width, ratio));
 }
 
 namespace mozilla {
@@ -3120,7 +3189,7 @@ class nsSetAttrRunnable : public mozilla::Runnable {
 
   NS_DECL_NSIRUNNABLE
 
-  RefPtr<Element> mElement;
+  RefPtr<mozilla::dom::Element> mElement;
   RefPtr<nsAtom> mAttrName;
   nsAutoString mValue;
 };
@@ -3131,7 +3200,7 @@ class nsUnsetAttrRunnable : public mozilla::Runnable {
 
   NS_DECL_NSIRUNNABLE
 
-  RefPtr<Element> mElement;
+  RefPtr<mozilla::dom::Element> mElement;
   RefPtr<nsAtom> mAttrName;
 };
 

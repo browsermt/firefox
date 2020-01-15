@@ -2,13 +2,15 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this file,
  * You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#ifndef mozilla_dom_mediacontrolservice_h__
-#define mozilla_dom_mediacontrolservice_h__
+#ifndef DOM_MEDIA_MEDIACONTROL_MEDIACONTROLSERVICE_H_
+#define DOM_MEDIA_MEDIACONTROL_MEDIACONTROLSERVICE_H_
 
 #include "mozilla/AlreadyAddRefed.h"
 
 #include "AudioFocusManager.h"
 #include "MediaController.h"
+#include "MediaControlKeysManager.h"
+#include "MediaEventSource.h"
 #include "nsDataHashtable.h"
 #include "nsIObserver.h"
 #include "nsTArray.h"
@@ -34,27 +36,90 @@ class MediaControlService final : public nsIObserver {
 
   static RefPtr<MediaControlService> GetService();
 
-  RefPtr<MediaController> GetOrCreateControllerById(const uint64_t aId) const;
-  RefPtr<MediaController> GetControllerById(const uint64_t aId) const;
-  AudioFocusManager& GetAudioFocusManager() { return mAudioFocusManager; }
+  MediaController* GetOrCreateControllerById(uint64_t aId) const;
+  MediaController* GetControllerById(uint64_t aId) const;
 
-  void AddMediaController(const RefPtr<MediaController>& aController);
-  void RemoveMediaController(const RefPtr<MediaController>& aController);
+  AudioFocusManager& GetAudioFocusManager() { return mAudioFocusManager; }
+  MediaControlKeysEventSource* GetMediaControlKeysEventSource() {
+    return mMediaControlKeysManager;
+  }
+
+  void AddMediaController(MediaController* aController);
+  void RemoveMediaController(MediaController* aController);
   uint64_t GetControllersNum() const;
+
+  // The main controller is the controller which can receive the media control
+  // key events and would show its metadata to virtual controller interface.
+  MediaController* GetMainController() const;
+
+  // This event is used to generate a media event indicating media controller
+  // amount changed.
+  MediaEventSource<uint64_t>& MediaControllerAmountChangedEvent() {
+    return mMediaControllerAmountChangedEvent;
+  }
+
+  // This is used for testing only, to generate fake media control keys events.
+  void GenerateMediaControlKeysTestEvent(MediaControlKeysEvent aEvent);
 
  private:
   MediaControlService();
   ~MediaControlService();
 
+  /**
+   * When there are multiple media controllers existing, we would only choose
+   * one media controller as the main controller which can be controlled by
+   * media control keys event. The latest controller which is added into the
+   * service would become the main controller.
+   *
+   * However, as the main controller would be changed from time to time, so we
+   * create this wrapper to hold a real main controller if it exists. This class
+   * would also observe the playback state of controller in order to update the
+   * playback state of the event source.
+   *
+   * In addition, after finishing bug1592037, we would get the media metadata
+   * from the main controller, and update them to the event source in order to
+   * show those information on the virtual media controller interface on each
+   * platform.
+   */
+  class ControllerManager final {
+   public:
+    explicit ControllerManager(MediaControlService* aService);
+    ~ControllerManager() = default;
+
+    void AddController(MediaController* aController);
+    void RemoveController(MediaController* aController);
+
+    void Shutdown();
+
+    MediaController* GetMainController() const;
+    MediaController* GetControllerById(uint64_t aId) const;
+    uint64_t GetControllersNum() const;
+
+    // Callback function for monitoring controller play state changes.
+    void ControllerPlaybackStateChanged(PlaybackState aState);
+
+   private:
+    void UpdateMainController(MediaController* aController);
+
+    // This hash table holds strong references to all controllers.
+    nsDataHashtable<nsUint64HashKey, RefPtr<MediaController>> mControllers;
+    nsTArray<uint64_t> mControllerHistory;
+    RefPtr<MediaController> mMainController;
+
+    // These member are use to listen main controller's play state changes and
+    // update the playback state to the event source.
+    RefPtr<MediaControlKeysEventSource> mSource;
+    MediaEventListener mPlayStateChangedListener;
+  };
+
+  void Init();
   void Shutdown();
 
-  void PlayAllControllers() const;
-  void PauseAllControllers() const;
-  void StopAllControllers() const;
-  void ShutdownAllControllers() const;
-
-  nsDataHashtable<nsUint64HashKey, RefPtr<MediaController>> mControllers;
   AudioFocusManager mAudioFocusManager;
+  RefPtr<MediaControlKeysManager> mMediaControlKeysManager;
+  RefPtr<MediaControlKeysEventListener> mMediaKeysHandler;
+  MediaEventProducer<uint64_t> mMediaControllerAmountChangedEvent;
+  UniquePtr<ControllerManager> mControllerManager;
 };
 
 }  // namespace dom

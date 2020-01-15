@@ -148,6 +148,22 @@ uint8_t* JSJitFrameIter::prevFp() const {
 void JSJitFrameIter::operator++() {
   MOZ_ASSERT(!isEntry());
 
+  // Compute BaselineFrame size, the size stored in the descriptor excluding
+  // VMFunction arguments pushed for VM calls.
+  //
+  // In debug builds this is equivalent to BaselineFrame::debugFrameSize_. This
+  // is asserted at the end of this method.
+  if (current()->prevType() == FrameType::BaselineJS) {
+    uint32_t frameSize = prevFrameLocalSize();
+    if (isExitFrame() && exitFrame()->isWrapperExit()) {
+      const VMFunctionData* data = exitFrame()->footer()->function();
+      frameSize -= data->explicitStackSlots() * sizeof(void*);
+    }
+    baselineFrameSize_ = mozilla::Some(frameSize);
+  } else {
+    baselineFrameSize_ = mozilla::Nothing();
+  }
+
   frameSize_ = prevFrameLocalSize();
   cachedSafepointIndex_ = nullptr;
 
@@ -161,6 +177,9 @@ void JSJitFrameIter::operator++() {
   type_ = current()->prevType();
   resumePCinCurrentFrame_ = current()->returnAddress();
   current_ = prevFp();
+
+  MOZ_ASSERT_IF(isBaselineJS(),
+                baselineFrame()->debugFrameSize() == *baselineFrameSize_);
 }
 
 uintptr_t* JSJitFrameIter::spillBase() const {
@@ -302,12 +321,10 @@ void JSJitFrameIter::dumpBaseline() const {
 
   fprintf(stderr, "  actual args: %d\n", numActualArgs());
 
-  BaselineFrame* frame = baselineFrame();
-
-  for (unsigned i = 0; i < frame->numValueSlots(); i++) {
+  for (unsigned i = 0; i < baselineFrameNumValueSlots(); i++) {
     fprintf(stderr, "  slot %u: ", i);
 #if defined(DEBUG) || defined(JS_JITSPEW)
-    Value* v = frame->valueSlot(i);
+    Value* v = baselineFrame()->valueSlot(i);
     DumpValue(*v);
 #else
     fprintf(stderr, "?\n");
@@ -627,7 +644,7 @@ const char* JSJitProfilingFrameIterator::baselineInterpreterLabel() const {
 }
 
 void JSJitProfilingFrameIterator::baselineInterpreterScriptPC(
-    JSScript** script, jsbytecode** pc) const {
+    JSScript** script, jsbytecode** pc, uint64_t* realmID) const {
   MOZ_ASSERT(type_ == FrameType::BaselineJS);
   BaselineFrame* blFrame =
       (BaselineFrame*)(fp_ - BaselineFrame::FramePointerOffset -
@@ -641,6 +658,8 @@ void JSJitProfilingFrameIterator::baselineInterpreterScriptPC(
     if ((*script)->containsPC(interpPC)) {
       *pc = interpPC;
     }
+
+    *realmID = (*script)->realm()->creationOptions().profilerRealmID();
   }
 }
 

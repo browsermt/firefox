@@ -297,6 +297,11 @@ class nsCocoaUtils {
   static NSString* ToNSString(const nsAString& aString);
 
   /**
+   * Makes NSString instance for aCString.
+   */
+  static NSString* ToNSString(const nsACString& aCString);
+
+  /**
    * Returns NSRect for aGeckoRect.
    * Just copies values between the two types; it does no coordinate-system
    * conversion, so both rects must have the same coordinate origin/direction.
@@ -384,6 +389,18 @@ class nsCocoaUtils {
   static mozilla::TimeStamp GetEventTimeStamp(NSTimeInterval aEventTime);
 
   /**
+   * Check whether double clicking on the titlebar should cause the window to
+   * zoom (maximize).
+   */
+  static bool ShouldZoomOnTitlebarDoubleClick();
+
+  /**
+   * Check whether double clicking on the titlebar should cause the window to
+   * minimize.
+   */
+  static bool ShouldMinimizeOnTitlebarDoubleClick();
+
+  /**
    * Get the current video capture permission status.
    * Returns NS_ERROR_NOT_IMPLEMENTED on 10.13 and earlier macOS versions.
    */
@@ -394,6 +411,12 @@ class nsCocoaUtils {
    * Returns NS_ERROR_NOT_IMPLEMENTED on 10.13 and earlier macOS versions.
    */
   static nsresult GetAudioCapturePermissionState(uint16_t& aPermissionState);
+
+  /**
+   * Get the current screen capture permission status.
+   * Returns NS_ERROR_NOT_IMPLEMENTED on 10.14 and earlier macOS versions.
+   */
+  static nsresult GetScreenCapturePermissionState(uint16_t& aPermissionState);
 
   /**
    * Request video capture permission from the OS. Caller must be running
@@ -408,6 +431,11 @@ class nsCocoaUtils {
    * Returns NS_ERROR_NOT_IMPLEMENTED on 10.13 and earlier macOS versions.
    */
   static nsresult RequestAudioCapturePermission(RefPtr<Promise>& aPromise);
+
+  /**
+   * Request screen capture permission from the OS using an unreliable method.
+   */
+  static nsresult MaybeRequestScreenCapturePermission();
 
  private:
   /**

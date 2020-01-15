@@ -8,6 +8,7 @@
 
 #include "jit/CacheIRCompiler.h"
 #include "jit/Linker.h"
+#include "util/DiagnosticAssertions.h"
 
 #include "jit/MacroAssembler-inl.h"
 #include "vm/Interpreter-inl.h"
@@ -321,7 +322,7 @@ bool IonSetPropertyIC::update(JSContext* cx, HandleScript outerScript,
 
   jsbytecode* pc = ic->pc();
   if (ic->kind() == CacheKind::SetElem) {
-    if (*pc == JSOP_INITELEM_INC) {
+    if (*pc == JSOP_INITELEM_INC || *pc == JSOP_INITELEM_ARRAY) {
       if (!InitArrayElemOperation(cx, pc, obj, idVal.toInt32(), rhs)) {
         return false;
       }
@@ -609,6 +610,24 @@ bool IonBinaryArithIC::update(JSContext* cx, HandleScript outerScript,
     }
     case JSOP_BITAND: {
       if (!BitAnd(cx, &lhsCopy, &rhsCopy, ret)) {
+        return false;
+      }
+      break;
+    }
+    case JSOP_LSH: {
+      if (!BitLsh(cx, &lhsCopy, &rhsCopy, ret)) {
+        return false;
+      }
+      break;
+    }
+    case JSOP_RSH: {
+      if (!BitRsh(cx, &lhsCopy, &rhsCopy, ret)) {
+        return false;
+      }
+      break;
+    }
+    case JSOP_URSH: {
+      if (!UrshOperation(cx, &lhsCopy, &rhsCopy, ret)) {
         return false;
       }
       break;

@@ -12,12 +12,13 @@ namespace dom {
 class LSWriteOptimizerBase::WriteInfoComparator {
  public:
   bool Equals(const WriteInfo* a, const WriteInfo* b) const {
-    return a && b ? a->SerialNumber() == b->SerialNumber()
-                  : !a && !b ? true : false;
+    MOZ_ASSERT(a && b);
+    return a->SerialNumber() == b->SerialNumber();
   }
 
   bool LessThan(const WriteInfo* a, const WriteInfo* b) const {
-    return a && b ? a->SerialNumber() < b->SerialNumber() : b ? true : false;
+    MOZ_ASSERT(a && b);
+    return a->SerialNumber() < b->SerialNumber();
   }
 };
 
@@ -58,7 +59,7 @@ void LSWriteOptimizerBase::GetSortedWriteInfos(
   }
 
   for (auto iter = mWriteInfos.ConstIter(); !iter.Done(); iter.Next()) {
-    WriteInfo* writeInfo = iter.Data();
+    WriteInfo* writeInfo = iter.UserData();
 
     aWriteInfos.InsertElementSorted(writeInfo, WriteInfoComparator());
   }

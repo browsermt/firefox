@@ -26,8 +26,10 @@ const DEFAULT_OPTIONS = {
  */
 function templateHTML(options) {
   const debugString = options.debug ? "-dev" : "";
+  // This list must match any similar ones in AboutNewTabService.jsm.
   const scripts = [
     "chrome://browser/content/contentSearchUI.js",
+    "chrome://browser/content/contentSearchHandoffUI.js",
     "chrome://browser/content/contentTheme.js",
     `${options.baseUrl}vendor/react${debugString}.js`,
     `${options.baseUrl}vendor/react-dom${debugString}.js`,
@@ -55,6 +57,7 @@ function templateHTML(options) {
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; object-src 'none'; script-src resource: chrome:; connect-src https:; img-src https: data: blob:; style-src 'unsafe-inline';">
     <title data-l10n-id="newtab-page-title"></title>
     <link rel="icon" type="image/png" href="chrome://branding/content/icon32.png"/>
+    <link rel="localization" href="branding/brand.ftl" />
     <link rel="localization" href="browser/branding/brandings.ftl" />
     <link rel="localization" href="browser/newtab/newtab.ftl" />
     <link rel="stylesheet" href="chrome://browser/content/contentSearchUI.css" />

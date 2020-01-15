@@ -14,7 +14,6 @@
 #include "HandlerRelation.h"
 
 #include "Factory.h"
-#include "HandlerData.h"
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/a11y/HandlerDataCleanup.h"
 #include "mozilla/mscom/Registration.h"
@@ -914,8 +913,11 @@ AccessibleHandler::put_accName(VARIANT varChild, BSTR szName) {
 
 HRESULT
 AccessibleHandler::put_accValue(VARIANT varChild, BSTR szValue) {
-  // This matches AccessibleWrap
-  return E_NOTIMPL;
+  HRESULT hr = ResolveIA2();
+  if (FAILED(hr)) {
+    return hr;
+  }
+  return mIA2PassThru->put_accValue(varChild, szValue);
 }
 
 /*** IAccessible2 ***/

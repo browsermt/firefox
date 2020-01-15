@@ -3,14 +3,15 @@
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
 // ReactJS
-const PropTypes = require("prop-types");
+const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
+const {
+  button,
+  span,
+} = require("devtools/client/shared/vendor/react-dom-factories");
 
 // Reps
 const { getGripType, isGrip, cropString, wrapRender } = require("./rep-utils");
 const { MODE } = require("./constants");
-
-const dom = require("react-dom-factories");
-const { span } = dom;
 
 const IGNORED_SOURCE_URLS = ["debugger eval code"];
 
@@ -19,12 +20,17 @@ const IGNORED_SOURCE_URLS = ["debugger eval code"];
  */
 FunctionRep.propTypes = {
   object: PropTypes.object.isRequired,
-  parameterNames: PropTypes.array,
   onViewSourceInDebugger: PropTypes.func,
+  sourceMapService: PropTypes.object,
 };
 
 function FunctionRep(props) {
-  const { object: grip, onViewSourceInDebugger, recordTelemetryEvent } = props;
+  const {
+    object: grip,
+    onViewSourceInDebugger,
+    recordTelemetryEvent,
+    sourceMapService,
+  } = props;
 
   let jumpToDefinitionButton;
   if (
@@ -33,18 +39,23 @@ function FunctionRep(props) {
     grip.location.url &&
     !IGNORED_SOURCE_URLS.includes(grip.location.url)
   ) {
-    jumpToDefinitionButton = dom.button({
+    jumpToDefinitionButton = button({
       className: "jump-definition",
       draggable: false,
       title: "Jump to definition",
-      onClick: e => {
+      onClick: async e => {
         // Stop the event propagation so we don't trigger ObjectInspector
         // expand/collapse.
         e.stopPropagation();
         if (recordTelemetryEvent) {
           recordTelemetryEvent("jump_to_definition");
         }
-        onViewSourceInDebugger(grip.location);
+
+        const sourceLocation = await getSourceLocation(
+          grip.location,
+          sourceMapService
+        );
+        onViewSourceInDebugger(sourceLocation);
       },
     });
   }
@@ -60,7 +71,7 @@ function FunctionRep(props) {
     getTitle(grip, props),
     getFunctionName(grip, props),
     "(",
-    ...renderParams(props),
+    ...renderParams(grip),
     ")",
     jumpToDefinitionButton
   );
@@ -157,8 +168,8 @@ function cleanFunctionName(name) {
   return name;
 }
 
-function renderParams(props) {
-  const { parameterNames = [] } = props;
+function renderParams(grip) {
+  const { parameterNames = [] } = grip;
 
   return parameterNames
     .filter(param => param)
@@ -179,6 +190,24 @@ function supportsObject(grip, noGrip = false) {
   }
 
   return type == "Function";
+}
+
+async function getSourceLocation(location, sourceMapService) {
+  if (!sourceMapService) {
+    return location;
+  }
+  try {
+    const originalLocation = await sourceMapService.originalPositionFor(
+      location.url,
+      location.line,
+      location.column
+    );
+    if (originalLocation) {
+      const { sourceUrl, line, column } = originalLocation;
+      return { url: sourceUrl, line, column };
+    }
+  } catch (e) {}
+  return location;
 }
 
 // Exports from this module

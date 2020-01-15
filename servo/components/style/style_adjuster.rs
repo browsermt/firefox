@@ -12,7 +12,6 @@ use crate::properties::longhands::float::computed_value::T as Float;
 use crate::properties::longhands::overflow_x::computed_value::T as Overflow;
 use crate::properties::longhands::position::computed_value::T as Position;
 use crate::properties::{self, ComputedValues, StyleBuilder};
-use crate::values::specified::box_::DisplayInside;
 use app_units::Au;
 
 /// A struct that implements all the adjustment methods.
@@ -62,43 +61,38 @@ where
 {
     use crate::Atom;
 
-    // FIXME(emilio): This should be an actual static.
-    lazy_static! {
-        static ref SPECIAL_HTML_ELEMENTS: [Atom; 16] = [
-            atom!("br"),
-            atom!("wbr"),
-            atom!("meter"),
-            atom!("progress"),
-            atom!("canvas"),
-            atom!("embed"),
-            atom!("object"),
-            atom!("audio"),
-            atom!("iframe"),
-            atom!("img"),
-            atom!("video"),
-            atom!("frame"),
-            atom!("frameset"),
-            atom!("input"),
-            atom!("textarea"),
-            atom!("select"),
-        ];
-    }
+    const SPECIAL_HTML_ELEMENTS: [Atom; 16] = [
+        atom!("br"),
+        atom!("wbr"),
+        atom!("meter"),
+        atom!("progress"),
+        atom!("canvas"),
+        atom!("embed"),
+        atom!("object"),
+        atom!("audio"),
+        atom!("iframe"),
+        atom!("img"),
+        atom!("video"),
+        atom!("frame"),
+        atom!("frameset"),
+        atom!("input"),
+        atom!("textarea"),
+        atom!("select"),
+    ];
 
     // https://drafts.csswg.org/css-display/#unbox-svg
     //
     // There's a note about "Unknown elements", but there's not a good way to
     // know what that means, or to get that information from here, and no other
     // UA implements this either.
-    lazy_static! {
-        static ref SPECIAL_SVG_ELEMENTS: [Atom; 6] = [
-            atom!("svg"),
-            atom!("a"),
-            atom!("g"),
-            atom!("use"),
-            atom!("tspan"),
-            atom!("textPath"),
-        ];
-    }
+    const SPECIAL_SVG_ELEMENTS: [Atom; 6] = [
+        atom!("svg"),
+        atom!("a"),
+        atom!("g"),
+        atom!("use"),
+        atom!("tspan"),
+        atom!("textPath"),
+    ];
 
     // https://drafts.csswg.org/css-display/#unbox-html
     if element.is_html_element() {
@@ -144,7 +138,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     ///    computed to 'absolute' if the element is in a top layer.
     ///
     fn adjust_for_top_layer(&mut self) {
-        if !self.style.out_of_flow_positioned() && self.style.in_top_layer() {
+        if !self.style.is_absolutely_positioned() && self.style.in_top_layer() {
             self.style.mutate_box().set_position(Position::Absolute);
         }
     }
@@ -155,7 +149,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     ///    value of 'float' is 'none'.
     ///
     fn adjust_for_position(&mut self) {
-        if self.style.out_of_flow_positioned() && self.style.floated() {
+        if self.style.is_absolutely_positioned() && self.style.is_floating() {
             self.style.mutate_box().set_float(Float::None);
         }
     }
@@ -183,6 +177,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     where
         E: TElement,
     {
+        #[cfg(any(feature = "servo-layout-2013", feature = "gecko"))]
         use crate::computed_values::list_style_position::T as ListStylePosition;
 
         let mut blockify = false;
@@ -203,13 +198,14 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
 
         let is_item_or_root = blockify;
 
-        blockify_if!(self.style.floated());
-        blockify_if!(self.style.out_of_flow_positioned());
+        blockify_if!(self.style.is_floating());
+        blockify_if!(self.style.is_absolutely_positioned());
+        #[cfg(any(feature = "servo-layout-2013", feature = "gecko"))]
         blockify_if!(
             self.style.pseudo.map_or(false, |p| p.is_marker()) &&
                 self.style.get_parent_list().clone_list_style_position() ==
                     ListStylePosition::Outside &&
-                layout_parent_style.get_box().clone_display().inside() != DisplayInside::Inline
+                !layout_parent_style.get_box().clone_display().is_inline_flow()
         );
 
         if !blockify {
@@ -372,7 +368,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
         use crate::computed_values::align_self::T as AlignSelf;
 
         if self.style.get_position().clone_align_self() == AlignSelf::Auto &&
-            !self.style.out_of_flow_positioned()
+            !self.style.is_absolutely_positioned()
         {
             let self_align = match layout_parent_style.get_position().clone_align_items() {
                 AlignItems::Stretch => AlignSelf::Stretch,
@@ -551,9 +547,16 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
     }
 
     #[cfg(feature = "gecko")]
-    fn should_suppress_linebreak(&self, layout_parent_style: &ComputedValues) -> bool {
+    fn should_suppress_linebreak<E>(
+        &self,
+        layout_parent_style: &ComputedValues,
+        element: Option<E>,
+    ) -> bool
+    where
+        E: TElement,
+    {
         // Line break suppression should only be propagated to in-flow children.
-        if self.style.floated() || self.style.out_of_flow_positioned() {
+        if self.style.is_floating() || self.style.is_absolutely_positioned() {
             return false;
         }
         let parent_display = layout_parent_style.get_box().clone_display();
@@ -571,11 +574,18 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
             // Ruby base and text are always non-breakable.
             Display::RubyBase | Display::RubyText => true,
             // Ruby base container and text container are breakable.
+            // Non-HTML elements may not form ruby base / text container because
+            // they may not respect ruby-internal display values, so we can't
+            // make them escaped from line break suppression.
             // Note that, when certain HTML tags, e.g. form controls, have ruby
             // level container display type, they could also escape from the
             // line break suppression flag while they shouldn't. However, it is
-            // generally fine since they themselves are non-breakable.
-            Display::RubyBaseContainer | Display::RubyTextContainer => false,
+            // generally fine as far as they can't break the line inside them.
+            Display::RubyBaseContainer | Display::RubyTextContainer
+                if element.map_or(true, |e| e.is_html_element()) =>
+            {
+                false
+            },
             // Anything else is non-breakable if and only if its layout parent
             // has a ruby display type, because any of the ruby boxes can be
             // anonymous.
@@ -597,7 +607,7 @@ impl<'a, 'b: 'a> StyleAdjuster<'a, 'b> {
 
         let self_display = self.style.get_box().clone_display();
         // Check whether line break should be suppressed for this element.
-        if self.should_suppress_linebreak(layout_parent_style) {
+        if self.should_suppress_linebreak(layout_parent_style, element) {
             self.style
                 .add_flags(ComputedValueFlags::SHOULD_SUPPRESS_LINEBREAK);
             // Inlinify the display type if allowed.

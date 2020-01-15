@@ -16,6 +16,7 @@ const { XPCOMUtils } = ChromeUtils.import(
 XPCOMUtils.defineLazyModuleGetters(this, {
   AddonManager: "resource://gre/modules/AddonManager.jsm",
   AddonTestUtils: "resource://testing-common/AddonTestUtils.jsm",
+  AppConstants: "resource://gre/modules/AppConstants.jsm",
   ObjectUtils: "resource://gre/modules/ObjectUtils.jsm",
   OS: "resource://gre/modules/osfile.jsm",
   SearchEngine: "resource://gre/modules/SearchEngine.jsm",
@@ -108,6 +109,10 @@ class SearchConfigTest {
     // Enable separatePrivateDefault testing. We test with this on, as we have
     // separate tests for ensuring the normal = private when this is off.
     Services.prefs.setBoolPref(
+      SearchUtils.BROWSER_SEARCH_PREF + "separatePrivateDefault.ui.enabled",
+      true
+    );
+    Services.prefs.setBoolPref(
       SearchUtils.BROWSER_SEARCH_PREF + "separatePrivateDefault",
       true
     );
@@ -121,6 +126,13 @@ class SearchConfigTest {
       Services.search.isInitialized,
       "Should have correctly initialized the search service"
     );
+
+    registerCleanupFunction(() => {
+      this.assertOk(
+        !TEST_DEBUG,
+        "Should not have test debug turned on in production"
+      );
+    });
   }
 
   /**
@@ -152,70 +164,25 @@ class SearchConfigTest {
         }
       }
     }
-
-    this.assertOk(
-      !TEST_DEBUG,
-      "Should not have test debug turned on in production"
-    );
   }
 
   async _getEngines(useEngineSelector, region, locale) {
     if (useEngineSelector) {
       let engines = [];
       let configs = await engineSelector.fetchEngineConfiguration(
-        region,
-        locale
+        locale,
+        region || "default",
+        AppConstants.MOZ_APP_VERSION_DISPLAY.endsWith("esr")
+          ? "esr"
+          : AppConstants.MOZ_UPDATE_CHANNEL
       );
       for (let config of configs.engines) {
-        let engine = await this._getExtensionEngine(config);
+        let engine = await Services.search.makeEngineFromConfig(config);
         engines.push(engine);
       }
       return engines;
     }
     return Services.search.getVisibleEngines();
-  }
-
-  async _getExtensionEngine(config) {
-    let id = config.webExtensionId;
-    let policy = WebExtensionPolicy.getByID(id);
-    if (!policy) {
-      let idPrefix = id.split("@")[0];
-      let path = `resource://search-extensions/${idPrefix}/`;
-      await AddonManager.installBuiltinAddon(path);
-      policy = WebExtensionPolicy.getByID(id);
-    }
-    let params = {
-      code: config.searchUrlGetExtraCodes,
-    };
-
-    let locale = config.webExtensionLocale || "default";
-    // On startup the extension may have not finished parsing the
-    // manifest, wait for that here.
-    await policy.readyPromise;
-
-    let manifest = policy.extension.manifest;
-    if (locale != "default") {
-      manifest = await policy.extension.getLocalizedManifest(locale);
-    }
-
-    let engineParams = await Services.search.getEngineParams(
-      policy.extension,
-      manifest,
-      locale,
-      params
-    );
-
-    let engine = new SearchEngine({
-      name: engineParams.name,
-      readOnly: engineParams.isBuiltin,
-      sanitizeName: true,
-    });
-    engine._initFromMetadata(engineParams.name, engineParams);
-    engine._loadPath = "[other]addEngineWithDetails";
-    if (engineParams.extensionID) {
-      engine._loadPath += ":" + engineParams.extensionID;
-    }
-    return engine;
   }
 
   /**
@@ -227,7 +194,14 @@ class SearchConfigTest {
    *   The two-letter locale code.
    */
   async _reinit(region, locale) {
-    Services.prefs.setStringPref("browser.search.region", region.toUpperCase());
+    if (region) {
+      Services.prefs.setStringPref(
+        "browser.search.region",
+        region.toUpperCase()
+      );
+    } else {
+      Services.prefs.clearUserPref("browser.search.region");
+    }
     const reinitCompletePromise = SearchTestUtils.promiseSearchNotification(
       "reinit-complete"
     );
@@ -246,12 +220,19 @@ class SearchConfigTest {
    * @returns {Set} the list of regions for the tests to run with.
    */
   get _regions() {
+    // TODO: The legacy configuration worked with null as an unknown region,
+    // for the search engine selector, we expect "default" but apply the
+    // fallback in _getEngines. Once we remove the legacy configuration, we can
+    // simplify this.
     if (TEST_DEBUG) {
-      return new Set(["by", "cn", "kz", "us", "ru", "tr"]);
+      return new Set(["by", "cn", "kz", "us", "ru", "tr", null]);
     }
     const chunk =
       Services.prefs.getIntPref("browser.search.config.test.section", -1) - 1;
-    const regions = Services.intl.getAvailableLocaleDisplayNames("region");
+    const regions = [
+      ...Services.intl.getAvailableLocaleDisplayNames("region"),
+      null,
+    ];
     const chunkSize = Math.ceil(regions.length / 4);
     const startPoint = chunk * chunkSize;
     return regions.slice(startPoint, startPoint + chunkSize);
@@ -262,14 +243,23 @@ class SearchConfigTest {
    */
   async _getLocales() {
     if (TEST_DEBUG) {
-      return ["be", "en-US", "kk", "tr", "ru", "zh-CN", "ach"];
+      return ["be", "en-US", "kk", "tr", "ru", "zh-CN", "ach", "unknown"];
     }
     const data = await OS.File.read(do_get_file("all-locales").path, {
       encoding: "utf-8",
     });
     // "en-US" is not in all-locales as it is the default locale
     // add it manually to ensure it is tested.
-    return [...data.split("\n").filter(e => e != ""), "en-US"];
+    let locales = [...data.split("\n").filter(e => e != ""), "en-US"];
+    // BCP47 requires all variants are 5-8 characters long. Our
+    // build sytem uses the short `mac` variant, this is invalid, and inside
+    // the app we turn it into `ja-JP-macos`
+    locales = locales.map(l => (l == "ja-JP-mac" ? "ja-JP-macos" : l));
+    // The locale sometimes can be unknown or a strange name, e.g. if the updater
+    // is disabled, it may be "und", add one here so we know what happens if we
+    // hit it.
+    locales.push("unknown");
+    return locales;
   }
 
   /**
@@ -456,6 +446,11 @@ class SearchConfigTest {
         this._localeRegionInSection(value.excluded, region, locale);
       return included && !excluded;
     });
+    this.assertEqual(
+      details.length,
+      1,
+      `Should have just one details section for region: ${region} locale: ${locale}`
+    );
 
     const engine = this._findEngine(engines, this._config.identifier);
     this.assertOk(engine, "Should have an engine present");
@@ -483,6 +478,13 @@ class SearchConfigTest {
           engine._internalAliases,
           rule.aliases,
           "Should have the correct aliases for the engine"
+        );
+      }
+      if (rule.telemetryId) {
+        this.assertEqual(
+          engine._shortName,
+          rule.telemetryId,
+          `Should have the correct shortName ${location}.`
         );
       }
     }

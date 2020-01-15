@@ -60,6 +60,13 @@ enum Stat {
   // being tenured.
   STAT_NURSERY_STRING_REALMS_DISABLED,
 
+  // Number of BigInts tenured.
+  STAT_BIGINTS_TENURED,
+
+  // Number of realms that had nursery BigInts disabled due to large numbers
+  // being tenured.
+  STAT_NURSERY_BIGINT_REALMS_DISABLED,
+
   STAT_LIMIT
 };
 
@@ -137,7 +144,7 @@ struct Statistics {
 
   static MOZ_MUST_USE bool initialize();
 
-  explicit Statistics(JSRuntime* rt);
+  explicit Statistics(gc::GCRuntime* gc);
   ~Statistics();
 
   Statistics(const Statistics&) = delete;
@@ -299,7 +306,7 @@ struct Statistics {
   UniqueChars renderJsonSlice(size_t sliceNum) const;
 
   // Return JSON for the previous nursery collection.
-  UniqueChars renderNurseryJson(JSRuntime* rt) const;
+  UniqueChars renderNurseryJson() const;
 
 #ifdef DEBUG
   // Print a logging message.
@@ -309,7 +316,7 @@ struct Statistics {
 #endif
 
  private:
-  JSRuntime* runtime;
+  gc::GCRuntime* const gc;
 
   /* File used for MOZ_GCTIMER output. */
   FILE* gcTimerFile;
@@ -424,6 +431,8 @@ struct Statistics {
   bool enableProfiling_;
   ProfileDurations totalTimes_;
   uint64_t sliceCount_;
+
+  JSContext* context();
 
   Phase currentPhase() const;
   Phase lookupChildPhase(PhaseKind phaseKind) const;

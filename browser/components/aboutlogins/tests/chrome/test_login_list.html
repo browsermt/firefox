@@ -132,7 +132,24 @@ add_task(async function test_empty_list() {
 });
 
 add_task(async function test_keyboard_navigation() {
-  gLoginList.setLogins([TEST_LOGIN_1, TEST_LOGIN_2, TEST_LOGIN_3]);
+  let logins = [];
+  for (let i = 0; i < 20; i++) {
+    let suffix = i % 2 ? "odd" : "even";
+    logins.push(Object.assign({}, TEST_LOGIN_1, {
+      guid: "" + i,
+      username: `testuser-${suffix}-${i}`,
+      password: `testpass-${suffix}-${i}`,
+    }));
+  }
+  gLoginList.setLogins(logins);
+  let ol = gLoginList.shadowRoot.querySelector("ol");
+  is(ol.querySelectorAll(".login-list-item[data-guid]").length, 20, "there should be 20 logins in the list");
+  is(ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])").length, 20, "all logins should be visible");
+  window.dispatchEvent(new CustomEvent("AboutLoginsFilterLogins", {
+    bubbles: true,
+    detail: "odd",
+  }));
+  is(ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])").length, 10, "half of the logins in the list");
 
   while (document.activeElement != gLoginList &&
          gLoginList.shadowRoot.querySelector("#login-sort") != gLoginList.shadowRoot.activeElement) {
@@ -146,35 +163,49 @@ add_task(async function test_keyboard_navigation() {
   ok(loginSort == gLoginList.shadowRoot.activeElement, "#login-sort should be focused after tabbing to it");
 
   sendKey("TAB");
-  let ol = gLoginList.shadowRoot.querySelector("ol");
   await SimpleTest.promiseWaitForCondition(() => ol.matches(":focus"),
     "waiting for 'ol' to get focus");
   ok(ol.matches(":focus"), "'ol' should be focused after tabbing to it");
 
-  for (let [keyFwd, keyRev] of [["LEFT", "RIGHT"], ["DOWN", "UP"]]) {
-    sendKey(keyFwd);
-    await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[1].id,
-      `waiting for second item in list to get focused (${keyFwd})`);
-    ok(ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[1].classList.contains("keyboard-selected"), `second item should be marked as keyboard-selected (${keyFwd})`);
-
-    sendKey(keyRev);
-    await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[0].id,
-      `waiting for first item in list to get focused (${keyRev})`);
-    ok(ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[0].classList.contains("keyboard-selected"), `first item should be marked as keyboard-selected (${keyRev})`);
-  }
-
-  sendKey("DOWN");
-  await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[1].id,
-    `waiting for second item in list to get focused (DOWN)`);
-  ok(ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[1].classList.contains("keyboard-selected"), `second item should be marked as keyboard-selected (DOWN)`);
-  let selectedGuid = ol.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])")[1].dataset.guid;
-
+  let selectedGuid = ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[0].dataset.guid;
   let loginSelectedEvent = null;
   gLoginList.addEventListener("AboutLoginsLoginSelected", event => loginSelectedEvent = event, {once: true});
   sendKey("RETURN");
   is(ol.querySelector(".selected").dataset.guid, selectedGuid, "item should be marked as selected");
   ok(loginSelectedEvent, "AboutLoginsLoginSelected event should be dispatched on pressing Enter");
   is(loginSelectedEvent.detail.guid, selectedGuid, "event should have expected login attached");
+
+  for (let [keyFwd, keyRev] of [["LEFT", "RIGHT"], ["DOWN", "UP"]]) {
+    sendKey(keyFwd);
+    await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[1].id,
+      `waiting for second item in list to get focused (${keyFwd})`);
+    ok(ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[1].classList.contains("keyboard-selected"), `second item should be marked as keyboard-selected (${keyFwd})`);
+
+    sendKey(keyRev);
+    await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[0].id,
+      `waiting for first item in list to get focused (${keyRev})`);
+    ok(ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[0].classList.contains("keyboard-selected"), `first item should be marked as keyboard-selected (${keyRev})`);
+  }
+
+  sendKey("DOWN");
+  await SimpleTest.promiseWaitForCondition(() => ol.getAttribute("aria-activedescendant") == ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[1].id,
+    `waiting for second item in list to get focused (DOWN)`);
+  ok(ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[1].classList.contains("keyboard-selected"), `second item should be marked as keyboard-selected (DOWN)`);
+  selectedGuid = ol.querySelectorAll(".login-list-item[data-guid]:not([hidden])")[1].dataset.guid;
+
+  loginSelectedEvent = null;
+  gLoginList.addEventListener("AboutLoginsLoginSelected", event => loginSelectedEvent = event, {once: true});
+  sendKey("RETURN");
+  is(ol.querySelector(".selected").dataset.guid, selectedGuid, "item should be marked as selected");
+  ok(loginSelectedEvent, "AboutLoginsLoginSelected event should be dispatched on pressing Enter");
+  is(loginSelectedEvent.detail.guid, selectedGuid, "event should have expected login attached");
+
+  // Clean up state for next test
+  gLoginList.classList.remove("no-logins");
+  window.dispatchEvent(new CustomEvent("AboutLoginsFilterLogins", {
+    bubbles: true,
+    detail: "",
+  }));
 });
 
 add_task(async function test_empty_login_username_in_list() {
@@ -211,10 +242,14 @@ add_task(async function test_populated_list() {
 });
 
 add_task(async function test_breach_indicator() {
-  gLoginList.updateBreaches(TEST_BREACHES_MAP);
+  gLoginList.setBreaches(TEST_BREACHES_MAP);
   let loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])");
+  let warningIcon = loginListItems[0].querySelector(".list-item-warning-icon");
+  let hiddenWarningIcon = loginListItems[1].querySelector(".list-item-warning-icon");
   ok(loginListItems[0].classList.contains("breached"), "The first login should have the .breached class.");
+  ok(!isHidden(warningIcon), "The warning icon for a breached login should not be hidden.");
   ok(!loginListItems[1].classList.contains("breached"), "The second login should not have the .breached class");
+  ok(isHidden(hiddenWarningIcon), "The warning icon for a login without an associated breach should be hidden.");
 });
 
 add_task(async function test_filtered_list() {
@@ -247,6 +282,7 @@ add_task(async function test_filtered_list() {
     detail: "user",
   }));
   is(JSON.parse(countSpan.getAttribute("data-l10n-args")).count, 2, "Count should match result amount");
+  ok(!gLoginList._sortSelect.disabled, "The sort should be enabled when there are visible logins in the list");
   ok(isHidden(emptySearchText), "The empty search text should be hidden when there are results in the list");
   loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item[data-guid]");
   ok(!loginListItems[0].hidden, "user1 should be visible");
@@ -256,7 +292,9 @@ add_task(async function test_filtered_list() {
     detail: "foo",
   }));
   is(JSON.parse(countSpan.getAttribute("data-l10n-args")).count, 0, "Count should match result amount");
+  ok(gLoginList._sortSelect.disabled, "The sort should be disabled when there are no visible logins in the list");
   ok(!isHidden(emptySearchText), "The empty search text should be visible when there are no results in the list");
+  isnot(gLoginList.shadowRoot.querySelector(".container > ol").getAttribute("aria-activedescendant"), "new-login-list-item", "new-login-list-item shouldn't be the active descendant");
   loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item[data-guid]");
   ok(loginListItems[0].hidden, "user1 should be hidden");
   ok(loginListItems[1].hidden, "user2 should be hidden");
@@ -264,6 +302,7 @@ add_task(async function test_filtered_list() {
     bubbles: true,
     detail: "",
   }));
+  ok(!gLoginList._sortSelect.disabled, "The sort should be re-enabled when there are visible logins in the list");
   ok(isHidden(emptySearchText), "The empty search text should be hidden when there are results in the list");
   is(JSON.parse(countSpan.getAttribute("data-l10n-args")).count, 2, "Count should be reset to full list length");
   loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item[data-guid]");
@@ -285,6 +324,34 @@ add_task(async function test_filtered_list() {
   ok(loginListItems[1].hidden, "user2 should be hidden");
   ok(!loginListItems[2].hidden, "http_auth_user should be visible");
   is(loginListItems[2].querySelector(".username").textContent, "http_auth_user", "Verify the login with a matching httpRealm is visible");
+
+  gLoginList.setLogins([TEST_LOGIN_1, TEST_LOGIN_2]);
+  window.dispatchEvent(new CustomEvent("AboutLoginsFilterLogins", {
+    bubbles: true,
+    detail: "",
+  }));
+  await asyncElementRendered();
+});
+
+add_task(async function test_initial_empty_results() {
+  // Create a new instance to reset state
+  gLoginList.remove();
+  gLoginList = document.createElement("login-list");
+  document.getElementById("display").appendChild(gLoginList);
+  await asyncElementRendered();
+
+  let emptySearchText = gLoginList.shadowRoot.querySelector(".empty-search-message");
+  let countSpan = gLoginList.shadowRoot.querySelector(".count");
+
+  window.dispatchEvent(new CustomEvent("AboutLoginsFilterLogins", {
+    bubbles: true,
+    detail: "foo",
+  }));
+  is(JSON.parse(countSpan.getAttribute("data-l10n-args")).count, 0, "Count should match result amount");
+  ok(gLoginList._sortSelect.disabled, "The sort should be disabled when there are no visible logins in the list");
+  ok(!isHidden(emptySearchText), "The empty search text should be visible when there are no results in the list");
+  isnot(gLoginList.shadowRoot.querySelector(".container > ol").getAttribute("aria-activedescendant"), "new-login-list-item", "new-login-list-item shouldn't be the active descendant");
+  ok(gLoginList.shadowRoot.querySelector("#new-login-list-item").hidden, "new-login-list-item should be @hidden");
 
   gLoginList.setLogins([TEST_LOGIN_1, TEST_LOGIN_2]);
   window.dispatchEvent(new CustomEvent("AboutLoginsFilterLogins", {
@@ -421,7 +488,7 @@ add_task(async function test_sorted_list() {
   is(pwChanged2 > pwChanged3, true, "Logins sorted by timePasswordChanged. Second: " + pwChanged2 + "; Third: " + pwChanged3);
 
   // sort by breached when there are breached logins
-  gLoginList.updateBreaches(TEST_BREACHES_MAP);
+  gLoginList.setBreaches(TEST_BREACHES_MAP);
   loginSort.selectedIndex = 3;
   dispatchChangeEvent(loginSort);
   loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])");
@@ -429,7 +496,7 @@ add_task(async function test_sorted_list() {
   is(!loginListItems[1].classList.contains("breached"), true, "Non-breached login should be displayed below breached");
 
   // sort by name when there are no breached logins
-  gLoginList.updateBreaches(new Map());
+  gLoginList.setBreaches(new Map());
   loginSort.selectedIndex = 3;
   dispatchChangeEvent(loginSort);
   loginListItems = gLoginList.shadowRoot.querySelectorAll(".login-list-item:not(#new-login-list-item):not([hidden])");
@@ -447,6 +514,7 @@ add_task(async function test_login_list_item_removed_next_selected() {
     logins.push({
       guid: `${i}`,
       username: `jared${i}${group}${String.fromCharCode(97 + i)}@example.com`,
+      password: "omgsecret!!1",
       origin: "https://www.example.com",
     });
   }

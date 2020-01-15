@@ -92,22 +92,34 @@ void ServiceWorkerJob::Cancel() {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(!mCanceled);
   mCanceled = true;
+
+  if (GetState() != State::Started) {
+    MOZ_ASSERT(GetState() == State::Initial);
+
+    ErrorResult error(NS_ERROR_DOM_ABORT_ERR);
+    InvokeResultCallbacks(error);
+
+    // The callbacks might not consume the error, which is fine.
+    error.SuppressException();
+  }
 }
 
 ServiceWorkerJob::ServiceWorkerJob(Type aType, nsIPrincipal* aPrincipal,
                                    const nsACString& aScope,
-                                   const nsACString& aScriptSpec)
+                                   nsCString aScriptSpec)
     : mType(aType),
       mPrincipal(aPrincipal),
       mScope(aScope),
-      mScriptSpec(aScriptSpec),
+      mScriptSpec(std::move(aScriptSpec)),
       mState(State::Initial),
       mCanceled(false),
       mResultCallbacksInvoked(false) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(mPrincipal);
   MOZ_ASSERT(!mScope.IsEmpty());
-  // Some job types may have an empty script spec
+
+  // Empty script URL if and only if this is an unregister job.
+  MOZ_ASSERT((mType == Type::Unregister) == mScriptSpec.IsEmpty());
 }
 
 ServiceWorkerJob::~ServiceWorkerJob() {
@@ -120,7 +132,8 @@ ServiceWorkerJob::~ServiceWorkerJob() {
 
 void ServiceWorkerJob::InvokeResultCallbacks(ErrorResult& aRv) {
   MOZ_ASSERT(NS_IsMainThread());
-  MOZ_DIAGNOSTIC_ASSERT(mState == State::Started);
+  MOZ_DIAGNOSTIC_ASSERT(mState != State::Finished);
+  MOZ_DIAGNOSTIC_ASSERT_IF(mState == State::Initial, Canceled());
 
   MOZ_DIAGNOSTIC_ASSERT(!mResultCallbacksInvoked);
   mResultCallbacksInvoked = true;
@@ -134,7 +147,11 @@ void ServiceWorkerJob::InvokeResultCallbacks(ErrorResult& aRv) {
     ErrorResult rv;
     aRv.CloneTo(rv);
 
-    callback->JobFinished(this, rv);
+    if (GetState() == State::Started) {
+      callback->JobFinished(this, rv);
+    } else {
+      callback->JobDiscarded(rv);
+    }
 
     // The callback might not consume the error.
     rv.SuppressException();
@@ -168,8 +185,12 @@ void ServiceWorkerJob::Finish(ErrorResult& aRv) {
     NS_ConvertUTF8toUTF16 scriptSpec(mScriptSpec);
     NS_ConvertUTF8toUTF16 scope(mScope);
 
-    // Throw the type error with a generic error message.
-    aRv.ThrowTypeError<MSG_SW_INSTALL_ERROR>(scriptSpec, scope);
+    // Throw the type error with a generic error message.  We use a stack
+    // reference to bypass the normal static analysis for "return right after
+    // throwing", since it's not the right check here: this ErrorResult came in
+    // pre-thrown.
+    ErrorResult& rv = aRv;
+    rv.ThrowTypeError<MSG_SW_INSTALL_ERROR>(scriptSpec, scope);
   }
 
   // The final callback may drop the last ref to this object.

@@ -8,13 +8,20 @@
 
 const Services = require("Services");
 
-const { TAKE_SCREENSHOT_START, TAKE_SCREENSHOT_END } = require("./index");
+const {
+  TAKE_SCREENSHOT_START,
+  TAKE_SCREENSHOT_END,
+} = require("devtools/client/responsive/actions/index");
 
-const { getFormatStr } = require("../utils/l10n");
-const { getTopLevelWindow } = require("../utils/window");
-const e10s = require("../utils/e10s");
+const { getFormatStr } = require("devtools/client/responsive/utils/l10n");
+const {
+  getTopLevelWindow,
+} = require("devtools/client/responsive/utils/window");
+const e10s = require("devtools/client/responsive/utils/e10s");
 
 const CAMERA_AUDIO_URL = "resource://devtools/client/themes/audio/shutter.wav";
+
+const message = require("devtools/client/responsive/utils/message");
 
 const animationFrame = () =>
   new Promise(resolve => {
@@ -65,19 +72,26 @@ function simulateCameraEffects(node) {
 
 module.exports = {
   takeScreenshot() {
-    return async function(dispatch, getState) {
+    return async function(dispatch) {
       await dispatch({ type: TAKE_SCREENSHOT_START });
 
       // Waiting the next repaint, to ensure the react components
       // can be properly render after the action dispatched above
       await animationFrame();
 
-      const iframe = document.querySelector("iframe");
-      const data = await createScreenshotFor(iframe);
+      if (
+        !Services.prefs.getBoolPref("devtools.responsive.browserUI.enabled")
+      ) {
+        const iframe = document.querySelector("iframe");
+        const data = await createScreenshotFor(iframe);
 
-      simulateCameraEffects(iframe);
+        simulateCameraEffects(iframe);
 
-      saveToFile(data, getFileName());
+        saveToFile(data, getFileName());
+      } else {
+        window.postMessage({ type: "screenshot" }, "*");
+        await message.wait(window, "screenshot-captured");
+      }
 
       dispatch({ type: TAKE_SCREENSHOT_END });
     };

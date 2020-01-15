@@ -148,6 +148,8 @@ const kEventConstructors = {
                                                          return new GamepadButtonEvent(aName, aProps);
                                                        },
                                              },
+  GPUUncapturedErrorEvent:                   { create: null, //TODO: constructor test
+                                             },
   HashChangeEvent:                           { create (aName, aProps) {
                                                          return new HashChangeEvent(aName, aProps);
                                                        },
@@ -351,18 +353,8 @@ const kEventConstructors = {
                                                          return new StorageEvent(aName, aProps);
                                                        },
                                              },
-  StyleRuleChangeEvent:                      { create (aName, aProps) {
-                                                         return new StyleRuleChangeEvent(aName, aProps);
-                                                       },
-                                               chromeOnly: true,
-                                             },
   StyleSheetApplicableStateChangeEvent:      { create (aName, aProps) {
                                                          return new StyleSheetApplicableStateChangeEvent(aName, aProps);
-                                                       },
-                                               chromeOnly: true,
-                                             },
-  StyleSheetChangeEvent:                     { create (aName, aProps) {
-                                                         return new StyleSheetChangeEvent(aName, aProps);
                                                        },
                                                chromeOnly: true,
                                              },

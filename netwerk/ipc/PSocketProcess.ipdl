@@ -6,8 +6,12 @@
 include protocol PDNSRequest;
 include protocol PSocketProcessBridge;
 include protocol PProfiler;
-include protocol PProxyConfigLookup;
-include protocol PWebrtcProxyChannel;
+include protocol PWebrtcTCPSocket;
+include protocol PHttpTransaction;
+include protocol PHttpConnectionMgr;
+include protocol PFileDescriptorSet;
+include protocol PChildToParentStream;
+include protocol PParentToChildStream;
 
 include MemoryReportTypes;
 include PBrowserOrId;
@@ -29,8 +33,12 @@ namespace net {
 protocol PSocketProcess
 {
   manages PDNSRequest;
-  manages PProxyConfigLookup;
-  manages PWebrtcProxyChannel;
+  manages PWebrtcTCPSocket;
+  manages PFileDescriptorSet;
+  manages PHttpTransaction;
+  manages PHttpConnectionMgr;
+  manages PChildToParentStream;
+  manages PParentToChildStream;
 
 parent:
   async InitCrashReporter(Shmem shmem, NativeThreadId threadId);
@@ -44,10 +52,11 @@ parent:
   async RecordChildEvents(ChildEventData[] events);
   async RecordDiscardedData(DiscardedData data);
 
-  async PWebrtcProxyChannel(TabId tabId);
+  /* tabId is only required for web-proxy support, which isn't always needed */
+  async PWebrtcTCPSocket(TabId? tabId);
   async PDNSRequest(nsCString hostName, OriginAttributes originAttributes,
                     uint32_t flags);
-  async PProxyConfigLookup();
+  async PChildToParentStream();
 
 child:
   async PreferenceUpdate(Pref pref);
@@ -60,6 +69,12 @@ child:
   async InitProfiler(Endpoint<PProfilerChild> aEndpoint);
   // test-only
   async SocketProcessTelemetryPing();
+  async PHttpTransaction();
+  async PParentToChildStream();
+  async PHttpConnectionMgr();
+
+both:
+  async PFileDescriptorSet(FileDescriptor fd);
 };
 
 } // namespace net

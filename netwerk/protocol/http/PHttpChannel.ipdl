@@ -13,13 +13,14 @@ include PBackgroundSharedTypes;
 include NeckoChannelParams;
 include IPCServiceWorkerDescriptor;
 include IPCStream;
+include PURLClassifierInfo;
 
 include "mozilla/net/NeckoMessageUtils.h";
 
 using class nsHttpHeaderArray from "nsHttpHeaderArray.h";
 using mozilla::net::NetAddr from "mozilla/net/DNS.h";
-using struct mozilla::net::ResourceTimingStruct from "mozilla/net/TimingStruct.h";
 using refcounted class nsIReferrerInfo from "mozilla/dom/ReferrerInfoUtils.h";
+using nsIHttpChannel::FlashPluginState from "mozilla/net/NeckoMessageUtils.h";
 
 namespace mozilla {
 namespace net {
@@ -44,17 +45,12 @@ parent:
 
   // Reports approval/veto of redirect by child process redirect observers
   async Redirect2Verify(nsresult result, RequestHeaderTuples changedHeaders,
-                        ChildLoadInfoForwarderArgs loadInfoForwarder,
+                        uint32_t sourceRequestBlockingReason,
+                        ChildLoadInfoForwarderArgs targetLoadInfoForwarder,
                         uint32_t loadFlags, nsIReferrerInfo referrerInfo,
                         URIParams? apiRedirectTo,
                         CorsPreflightArgs? corsPreflightArgs,
                         bool chooseAppcache);
-
-  // Sent to the parent in order signal that the child side listeners have been
-  // set up and the parent side of the channel can be opened.
-  // The passed loadInfo needs to be set on the channel - since the channel
-  // moved to a new process it now has different properties.
-  async CrossProcessRedirectDone(nsresult result, LoadInfoArgs? loadInfo);
 
   // For document loads we keep this protocol open after child's
   // OnStopRequest, and send this msg (instead of __delete__) to allow
@@ -131,8 +127,29 @@ child:
                        bool                deliveringAltData,
                        bool                applyConversion,
                        bool                isResolvedByTRR,
-                       ResourceTimingStruct timing,
-                       bool                allRedirectsSameOrigin);
+                       ResourceTimingStructArgs timing,
+                       bool                allRedirectsSameOrigin,
+                       uint32_t?           multiPartId,
+                       bool                isLastPartOfMultiPart);
+
+  // Combines a single OnDataAvailable and its associated OnProgress &
+  // OnStatus calls into one IPDL message
+  // This is a duplicate of the message on PHttpBackgroundChannel, and gets
+  // used for multi-pary streams to make synchronization when we get OnStartRequest 
+  // multiple times easier.
+  async OnTransportAndData(nsresult  channelStatus,
+                           nsresult  transportStatus,
+                           uint64_t  offset,
+                           uint32_t  count,
+                           nsCString data);
+
+  // This is a duplicate of the message on PHttpBackgroundChannel, and gets
+  // used for multi-pary streams to make synchronization when we get OnStartRequest 
+  // multiple times easier.
+  async OnStopRequest(nsresult channelStatus,
+                      ResourceTimingStructArgs timing,
+                      TimeStamp lastActiveTabOptimization,
+                      nsHttpHeaderArray responseTrailers);
 
   // Used to cancel child channel if we hit errors during creating and
   // AsyncOpen of nsHttpChannel on the parent.
@@ -149,7 +166,7 @@ child:
                        nsCString          securityInfoSerialization,
                        uint64_t           channelId,
                        NetAddr            oldPeerAddr,
-                       ResourceTimingStruct timing);
+                       ResourceTimingStructArgs timing);
 
   // Called if redirect successful so that child can complete setup.
   async Redirect3Complete();
@@ -192,6 +209,39 @@ child:
   async OriginalCacheInputStreamAvailable(IPCStream? stream);
 
   async AltDataCacheInputStreamAvailable(IPCStream? stream);
+
+  async OverrideReferrerInfoDuringBeginConnect(nsIReferrerInfo referrerInfo);
+
+  async OnProgress(int64_t progress, int64_t progressMax);
+
+  async OnStatus(nsresult status);
+
+  // Tell the child that channel classifier protection was disabled for this
+  // load.
+  async NotifyChannelClassifierProtectionDisabled(uint32_t aAcceptedReason);
+
+  // Tell the child that cookies are allowed for this load.
+  async NotifyCookieAllowed();
+
+  // Tell the child that tracking cookies are blocked for this load.
+  async NotifyCookieBlocked(uint32_t aRejectedReason);
+
+  // Tell the child that the resource being loaded has been classified.
+  async NotifyClassificationFlags(uint32_t aClassificationFlags, bool aIsThirdParty);
+
+  // Tell the child that the current channel's document is not allowed to load
+  // flash content.
+  async NotifyFlashPluginStateChanged(FlashPluginState aState);
+
+  // Tell the child information of matched URL againts SafeBrowsing list
+  async SetClassifierMatchedInfo(ClassifierInfo info);
+
+  // Tell the child information of matched URL againts SafeBrowsing tracking list
+  async SetClassifierMatchedTrackingInfo(ClassifierInfo info);
+ 
+  // Forwards nsIMultiPartChannelListener::onAfterLastPart. Make sure we've
+  // disconnected our listeners, since we might not have on the last OnStopRequest.
+  async OnAfterLastPart(nsresult aStatus);
 
 both:
   // After receiving this message, the parent also calls

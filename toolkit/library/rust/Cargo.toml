@@ -26,10 +26,18 @@ gecko_profiler_parse_elf = ["gkrust-shared/gecko_profiler_parse_elf"]
 bitsdownload = ["gkrust-shared/bitsdownload"]
 new_xulstore = ["gkrust-shared/new_xulstore"]
 new_cert_storage = ["gkrust-shared/new_cert_storage"]
+fuzzing_interfaces = ["gkrust-shared/fuzzing_interfaces"]
+webrtc = ["gkrust-shared/webrtc"]
+wasm_library_sandboxing = ["gkrust-shared/wasm_library_sandboxing"]
+webgpu = ["gkrust-shared/webgpu"]
+remote_agent = ["gkrust-shared/remote"]
+fogotype = ["gkrust-shared/fogotype"]
 
 [dependencies]
 gkrust-shared = { path = "shared" }
 mozilla-central-workspace-hack = { path = "../../../build/workspace-hack" }
+# Workaround for https://github.com/rust-lang/rust/issues/58393
+mozglue-static = { path = "../../../mozglue/static/rust" }
 
 [dev-dependencies]
 stylo_tests = { path = "../../../servo/ports/geckolib/tests/" }

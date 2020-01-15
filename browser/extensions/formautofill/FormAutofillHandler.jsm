@@ -13,7 +13,6 @@ var EXPORTED_SYMBOLS = ["FormAutofillHandler"];
 const { AppConstants } = ChromeUtils.import(
   "resource://gre/modules/AppConstants.jsm"
 );
-const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
@@ -517,7 +516,7 @@ class FormAutofillSection {
    */
   createRecord() {
     let details = this.fieldDetails;
-    if (!this.isEnabled() || !details || details.length == 0) {
+    if (!this.isEnabled() || !details || !details.length) {
       return null;
     }
 
@@ -907,22 +906,23 @@ class FormAutofillCreditCardSection extends FormAutofillSection {
   }
 
   async _decrypt(cipherText, reauth) {
-    return new Promise(resolve => {
-      Services.cpmm.addMessageListener(
-        "FormAutofill:DecryptedString",
-        function getResult(result) {
-          Services.cpmm.removeMessageListener(
-            "FormAutofill:DecryptedString",
-            getResult
-          );
-          resolve(result.data);
-        }
-      );
+    // Get the window for the form field.
+    let window;
+    for (let fieldDetail of this.fieldDetails) {
+      let element = fieldDetail.elementWeakRef.get();
+      if (element) {
+        window = element.ownerGlobal;
+        break;
+      }
+    }
+    if (!window) {
+      return null;
+    }
 
-      Services.cpmm.sendAsyncMessage("FormAutofill:GetDecryptedString", {
-        cipherText,
-        reauth,
-      });
+    let actor = window.getWindowGlobalChild().getActor("FormAutofill");
+    return actor.sendQuery("FormAutofill:GetDecryptedString", {
+      cipherText,
+      reauth,
     });
   }
 

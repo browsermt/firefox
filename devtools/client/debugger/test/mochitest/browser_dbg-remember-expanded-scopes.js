@@ -3,9 +3,6 @@
  * file, You can obtain one at <http://mozilla.org/MPL/2.0/>. */
 
 // Ignore strange errors when shutting down.
-const { PromiseTestUtils } = ChromeUtils.import(
-  "resource://testing-common/PromiseTestUtils.jsm"
-);
 PromiseTestUtils.whitelistRejectionsGlobally(/No such actor/);
 PromiseTestUtils.whitelistRejectionsGlobally(/connection just closed/);
 
@@ -40,5 +37,5 @@ add_task(async function() {
   await waitForPaused(dbg);
 
   await waitUntil(() => findNode(dbg, "innerData"));
-  ok("Inner object data automatically expanded after stepping");
+  ok(true, "Inner object data automatically expanded after stepping");
 });

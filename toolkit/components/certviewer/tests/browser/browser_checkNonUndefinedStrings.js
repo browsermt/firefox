@@ -8,7 +8,7 @@ const url =
 
 add_task(async function test() {
   await BrowserTestUtils.withNewTab(url, async function(browser) {
-    await ContentTask.spawn(browser, null, async function() {
+    await SpecialPowers.spawn(browser, [], async function() {
       let certificateSection = await ContentTaskUtils.waitForCondition(() => {
         return content.document.querySelector("certificate-section");
       }, "Certificate section found");
@@ -21,7 +21,7 @@ add_task(async function test() {
 
       for (let i = 0; i < tabs.length; i++) {
         let tabButton = certificateSection.shadowRoot.querySelector(
-          `.certificate-tabs #tab${i}`
+          `.certificate-tabs .tab[idnumber="${i}"]`
         );
         tabButton.click();
 

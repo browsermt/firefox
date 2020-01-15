@@ -12,12 +12,14 @@
 
 #include "mozilla/Attributes.h"
 #include "mozilla/AutoRestore.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/EventStates.h"
 #include "mozilla/HTMLEditor.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/StaticPrefs_dom.h"
 
 #include "nsCOMPtr.h"
+#include "nsDebug.h"
 #include "nsString.h"
 #include "nsISelectionListener.h"
 #include "nsContentCID.h"
@@ -30,7 +32,6 @@
 #include "nsTableCellFrame.h"
 #include "nsIScrollableFrame.h"
 #include "nsCCUncollectableMarker.h"
-#include "nsIDocumentEncoder.h"
 #include "nsTextFragment.h"
 #include <algorithm>
 #include "nsContentUtils.h"
@@ -54,7 +55,6 @@ static NS_DEFINE_CID(kFrameTraversalCID, NS_FRAMETRAVERSAL_CID);
 #include "mozilla/MouseEvents.h"
 #include "mozilla/TextEvents.h"
 
-#include "nsITimer.h"
 // notifications
 #include "mozilla/dom/Document.h"
 
@@ -62,8 +62,6 @@ static NS_DEFINE_CID(kFrameTraversalCID, NS_FRAMETRAVERSAL_CID);
 #include "nsCopySupport.h"
 #include "nsIClipboard.h"
 #include "nsIFrameInlines.h"
-
-#include "nsIBidiKeyboard.h"
 
 #include "nsError.h"
 #include "mozilla/AutoCopyListener.h"
@@ -603,8 +601,7 @@ void nsFrameSelection::Init(mozilla::PresShell* aPresShell,
                               : StaticPrefs::dom_select_events_enabled();
 
   Document* doc = aPresShell->GetDocument();
-  if (initSelectEvents ||
-      (doc && nsContentUtils::IsSystemPrincipal(doc->NodePrincipal()))) {
+  if (initSelectEvents || (doc && doc->NodePrincipal()->IsSystemPrincipal())) {
     int8_t index = GetIndexFromSelectionType(SelectionType::eNormal);
     if (mDomSelections[index]) {
       mDomSelections[index]->EnableSelectionChangeEvent();
@@ -1056,26 +1053,40 @@ bool nsFrameSelection::AdjustForMaintainedSelection(nsIContent* aContent,
   int32_t rangeStartOffset = mMaintainRange->StartOffset();
   int32_t rangeEndOffset = mMaintainRange->EndOffset();
 
-  int32_t relToStart = nsContentUtils::ComparePoints(
+  const Maybe<int32_t> relToStart = nsContentUtils::ComparePoints(
       rangeStartNode, rangeStartOffset, aContent, aOffset);
-  int32_t relToEnd = nsContentUtils::ComparePoints(rangeEndNode, rangeEndOffset,
-                                                   aContent, aOffset);
+  if (NS_WARN_IF(!relToStart)) {
+    // Potentially handle this properly when Selection across Shadow DOM
+    // boundary is implemented
+    // (https://bugzilla.mozilla.org/show_bug.cgi?id=1607497).
+    return false;
+  }
+
+  const Maybe<int32_t> relToEnd = nsContentUtils::ComparePoints(
+      rangeEndNode, rangeEndOffset, aContent, aOffset);
+  if (NS_WARN_IF(!relToEnd)) {
+    // Potentially handle this properly when Selection across Shadow DOM
+    // boundary is implemented
+    // (https://bugzilla.mozilla.org/show_bug.cgi?id=1607497).
+    return false;
+  }
 
   // If aContent/aOffset is inside the maintained selection, or if it is on the
   // "anchor" side of the maintained selection, we need to do something.
-  if ((relToStart < 0 && relToEnd > 0) ||
-      (relToStart > 0 && mDomSelections[index]->GetDirection() == eDirNext) ||
-      (relToEnd < 0 && mDomSelections[index]->GetDirection() == eDirPrevious)) {
+  if ((*relToStart < 0 && *relToEnd > 0) ||
+      (*relToStart > 0 && mDomSelections[index]->GetDirection() == eDirNext) ||
+      (*relToEnd < 0 &&
+       mDomSelections[index]->GetDirection() == eDirPrevious)) {
     // Set the current range to the maintained range.
     mDomSelections[index]->ReplaceAnchorFocusRange(mMaintainRange);
-    if (relToStart < 0 && relToEnd > 0) {
+    if (*relToStart < 0 && *relToEnd > 0) {
       // We're inside the maintained selection, just keep it selected.
       return true;
     }
     // Reverse the direction of the selection so that the anchor will be on the
     // far side of the maintained selection, relative to aContent/aOffset.
-    mDomSelections[index]->SetDirection(relToStart > 0 ? eDirPrevious
-                                                       : eDirNext);
+    mDomSelections[index]->SetDirection(*relToStart > 0 ? eDirPrevious
+                                                        : eDirNext);
   }
   return false;
 }
@@ -1142,10 +1153,16 @@ void nsFrameSelection::HandleDrag(nsIFrame* aFrame, const nsPoint& aPoint) {
   if (mMaintainRange && mMaintainedAmount != eSelectNoAmount) {
     nsINode* rangenode = mMaintainRange->GetStartContainer();
     int32_t rangeOffset = mMaintainRange->StartOffset();
-    int32_t relativePosition = nsContentUtils::ComparePoints(
+    const Maybe<int32_t> relativePosition = nsContentUtils::ComparePoints(
         rangenode, rangeOffset, offsets.content, offsets.offset);
+    if (NS_WARN_IF(!relativePosition)) {
+      // Potentially handle this properly when Selection across Shadow DOM
+      // boundary is implemented
+      // (https://bugzilla.mozilla.org/show_bug.cgi?id=1607497).
+      return;
+    }
 
-    nsDirection direction = relativePosition > 0 ? eDirPrevious : eDirNext;
+    nsDirection direction = *relativePosition > 0 ? eDirPrevious : eDirNext;
     nsSelectionAmount amount = mMaintainedAmount;
     if (amount == eSelectBeginLine && direction == eDirNext)
       amount = eSelectEndLine;
@@ -1636,8 +1653,9 @@ nsIFrame* nsFrameSelection::GetFrameToPageSelect() const {
   return rootFrameToSelect;
 }
 
-void nsFrameSelection::CommonPageMove(bool aForward, bool aExtend,
-                                      nsIFrame* aFrame) {
+nsresult nsFrameSelection::PageMove(bool aForward, bool aExtend,
+                                    nsIFrame* aFrame,
+                                    SelectionIntoView aSelectionIntoView) {
   MOZ_ASSERT(aFrame);
 
   // expected behavior for PageMove is to scroll AND move the caret
@@ -1650,21 +1668,21 @@ void nsFrameSelection::CommonPageMove(bool aForward, bool aExtend,
   nsIFrame* scrolledFrame =
       scrollableFrame ? scrollableFrame->GetScrolledFrame() : aFrame;
   if (!scrolledFrame) {
-    return;
+    return NS_OK;
   }
 
   // find out where the caret is.
   // we should know mDesiredPos value of nsFrameSelection, but I havent seen
   // that behavior in other windows applications yet.
-  Selection* domSel = GetSelection(SelectionType::eNormal);
-  if (!domSel) {
-    return;
+  RefPtr<Selection> selection = GetSelection(SelectionType::eNormal);
+  if (!selection) {
+    return NS_OK;
   }
 
   nsRect caretPos;
-  nsIFrame* caretFrame = nsCaret::GetGeometry(domSel, &caretPos);
+  nsIFrame* caretFrame = nsCaret::GetGeometry(selection, &caretPos);
   if (!caretFrame) {
-    return;
+    return NS_OK;
   }
 
   // If the scrolled frame is outside of current selection limiter,
@@ -1673,13 +1691,18 @@ void nsFrameSelection::CommonPageMove(bool aForward, bool aExtend,
   if (!IsValidSelectionPoint(this, scrolledFrame->GetContent())) {
     frameToClick = GetFrameToPageSelect();
     if (NS_WARN_IF(!frameToClick)) {
-      return;
+      return NS_OK;
     }
   }
 
-  if (scrollableFrame && scrolledFrame == frameToClick) {
-    // If aFrame is scrollable, adjust pseudo-click position with page scroll
-    // amount.
+  if (scrollableFrame) {
+    // If there is a scrollable frame, adjust pseudo-click position with page
+    // scroll amount.
+    // XXX This may scroll more than one page if ScrollSelectionIntoView is
+    //     called later because caret may not fully visible.  E.g., if
+    //     clicking line will be visible only half height with scrolling
+    //     the frame, ScrollSelectionIntoView additionally scrolls to show
+    //     the caret entirely.
     if (aForward) {
       caretPos.y += scrollableFrame->GetPageScrollAmount().height;
     } else {
@@ -1704,18 +1727,55 @@ void nsFrameSelection::CommonPageMove(bool aForward, bool aExtend,
       frameToClick->GetContentOffsetsFromPoint(desiredPoint);
 
   if (!offsets.content) {
-    return;
+    // XXX Do we need to handle ScrollSelectionIntoView in this case?
+    return NS_OK;
   }
 
-  // Scroll one page if necessary.
+  // First, place the caret.
+  bool selectionChanged;
+  {
+    // We don't want any script to run until we check whether selection is
+    // modified by HandleClick.
+    SelectionBatcher ensureNoSelectionChangeNotifications(selection);
+
+    RangeBoundary oldAnchor = selection->AnchorRef();
+    RangeBoundary oldFocus = selection->FocusRef();
+
+    HandleClick(offsets.content, offsets.offset, offsets.offset, aExtend, false,
+                CARET_ASSOCIATE_AFTER);
+
+    selectionChanged = selection->AnchorRef() != oldAnchor ||
+                       selection->FocusRef() != oldFocus;
+  }
+
+  bool doScrollSelectionIntoView = !(
+      aSelectionIntoView == SelectionIntoView::IfChanged && !selectionChanged);
+
+  // Then, scroll the given frame one page.
   if (scrollableFrame) {
+    // If we'll call ScrollSelectionIntoView later and selection wasn't
+    // changed and we scroll outside of selection limiter, we shouldn't use
+    // smooth scroll here because nsIScrollableFrame uses normal runnable,
+    // but ScrollSelectionIntoView uses early runner and it cancels the
+    // pending smooth scroll.  Therefore, if we used smooth scroll in such
+    // case, ScrollSelectionIntoView would scroll to show caret instead of
+    // page scroll of an element outside selection limiter.
+    ScrollMode scrollMode = doScrollSelectionIntoView && !selectionChanged &&
+                                    scrolledFrame != frameToClick
+                                ? ScrollMode::Instant
+                                : ScrollMode::Smooth;
     scrollableFrame->ScrollBy(nsIntPoint(0, aForward ? 1 : -1),
-                              nsIScrollableFrame::PAGES, ScrollMode::Smooth);
+                              nsIScrollableFrame::PAGES, scrollMode);
   }
 
-  // place the caret
-  HandleClick(offsets.content, offsets.offset, offsets.offset, aExtend, false,
-              CARET_ASSOCIATE_AFTER);
+  // Finally, scroll selection into view if requested.
+  if (!doScrollSelectionIntoView) {
+    return NS_OK;
+  }
+  return ScrollSelectionIntoView(
+      SelectionType::eNormal, nsISelectionController::SELECTION_FOCUS_REGION,
+      nsISelectionController::SCROLL_SYNCHRONOUS |
+          nsISelectionController::SCROLL_FOR_CARET_MOVE);
 }
 
 nsresult nsFrameSelection::PhysicalMove(int16_t aDirection, int16_t aAmount,

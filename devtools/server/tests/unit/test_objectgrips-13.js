@@ -3,74 +3,49 @@
 
 "use strict";
 
-// Test that ObjectClient.prototype.getDefinitionSite and the "definitionSite"
+// Test that ObjectFront.prototype.getDefinitionSite and the "definitionSite"
 // request work properly.
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
+      threadFront
+    );
+    const [funcGrip, objGrip] = packet.frame.arguments;
+    const func = threadFront.pauseGrip(funcGrip);
+    const obj = threadFront.pauseGrip(objGrip);
 
-function run_test() {
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-grips");
+    // test definition site
+    const response = await func.getDefinitionSite();
+    Assert.ok(!response.error);
+    Assert.equal(response.source.url, getFilePath("test_objectgrips-13.js"));
+    Assert.equal(response.line, debuggee.line0 + 1);
+    Assert.equal(response.column, 0);
+
+    // test bad definition site
+    try {
+      obj._client.request("definitionSite", () => Assert.ok(false));
+    } catch (e) {
+      threadFront.resume();
+    }
+  })
+);
+
+function evalCode(debuggee) {
   Cu.evalInSandbox(
     function stopMe() {
       debugger;
     }.toString(),
-    gDebuggee
+    debuggee
   );
 
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-grips", function(
-      response,
-      targetFront,
-      threadFront
-    ) {
-      gThreadFront = threadFront;
-      add_pause_listener();
-    });
-  });
-  do_test_pending();
-}
-
-function add_pause_listener() {
-  gThreadFront.once("paused", function(packet) {
-    const [funcGrip, objGrip] = packet.frame.arguments;
-    const func = gThreadFront.pauseGrip(funcGrip);
-    const obj = gThreadFront.pauseGrip(objGrip);
-    test_definition_site(func, obj);
-  });
-
-  eval_code();
-}
-
-function eval_code() {
   Cu.evalInSandbox(
     [
       "this.line0 = Error().lineNumber;",
       "function f() {}",
       "stopMe(f, {});",
     ].join("\n"),
-    gDebuggee
+    debuggee
   );
-}
-
-function test_definition_site(func, obj) {
-  func.getDefinitionSite(({ error, source, line, column }) => {
-    Assert.ok(!error);
-    Assert.equal(source.url, getFilePath("test_objectgrips-13.js"));
-    Assert.equal(line, gDebuggee.line0 + 1);
-    Assert.equal(column, 0);
-
-    test_bad_definition_site(obj);
-  });
-}
-
-function test_bad_definition_site(obj) {
-  try {
-    obj._client.request("definitionSite", () => Assert.ok(false));
-  } catch (e) {
-    gThreadFront.resume().then(() => finishClient(gClient));
-  }
 }

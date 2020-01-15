@@ -24,7 +24,7 @@ const {
   MESSAGE_UPDATE_PAYLOAD,
   PAUSED_EXECUTION_POINT,
   PRIVATE_MESSAGES_CLEAR,
-} = require("../constants");
+} = require("devtools/client/webconsole/constants");
 
 const defaultIdGenerator = new IdGenerator();
 
@@ -104,26 +104,15 @@ function messageClose(id) {
  * @return {[type]} [description]
  */
 function messageGetMatchingElements(id, cssSelectors) {
-  return ({ dispatch, services }) => {
-    services
-      .requestEvaluation(`document.querySelectorAll('${cssSelectors}')`)
-      .then(response => {
-        dispatch(messageUpdatePayload(id, response.result));
-      })
-      .catch(err => {
-        console.error(err);
-      });
-  };
-}
-
-function messageGetTableData(id, grip, dataType) {
-  return async ({ dispatch, services }) => {
-    const needEntries = ["Map", "WeakMap", "Set", "WeakSet"].includes(dataType);
-    const results = await (needEntries
-      ? services.fetchObjectEntries(grip)
-      : services.fetchObjectProperties(grip, dataType === "Array"));
-
-    dispatch(messageUpdatePayload(id, results));
+  return async ({ dispatch, client }) => {
+    try {
+      const response = await client.evaluateJSAsync(
+        `document.querySelectorAll('${cssSelectors}')`
+      );
+      dispatch(messageUpdatePayload(id, response.result));
+    } catch (err) {
+      console.error(err);
+    }
   };
 }
 
@@ -165,6 +154,12 @@ function networkUpdateRequest(id, data) {
   };
 }
 
+function jumpToExecutionPoint(executionPoint) {
+  return ({ client }) => {
+    client.timeWarp(executionPoint);
+  };
+}
+
 module.exports = {
   messagesAdd,
   messagesClear,
@@ -172,11 +167,11 @@ module.exports = {
   messageOpen,
   messageClose,
   messageGetMatchingElements,
-  messageGetTableData,
   messageUpdatePayload,
   networkMessageUpdate,
   networkUpdateRequest,
   privateMessagesClear,
   // for test purpose only.
   setPauseExecutionPoint,
+  jumpToExecutionPoint,
 };

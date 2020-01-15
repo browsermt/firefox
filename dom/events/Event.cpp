@@ -8,6 +8,7 @@
 #include "base/basictypes.h"
 #include "ipc/IPCMessageUtils.h"
 #include "mozilla/EventDispatcher.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/ContentEvents.h"
 #include "mozilla/DOMEventTargetHelper.h"
 #include "mozilla/EventStateManager.h"
@@ -314,8 +315,7 @@ bool Event::Init(mozilla::dom::EventTarget* aGlobal) {
 // static
 already_AddRefed<Event> Event::Constructor(const GlobalObject& aGlobal,
                                            const nsAString& aType,
-                                           const EventInit& aParam,
-                                           ErrorResult& aRv) {
+                                           const EventInit& aParam) {
   nsCOMPtr<mozilla::dom::EventTarget> t =
       do_QueryInterface(aGlobal.GetAsSupports());
   return Constructor(t, aType, aParam);
@@ -717,8 +717,7 @@ double Event::TimeStamp() {
     double ret =
         perf->GetDOMTiming()->TimeStampToDOMHighRes(mEvent->mTimeStamp);
     MOZ_ASSERT(mOwner->PrincipalOrNull());
-    if (nsContentUtils::IsSystemPrincipal(mOwner->PrincipalOrNull()))
-      return ret;
+    if (mOwner->PrincipalOrNull()->IsSystemPrincipal()) return ret;
 
     return nsRFPService::ReduceTimePrecisionAsMSecs(
         ret, perf->GetRandomTimelineSeed());

@@ -263,7 +263,7 @@ add_task(async function testLongOID() {
  */
 function displayCertificate(certificate) {
   let win = window.openDialog(
-    "chrome://pippki/content/certViewer.xul",
+    "chrome://pippki/content/certViewer.xhtml",
     "",
     "",
     certificate
@@ -445,14 +445,15 @@ function getURL(cert) {
  */
 async function openCertViewerAndCheckTabName(url, expectedTabName) {
   await BrowserTestUtils.withNewTab({ gBrowser, url }, async function(browser) {
-    await ContentTask.spawn(browser, expectedTabName, async function(
+    await SpecialPowers.spawn(browser, [expectedTabName], async function(
       expectedTabName
     ) {
       let certificateSection = await ContentTaskUtils.waitForCondition(() => {
         return content.document.querySelector("certificate-section");
       }, "Certificate section found");
-      let tabName = certificateSection.shadowRoot.querySelector("#tab0")
-        .textContent;
+      let tabName = certificateSection.shadowRoot.querySelector(
+        ".tab[idnumber='0']"
+      ).textContent;
       Assert.equal(tabName, expectedTabName);
     });
   });

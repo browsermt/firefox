@@ -2,10 +2,15 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 "use strict";
 
-ChromeUtils.defineModuleGetter(
-  this,
-  "ClientEnvironmentBase",
+const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+const { ClientEnvironmentBase } = ChromeUtils.import(
   "resource://gre/modules/components-utils/ClientEnvironment.jsm"
+);
+const { TelemetryController } = ChromeUtils.import(
+  "resource://gre/modules/TelemetryController.jsm"
+);
+const { AppConstants } = ChromeUtils.import(
+  "resource://gre/modules/AppConstants.jsm"
 );
 
 // OS Data
@@ -44,7 +49,7 @@ add_task(async () => {
     equal(os.darwinVersion, null, "Darwin version should not be set");
   }
 
-  // if on Mac, Mac versions should be set, and Windows versions should not b e
+  // if on Mac, Mac versions should be set, and Windows versions should not be
   if (os.isMac) {
     equal(typeof os.macVersion, "number", "Mac version should be a number");
     equal(
@@ -71,4 +76,37 @@ add_task(async () => {
       "Windows build number version should not be set"
     );
   }
+});
+
+add_task(async () => {
+  try {
+    await ClientEnvironmentBase.attribution;
+  } catch (ex) {
+    equal(
+      ex.name,
+      "NS_ERROR_FILE_NOT_FOUND",
+      "Test environment does not have attribution data"
+    );
+  }
+});
+
+add_task(async function testLiveTelemetry() {
+  // Setup telemetry so we can read from it
+  do_get_profile(true);
+  await TelemetryController.testSetup();
+
+  equal(
+    ClientEnvironmentBase.liveTelemetry.main.environment.build.displayVersion,
+    AppConstants.MOZ_APP_VERSION_DISPLAY,
+    "Telemetry data is available"
+  );
+
+  Assert.throws(
+    () => ClientEnvironmentBase.liveTelemetry.anotherPingType,
+    /Live telemetry.*anotherPingType/,
+    "Non-main pings should raise an error if accessed"
+  );
+
+  // Put things back the way we found them
+  await TelemetryController.testShutdown();
 });

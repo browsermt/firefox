@@ -15,8 +15,8 @@
 
 #include "js/GCAPI.h"  // JS::AutoRequireNoGC
 
-struct JSContext;
-class JSObject;
+struct JS_PUBLIC_API JSContext;
+class JS_PUBLIC_API JSObject;
 
 namespace JS {
 
@@ -57,6 +57,14 @@ extern JS_PUBLIC_API uint8_t* GetSharedArrayBufferData(JSObject* obj,
 // It will always be set to true.
 extern JS_PUBLIC_API void GetSharedArrayBufferLengthAndData(
     JSObject* obj, uint32_t* length, bool* isSharedMemory, uint8_t** data);
+
+/**
+ * Returns true if there are any live SharedArrayBuffer objects, including those
+ * for wasm memories, associated with the context.  This is conservative,
+ * because it does not run GC.  Some dead objects may not have been collected
+ * yet and thus will be thought live.
+ */
+extern JS_PUBLIC_API bool ContainsSharedArrayBuffer(JSContext* cx);
 
 }  // namespace JS
 

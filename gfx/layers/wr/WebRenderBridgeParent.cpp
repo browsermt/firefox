@@ -16,6 +16,7 @@
 #include "mozilla/Range.h"
 #include "mozilla/StaticPrefs_gfx.h"
 #include "mozilla/UniquePtr.h"
+#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/AnimationHelper.h"
 #include "mozilla/layers/APZSampler.h"
 #include "mozilla/layers/APZUpdater.h"
@@ -36,6 +37,10 @@
 #include "mozilla/Unused.h"
 #include "mozilla/webrender/RenderThread.h"
 #include "mozilla/widget/CompositorWidget.h"
+
+#ifdef XP_WIN
+#  include "mozilla/widget/WinCompositorWidget.h"
+#endif
 
 #ifdef MOZ_GECKO_PROFILER
 #  include "ProfilerMarkerPayload.h"
@@ -150,8 +155,8 @@ void record_telemetry_time(mozilla::wr::TelemetryProbe aProbe,
       mozilla::Telemetry::Accumulate(mozilla::Telemetry::WR_SCENESWAP_TIME,
                                      time_ms);
       break;
-    case mozilla::wr::TelemetryProbe::RenderTime:
-      mozilla::Telemetry::Accumulate(mozilla::Telemetry::WR_RENDER_TIME,
+    case mozilla::wr::TelemetryProbe::FrameBuildTime:
+      mozilla::Telemetry::Accumulate(mozilla::Telemetry::WR_FRAMEBUILD_TIME,
                                      time_ms);
       break;
     default:
@@ -205,17 +210,39 @@ class SceneBuiltNotification : public wr::NotificationHandler {
         "SceneBuiltNotificationRunnable", [parent, epoch, startTime]() {
           auto endTime = TimeStamp::Now();
 #ifdef MOZ_GECKO_PROFILER
-          if (profiler_is_active()) {
+          if (profiler_can_accept_markers()) {
             class ContentFullPaintPayload : public ProfilerMarkerPayload {
              public:
               ContentFullPaintPayload(const mozilla::TimeStamp& aStartTime,
                                       const mozilla::TimeStamp& aEndTime)
                   : ProfilerMarkerPayload(aStartTime, aEndTime) {}
+              mozilla::BlocksRingBuffer::Length TagAndSerializationBytes()
+                  const override {
+                return CommonPropsTagAndSerializationBytes();
+              }
+              void SerializeTagAndPayload(
+                  mozilla::BlocksRingBuffer::EntryWriter& aEntryWriter)
+                  const override {
+                static const DeserializerTag tag =
+                    TagForDeserializer(Deserialize);
+                SerializeTagAndCommonProps(tag, aEntryWriter);
+              }
               void StreamPayload(SpliceableJSONWriter& aWriter,
                                  const TimeStamp& aProcessStartTime,
-                                 UniqueStacks& aUniqueStacks) override {
+                                 UniqueStacks& aUniqueStacks) const override {
                 StreamCommonProps("CONTENT_FULL_PAINT_TIME", aWriter,
                                   aProcessStartTime, aUniqueStacks);
+              }
+
+             private:
+              explicit ContentFullPaintPayload(CommonProps&& aCommonProps)
+                  : ProfilerMarkerPayload(std::move(aCommonProps)) {}
+              static mozilla::UniquePtr<ProfilerMarkerPayload> Deserialize(
+                  mozilla::BlocksRingBuffer::EntryReader& aEntryReader) {
+                ProfilerMarkerPayload::CommonProps props =
+                    DeserializeCommonProps(aEntryReader);
+                return UniquePtr<ProfilerMarkerPayload>(
+                    new ContentFullPaintPayload(std::move(props)));
               }
             };
 
@@ -307,6 +334,9 @@ WebRenderBridgeParent::WebRenderBridgeParent(
       mWrEpoch{0},
       mIdNamespace(aApis[0]->GetNamespace()),
       mRenderRootRectMutex("WebRenderBridgeParent::mRenderRootRectMutex"),
+#if defined(MOZ_WIDGET_ANDROID)
+      mScreenPixelsTarget(nullptr),
+#endif
       mPaused(false),
       mDestroyed(false),
       mReceivedDisplayList(false),
@@ -329,6 +359,9 @@ WebRenderBridgeParent::WebRenderBridgeParent(
     MOZ_ASSERT(api);
     mApis[api->GetRenderRoot()] = api;
   }
+
+  UpdateDebugFlags();
+  UpdateQualitySettings();
 }
 
 WebRenderBridgeParent::WebRenderBridgeParent(const wr::PipelineId& aPipelineId)
@@ -799,7 +832,8 @@ bool WebRenderBridgeParent::PushExternalImageForTexture(
     WebRenderTextureHost* wrTexture = aTexture->AsWebRenderTextureHost();
     if (wrTexture) {
       wrTexture->PushResourceUpdates(aResources, op, keys,
-                                     wrTexture->GetExternalImageKey());
+                                     wrTexture->GetExternalImageKey(),
+                                     /* aPreferCompositorSurface */ false);
       auto it = mTextureHosts.find(wr::AsUint64(aKey));
       MOZ_ASSERT((it == mTextureHosts.end() && !aIsUpdate) ||
                  (it != mTextureHosts.end() && aIsUpdate));
@@ -1001,8 +1035,14 @@ void WebRenderBridgeParent::SetCompositionRecorder(
   Api(wr::RenderRoot::Default)->SetCompositionRecorder(std::move(aRecorder));
 }
 
-void WebRenderBridgeParent::WriteCollectedFrames() {
-  Api(wr::RenderRoot::Default)->WriteCollectedFrames();
+RefPtr<wr::WebRenderAPI::WriteCollectedFramesPromise>
+WebRenderBridgeParent::WriteCollectedFrames() {
+  return Api(wr::RenderRoot::Default)->WriteCollectedFrames();
+}
+
+RefPtr<wr::WebRenderAPI::GetCollectedFramesPromise>
+WebRenderBridgeParent::GetCollectedFrames() {
+  return Api(wr::RenderRoot::Default)->GetCollectedFrames();
 }
 
 CompositorBridgeParent* WebRenderBridgeParent::GetRootCompositorBridgeParent()
@@ -1598,6 +1638,7 @@ bool WebRenderBridgeParent::ProcessWebRenderParentCommands(
       case WebRenderParentCommand::TOpUpdatedAsyncImagePipeline: {
         const OpUpdatedAsyncImagePipeline& op =
             cmd.get_OpUpdatedAsyncImagePipeline();
+        aTxn.InvalidateRenderedFrame();
         mAsyncImageManager->ApplyAsyncImageForPipeline(
             op.pipelineId(), aTxn, txnForImageBridge,
             RenderRootForExternal(aRenderRoot));
@@ -1690,6 +1731,69 @@ void WebRenderBridgeParent::FlushFramePresentation() {
   // a frame.
   mApis[wr::RenderRoot::Default]->WaitFlushed();
 }
+
+void WebRenderBridgeParent::UpdateQualitySettings() {
+  for (auto& api : mApis) {
+    if (!api) {
+      continue;
+    }
+    wr::TransactionBuilder txn;
+    txn.UpdateQualitySettings(gfxVars::AllowSacrificingSubpixelAA());
+    api->SendTransaction(txn);
+  }
+}
+
+void WebRenderBridgeParent::UpdateDebugFlags() {
+  for (auto& api : mApis) {
+    if (!api) {
+      continue;
+    }
+    api->UpdateDebugFlags(gfxVars::WebRenderDebugFlags());
+  }
+}
+
+#if defined(MOZ_WIDGET_ANDROID)
+void WebRenderBridgeParent::RequestScreenPixels(
+    UiCompositorControllerParent* aController) {
+  mScreenPixelsTarget = aController;
+}
+
+void WebRenderBridgeParent::MaybeCaptureScreenPixels() {
+  if (!mScreenPixelsTarget) {
+    return;
+  }
+
+  if (mDestroyed) {
+    return;
+  }
+  MOZ_ASSERT(!mPaused);
+
+  // This function should only get called in the root WRBP.
+  MOZ_ASSERT(IsRootWebRenderBridgeParent());
+
+  SurfaceFormat format = SurfaceFormat::R8G8B8A8;  // On android we use RGBA8
+  auto client_size = mWidget->GetClientSize();
+  size_t buffer_size =
+      client_size.width * client_size.height * BytesPerPixel(format);
+
+  ipc::Shmem mem;
+  if (!mScreenPixelsTarget->AllocPixelBuffer(buffer_size, &mem)) {
+    // Failed to alloc shmem, Just bail out.
+    return;
+  }
+
+  IntSize size(client_size.width, client_size.height);
+
+  mApis[wr::RenderRoot::Default]->Readback(
+      TimeStamp::Now(), size, format,
+      Range<uint8_t>(mem.get<uint8_t>(), buffer_size));
+
+  Unused << mScreenPixelsTarget->SendScreenPixels(
+      std::move(mem), ScreenIntSize(client_size.width, client_size.height));
+
+  mScreenPixelsTarget = nullptr;
+}
+#endif
 
 mozilla::ipc::IPCResult WebRenderBridgeParent::RecvGetSnapshot(
     PTextureParent* aTexture) {
@@ -1804,7 +1908,6 @@ void WebRenderBridgeParent::AddPipelineIdForCompositable(
   // transaction.
   mAsyncImageManager->SetEmptyDisplayList(aPipelineId, aTxn,
                                           aTxnForImageBridge);
-  return;
 }
 
 void WebRenderBridgeParent::RemovePipelineIdForCompositable(
@@ -1989,6 +2092,14 @@ void WebRenderBridgeParent::ScheduleForcedGenerateFrame() {
 mozilla::ipc::IPCResult WebRenderBridgeParent::RecvCapture() {
   if (!mDestroyed) {
     mApis[wr::RenderRoot::Default]->Capture();
+  }
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult WebRenderBridgeParent::RecvSetTransactionLogging(
+    const bool& aValue) {
+  if (!mDestroyed) {
+    mApis[wr::RenderRoot::Default]->SetTransactionLogging(aValue);
   }
   return IPC_OK();
 }
@@ -2223,6 +2334,7 @@ void WebRenderBridgeParent::MaybeGenerateFrame(VsyncId aId,
       TimeStamp now = TimeStamp::Now();
       cbp->NotifyPipelineRendered(mPipelineId, mWrEpoch, VsyncId(), now, now,
                                   now);
+      return;
     }
   }
 
@@ -2321,6 +2433,10 @@ void WebRenderBridgeParent::MaybeGenerateFrame(VsyncId aId,
     }
   }
   wr::WebRenderAPI::SendTransactions(mApis, generateFrameTxns);
+
+#if defined(MOZ_WIDGET_ANDROID)
+  MaybeCaptureScreenPixels();
+#endif
 
   mMostRecentComposite = TimeStamp::Now();
 }
@@ -2540,19 +2656,18 @@ void WebRenderBridgeParent::FlushRendering(bool aWaitForPresent) {
 
 void WebRenderBridgeParent::Pause() {
   MOZ_ASSERT(IsRootWebRenderBridgeParent());
-#ifdef MOZ_WIDGET_ANDROID
+
   if (!IsRootWebRenderBridgeParent() || mDestroyed) {
     return;
   }
 
   mApis[wr::RenderRoot::Default]->Pause();
-#endif
   mPaused = true;
 }
 
 bool WebRenderBridgeParent::Resume() {
   MOZ_ASSERT(IsRootWebRenderBridgeParent());
-#ifdef MOZ_WIDGET_ANDROID
+
   if (!IsRootWebRenderBridgeParent() || mDestroyed) {
     return false;
   }
@@ -2560,7 +2675,10 @@ bool WebRenderBridgeParent::Resume() {
   if (!mApis[wr::RenderRoot::Default]->Resume()) {
     return false;
   }
-#endif
+
+  // Ensure we generate and render a frame immediately.
+  ScheduleForcedGenerateFrame();
+
   mPaused = false;
   return true;
 }
@@ -2697,7 +2815,8 @@ TextureFactoryIdentifier WebRenderBridgeParent::GetTextureFactoryIdentifier() {
       LayersBackend::LAYERS_WR, XRE_GetProcessType(),
       mApis[wr::RenderRoot::Default]->GetMaxTextureSize(), false,
       mApis[wr::RenderRoot::Default]->GetUseANGLE(),
-      mApis[wr::RenderRoot::Default]->GetUseDComp(), false, false, false,
+      mApis[wr::RenderRoot::Default]->GetUseDComp(),
+      mAsyncImageManager->UseCompositorWnd(), false, false, false,
       mApis[wr::RenderRoot::Default]->GetSyncHandle());
 }
 

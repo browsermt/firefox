@@ -19,6 +19,7 @@ class nsIPermission;
 class nsIPrincipal;
 class nsIURI;
 class nsPIDOMWindowInner;
+class nsPIDOMWindowOuter;
 
 namespace mozilla {
 
@@ -42,6 +43,7 @@ class AntiTrackingCommon final {
   // storage permission is not granted:
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_BY_PERMISSION
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_TRACKER
+  //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_ALL
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN
   static bool IsFirstPartyStorageAccessGrantedFor(
@@ -75,7 +77,7 @@ class AntiTrackingCommon final {
     eOpenerAfterUserInteraction,
     eOpener
   };
-  enum StorageAccessPromptChoices { eAllow, eAllowAutoGrant, eAllowOnAnySite };
+  enum StorageAccessPromptChoices { eAllow, eAllowAutoGrant };
 
   // Grant the permission for aOrigin to have access to the first party storage.
   // This method can handle 2 different scenarios:
@@ -129,8 +131,7 @@ class AntiTrackingCommon final {
   static RefPtr<FirstPartyStorageAccessGrantPromise>
   SaveFirstPartyStorageAccessGrantedForOriginOnParentProcess(
       nsIPrincipal* aPrincipal, nsIPrincipal* aTrackingPrinciapl,
-      const nsCString& aParentOrigin, const nsCString& aGrantedOrigin,
-      int aAllowMode);
+      const nsCString& aTrackingOrigin, int aAllowMode);
 
   // Check whether a top window principal is on the content blocking allow list.
   static nsresult IsOnContentBlockingAllowList(nsIPrincipal* aTopWinPrincipal,
@@ -162,6 +163,7 @@ class AntiTrackingCommon final {
   // aRejectedReason must be one of these values:
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_BY_PERMISSION
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_TRACKER
+  //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_ALL
   //  * nsIWebProgressListener::STATE_COOKIES_BLOCKED_FOREIGN
   static void NotifyBlockingDecision(nsIChannel* aChannel,
@@ -175,6 +177,12 @@ class AntiTrackingCommon final {
   // Get the current document URI from a document channel as it is being loaded.
   static already_AddRefed<nsIURI> MaybeGetDocumentURIBeingLoaded(
       nsIChannel* aChannel);
+
+  static void NotifyContentBlockingEvent(
+      nsPIDOMWindowOuter* aWindow, nsIChannel* aReportingChannel,
+      nsIChannel* aTrackingChannel, bool aBlocked, uint32_t aRejectedReason,
+      nsIURI* aURI,
+      const Maybe<StorageAccessGrantedReason>& aReason = Nothing());
 };
 
 }  // namespace mozilla

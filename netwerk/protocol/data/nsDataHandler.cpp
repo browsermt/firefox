@@ -100,16 +100,9 @@ nsDataHandler::NewChannel(nsIURI* uri, nsILoadInfo* aLoadInfo,
     channel = new mozilla::net::DataChannelChild(uri);
   }
 
-  nsresult rv = channel->Init();
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
-
   // set the loadInfo on the new channel
-  rv = channel->SetLoadInfo(aLoadInfo);
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
+  nsresult rv = channel->SetLoadInfo(aLoadInfo);
+  NS_ENSURE_SUCCESS(rv, rv);
 
   channel.forget(result);
   return NS_OK;
@@ -155,11 +148,15 @@ nsresult nsDataHandler::ParsePathWithoutRef(
 
   // First, find the start of the data
   int32_t commaIdx = aPath.FindChar(',');
-  if (commaIdx == kNotFound) {
+
+  // This is a hack! When creating a URL using the DOM API we want to ignore
+  // if a comma is missing. But if we're actually loading a data: URI, in which
+  // case aContentCharset is not null, then we want to return an error if a
+  // comma is missing.
+  if (aContentCharset && commaIdx == kNotFound) {
     return NS_ERROR_MALFORMED_URI;
   }
-
-  if (commaIdx == 0) {
+  if (commaIdx == 0 || commaIdx == kNotFound) {
     // Nothing but data.
     aContentType.AssignLiteral("text/plain");
     if (aContentCharset) {

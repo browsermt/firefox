@@ -140,14 +140,30 @@ void SetJitContext(JitContext* ctx);
 bool CanIonCompileScript(JSContext* cx, JSScript* script);
 bool CanIonInlineScript(JSScript* script);
 
-MOZ_MUST_USE bool IonCompileScriptForBaseline(JSContext* cx,
-                                              BaselineFrame* frame,
-                                              jsbytecode* pc);
+MOZ_MUST_USE bool IonCompileScriptForBaselineAtEntry(JSContext* cx,
+                                                     BaselineFrame* frame);
+
+struct IonOsrTempData {
+  void* jitcode;
+  uint8_t* baselineFrame;
+
+  static constexpr size_t offsetOfJitCode() {
+    return offsetof(IonOsrTempData, jitcode);
+  }
+  static constexpr size_t offsetOfBaselineFrame() {
+    return offsetof(IonOsrTempData, baselineFrame);
+  }
+};
+
+MOZ_MUST_USE bool IonCompileScriptForBaselineOSR(JSContext* cx,
+                                                 BaselineFrame* frame,
+                                                 uint32_t frameSize,
+                                                 jsbytecode* pc,
+                                                 IonOsrTempData** infoPtr);
 
 MethodStatus CanEnterIon(JSContext* cx, RunState& state);
 
-MethodStatus Recompile(JSContext* cx, HandleScript script,
-                       BaselineFrame* osrFrame, jsbytecode* osrPc, bool force);
+MethodStatus Recompile(JSContext* cx, HandleScript script, bool force);
 
 enum JitExecStatus {
   // The method call had to be aborted due to a stack limit check. This
@@ -205,7 +221,7 @@ inline bool IsIonInlinableGetterOrSetterOp(JSOp op) {
 inline bool IsIonInlinableOp(JSOp op) {
   // CALL, FUNCALL, FUNAPPLY, EVAL, NEW (Normal Callsites)
   // or an inlinable getter or setter.
-  return (IsCallOp(op) && !IsSpreadCallOp(op)) ||
+  return (IsInvokeOp(op) && !IsSpreadOp(op)) ||
          IsIonInlinableGetterOrSetterOp(op);
 }
 
@@ -219,7 +235,7 @@ inline bool TooManyFormalArguments(unsigned nargs) {
 
 inline size_t NumLocalsAndArgs(JSScript* script) {
   size_t num = 1 /* this */ + script->nfixed();
-  if (JSFunction* fun = script->functionNonDelazifying()) {
+  if (JSFunction* fun = script->function()) {
     num += fun->nargs();
   }
   return num;
@@ -257,6 +273,11 @@ size_t SizeOfIonData(JSScript* script, mozilla::MallocSizeOf mallocSizeOf);
 
 bool JitSupportsSimd();
 bool JitSupportsAtomics();
+
+inline bool IsIonEnabled(JSContext* cx) {
+  return IsBaselineJitEnabled() && JitOptions.ion &&
+         !cx->options().disableIon();
+}
 
 }  // namespace jit
 }  // namespace js

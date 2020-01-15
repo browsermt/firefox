@@ -49,12 +49,10 @@ const TEST_URL =
   '<body><div style="background:orange; width:1000px; height:1000px"></div></body>';
 
 addRDMTask(TEST_URL, async function({ ui, manager }) {
-  // Turn on the prefs that allow meta viewport support, and force overlay
-  // scrollbars to always be visible, and to allow data URIs to be considered
-  // as same-origin.
+  // Turn on the prefs that force overlay scrollbars to always be visible, and to allow
+  // data URIs to be considered as same-origin.
   await SpecialPowers.pushPrefEnv({
     set: [
-      ["devtools.responsive.metaViewport.enabled", true],
       ["layout.testing.overlay-scrollbars.always-visible", true],
       ["security.data_uri.unique_opaque_origin", false],
     ],
@@ -87,7 +85,7 @@ addRDMTask(TEST_URL, async function({ ui, manager }) {
 
     // Get to the initial size and snapshot the window.
     await setViewportSize(ui, manager, 300, 600);
-    const initialSnapshot = snapshotWindow(browser.contentWindow);
+    const initialSnapshot = await snapshotWindow(browser.contentWindow);
 
     // Move to the rotated size.
     await setViewportSize(ui, manager, 600, 300);
@@ -99,7 +97,7 @@ addRDMTask(TEST_URL, async function({ ui, manager }) {
 
     // Go back to the initial size and take another snapshot.
     await setViewportSize(ui, manager, 300, 600);
-    const finalSnapshot = snapshotWindow(browser.contentWindow);
+    const finalSnapshot = await snapshotWindow(browser.contentWindow);
 
     const result = compareSnapshots(initialSnapshot, finalSnapshot, true);
     is(result[2], result[1], "Window snapshots should match.");

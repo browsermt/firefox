@@ -34,13 +34,6 @@ interface nsIRemoteTab : nsISupports
   readonly attribute boolean hasLayers;
 
   /**
-   * Sends a message to the child ensuring that they paint as early as
-   * possible. This will send the message to paint even if renderLayers
-   * is already true.
-   */
-  void forceRepaint();
-
-  /**
    * Adjusts the tab's active state in the process priority manager,
    * allowing its process to be given a lower priority.
    */
@@ -64,7 +57,6 @@ interface nsIRemoteTab : nsISupports
    */
   readonly attribute int32_t osPid;
 
-  readonly attribute boolean hasContentOpener;
   /**
    * True if we've previously received layers for this tab when switching to
    * it.
@@ -82,11 +74,6 @@ interface nsIRemoteTab : nsISupports
    * an onbeforeunload event handler.
    */
   readonly attribute boolean hasBeforeUnload;
-
-  /**
-   * The frame element which currently embeds this nsIRemoteTab object.
-   */
-  readonly attribute Element ownerElement;
 
   /**
    * Notify APZ to start autoscrolling.
@@ -146,4 +133,8 @@ interface nsIRemoteTab : nsISupports
    * Notify the remote tab that the resolution has changed.
    */
   [noscript] void notifyResolutionChanged();
+  /**
+   * Notify the remote tab that system theme has changed.
+   */
+  [noscript] void notifyThemeChanged();
 };

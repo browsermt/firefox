@@ -9,9 +9,12 @@
 
 #include "vm/NativeObject.h"
 
+#include "mozilla/Maybe.h"
+
 #include "builtin/TypedObject.h"
 #include "gc/Allocator.h"
 #include "gc/GCTrace.h"
+#include "js/Result.h"
 #include "proxy/Proxy.h"
 #include "vm/JSContext.h"
 #include "vm/ProxyObject.h"
@@ -67,7 +70,8 @@ inline void NativeObject::addDenseElementType(JSContext* cx, uint32_t index,
   // Avoid a slow AddTypePropertyId call if the type is the same as the type
   // of the previous element.
   TypeSet::Type thisType = TypeSet::GetValueType(val);
-  if (index == 0 || TypeSet::GetValueType(elements_[index - 1]) != thisType) {
+  if (index == 0 || elements_[index - 1].isMagic() ||
+      TypeSet::GetValueType(elements_[index - 1]) != thisType) {
     AddTypePropertyId(cx, this, JSID_VOID, thisType);
   }
 }
@@ -114,6 +118,9 @@ inline void NativeObject::markDenseElementsNotPacked(JSContext* cx) {
 
 inline void NativeObject::elementsRangeWriteBarrierPost(uint32_t start,
                                                         uint32_t count) {
+  if (!isTenured()) {
+    return;
+  }
   for (size_t i = 0; i < count; i++) {
     const Value& v = elements_[start + i];
     if (v.isGCThing()) {
@@ -756,9 +763,17 @@ static MOZ_ALWAYS_INLINE bool LookupOwnPropertyInline(
   // so that integer properties on the prototype are ignored even for out
   // of bounds accesses.
   if (obj->template is<TypedArrayObject>()) {
-    uint64_t index;
-    if (IsTypedArrayIndex(id, &index)) {
-      if (index < obj->template as<TypedArrayObject>().length()) {
+    JS::Result<mozilla::Maybe<uint64_t>> index = IsTypedArrayIndex(cx, id);
+    if (index.isErr()) {
+      if (!allowGC) {
+        cx->recoverFromOutOfMemory();
+      }
+      return false;
+    }
+
+    if (index.inspect()) {
+      if (index.inspect().value() <
+          obj->template as<TypedArrayObject>().length()) {
         propp.setDenseOrTypedArrayElement();
       } else {
         propp.setNotFound();
@@ -813,25 +828,27 @@ static MOZ_ALWAYS_INLINE bool LookupOwnPropertyInline(
  * Simplified version of LookupOwnPropertyInline that doesn't call resolve
  * hooks.
  */
-static inline void NativeLookupOwnPropertyNoResolve(
+static inline MOZ_MUST_USE bool NativeLookupOwnPropertyNoResolve(
     JSContext* cx, HandleNativeObject obj, HandleId id,
     MutableHandle<PropertyResult> result) {
   // Check for a native dense element.
   if (JSID_IS_INT(id) && obj->containsDenseElement(JSID_TO_INT(id))) {
     result.setDenseOrTypedArrayElement();
-    return;
+    return true;
   }
 
   // Check for a typed array element.
   if (obj->is<TypedArrayObject>()) {
-    uint64_t index;
-    if (IsTypedArrayIndex(id, &index)) {
-      if (index < obj->as<TypedArrayObject>().length()) {
+    mozilla::Maybe<uint64_t> index;
+    JS_TRY_VAR_OR_RETURN_FALSE(cx, index, IsTypedArrayIndex(cx, id));
+
+    if (index) {
+      if (index.value() < obj->as<TypedArrayObject>().length()) {
         result.setDenseOrTypedArrayElement();
       } else {
         result.setNotFound();
       }
-      return;
+      return true;
     }
   }
 
@@ -841,6 +858,7 @@ static inline void NativeLookupOwnPropertyNoResolve(
   } else {
     result.setNotFound();
   }
+  return true;
 }
 
 template <AllowGC allowGC>

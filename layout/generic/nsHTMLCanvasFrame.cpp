@@ -163,7 +163,7 @@ class nsDisplayCanvas final : public nsPaintedDisplayItem {
         // parent side, where it will be done when we build the display list for
         // the iframe. That happens in WebRenderCompositableHolder.
 
-        wr::LayoutRect r = wr::ToRoundedLayoutRect(bounds);
+        wr::LayoutRect r = wr::ToLayoutRect(bounds);
         aBuilder.PushIFrame(r, !BackfaceIsHidden(), data->GetPipelineId().ref(),
                             /*ignoreMissingPipelines*/ false);
 
@@ -186,7 +186,39 @@ class nsDisplayCanvas final : public nsPaintedDisplayItem {
         break;
       }
       case CanvasContextType::ImageBitmap: {
-        // TODO: Support ImageBitmap
+        nsHTMLCanvasFrame* canvasFrame =
+            static_cast<nsHTMLCanvasFrame*>(mFrame);
+        nsIntSize canvasSizeInPx = canvasFrame->GetCanvasSize();
+        if (canvasSizeInPx.width <= 0 || canvasSizeInPx.height <= 0) {
+          return true;
+        }
+        bool isRecycled;
+        RefPtr<WebRenderCanvasData> canvasData =
+            aManager->CommandBuilder()
+                .CreateOrRecycleWebRenderUserData<WebRenderCanvasData>(
+                    this, aBuilder.GetRenderRoot(), &isRecycled);
+        if (!canvasFrame->UpdateWebRenderCanvasData(aDisplayListBuilder,
+                                                    canvasData)) {
+          canvasData->ClearImageContainer();
+          return true;
+        }
+
+        IntrinsicSize intrinsicSize =
+            IntrinsicSizeFromCanvasSize(canvasSizeInPx);
+        AspectRatio intrinsicRatio =
+            IntrinsicRatioFromCanvasSize(canvasSizeInPx);
+
+        nsRect area =
+            mFrame->GetContentRectRelativeToSelf() + ToReferenceFrame();
+        nsRect dest = nsLayoutUtils::ComputeObjectDestRect(
+            area, intrinsicSize, intrinsicRatio, mFrame->StylePosition());
+
+        LayoutDeviceRect bounds = LayoutDeviceRect::FromAppUnits(
+            dest, mFrame->PresContext()->AppUnitsPerDevPixel());
+
+        aManager->CommandBuilder().PushImage(
+            this, canvasData->GetImageContainer(), aBuilder, aResources, aSc,
+            bounds, bounds);
         break;
       }
       case CanvasContextType::NoContext:
@@ -411,8 +443,8 @@ already_AddRefed<Layer> nsHTMLCanvasFrame::BuildLayer(
   if (canvasSizeInPx.width <= 0 || canvasSizeInPx.height <= 0 || area.IsEmpty())
     return nullptr;
 
-  CanvasLayer* oldLayer = static_cast<CanvasLayer*>(
-      aManager->GetLayerBuilder()->GetLeafLayerFor(aBuilder, aItem));
+  Layer* oldLayer =
+      aManager->GetLayerBuilder()->GetLeafLayerFor(aBuilder, aItem);
   RefPtr<Layer> layer = element->GetCanvasLayer(aBuilder, oldLayer, aManager);
   if (!layer) return nullptr;
 

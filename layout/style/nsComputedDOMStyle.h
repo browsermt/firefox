@@ -71,10 +71,10 @@ class nsComputedDOMStyle final : public nsDOMCSSDeclaration,
   nsresult GetPropertyValue(const nsCSSPropertyID aPropID,
                             nsAString& aValue) override;
   nsresult SetPropertyValue(const nsCSSPropertyID aPropID,
-                            const nsAString& aValue,
+                            const nsACString& aValue,
                             nsIPrincipal* aSubjectPrincipal) override;
 
-  void IndexedGetter(uint32_t aIndex, bool& aFound, nsAString& aPropName) final;
+  void IndexedGetter(uint32_t aIndex, bool& aFound, nsACString& aPropName) final;
 
   enum StyleType {
     eDefaultOnly,  // Only includes UA and user sheets
@@ -105,8 +105,8 @@ class nsComputedDOMStyle final : public nsDOMCSSDeclaration,
     mExposeVisitedStyle = aExpose;
   }
 
-  void GetCSSImageURLs(const nsAString& aPropertyName,
-                       nsTArray<nsString>& aImageURLs,
+  void GetCSSImageURLs(const nsACString& aPropertyName,
+                       nsTArray<nsCString>& aImageURLs,
                        mozilla::ErrorResult& aRv) final;
 
   // nsDOMCSSDeclaration abstract methods which should never be called
@@ -197,7 +197,7 @@ class nsComputedDOMStyle final : public nsDOMCSSDeclaration,
                               const mozilla::StyleTrackBreadth&);
   already_AddRefed<CSSValue> GetGridTemplateColumnsRows(
       const mozilla::StyleGridTemplateComponent& aTrackList,
-      const mozilla::ComputedGridTrackInfo* aTrackInfo);
+      const mozilla::ComputedGridTrackInfo& aTrackInfo);
 
   bool GetLineHeightCoord(nscoord& aCoord);
 
@@ -259,8 +259,6 @@ class nsComputedDOMStyle final : public nsDOMCSSDeclaration,
   /* Text Properties */
   already_AddRefed<CSSValue> DoGetLineHeight();
   already_AddRefed<CSSValue> DoGetTextDecoration();
-  already_AddRefed<CSSValue> DoGetTextDecorationColor();
-  already_AddRefed<CSSValue> DoGetTextDecorationStyle();
 
   /* Display properties */
   already_AddRefed<CSSValue> DoGetTransform();
@@ -329,7 +327,7 @@ class nsComputedDOMStyle final : public nsDOMCSSDeclaration,
 
   // Find out if we can safely skip flushing (i.e. pending restyles do not
   // affect our element).
-  bool NeedsToFlushStyle() const;
+  bool NeedsToFlushStyle(nsCSSPropertyID) const;
   // Find out if we need to flush layout of the document, depending on the
   // property that was requested.
   bool NeedsToFlushLayout(nsCSSPropertyID) const;

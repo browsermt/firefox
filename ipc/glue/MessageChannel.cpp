@@ -8,6 +8,7 @@
 #include "mozilla/ipc/MessageChannel.h"
 
 #include "mozilla/Assertions.h"
+#include "mozilla/CycleCollectedJSContext.h"
 #include "mozilla/DebugOnly.h"
 #include "mozilla/dom/ScriptSettings.h"
 #include "mozilla/ipc/ProcessChild.h"
@@ -25,6 +26,7 @@
 #include "nsContentUtils.h"
 #include "nsDataHashtable.h"
 #include "nsDebug.h"
+#include "nsIMemoryReporter.h"
 #include "nsISupportsImpl.h"
 #include "nsPrintfCString.h"
 #include <math.h>
@@ -32,6 +34,10 @@
 #ifdef MOZ_TASK_TRACER
 #  include "GeckoTaskTracer.h"
 using namespace mozilla::tasktracer;
+#endif
+
+#ifdef MOZ_GECKO_PROFILER
+#  include "ProfilerMarkerPayload.h"
 #endif
 
 // Undo the damage done by mozzconf.h
@@ -112,7 +118,6 @@ using namespace mozilla::ipc;
 using mozilla::MonitorAutoLock;
 using mozilla::MonitorAutoUnlock;
 using mozilla::dom::AutoNoJSAPI;
-using mozilla::dom::ScriptSettingsInitialized;
 
 #define IPC_ASSERT(_cond, ...)                                           \
   do {                                                                   \
@@ -829,7 +834,7 @@ bool MessageChannel::Open(Transport* aTransport, MessageLoop* aIOLoop,
 
   mMonitor = new RefCountedMonitor();
   mWorkerLoop = MessageLoop::current();
-  mWorkerThread = GetCurrentVirtualThread();
+  mWorkerThread = PR_GetCurrentThread();
   mWorkerLoop->AddDestructionObserver(this);
   mListener->OnIPCChannelOpened();
 
@@ -910,7 +915,7 @@ void MessageChannel::OnOpenAsSlave(MessageChannel* aTargetChan, Side aSide) {
 void MessageChannel::CommonThreadOpenInit(MessageChannel* aTargetChan,
                                           Side aSide) {
   mWorkerLoop = MessageLoop::current();
-  mWorkerThread = GetCurrentVirtualThread();
+  mWorkerThread = PR_GetCurrentThread();
   mWorkerLoop->AddDestructionObserver(this);
   mListener->OnIPCChannelOpened();
 
@@ -1002,11 +1007,17 @@ bool MessageChannel::Send(Message* aMsg) {
     return false;
   }
 
+  if (msg->seqno() == 0) {
+    msg->set_seqno(NextSeqno());
+  }
+
   MonitorAutoLock lock(*mMonitor);
   if (!Connected()) {
     ReportConnectionError("MessageChannel", msg.get());
     return false;
   }
+
+  AddProfilerMarker(msg.get(), MessageDirection::eSending);
   SendMessageToLink(msg.release());
   return true;
 }
@@ -1531,6 +1542,7 @@ bool MessageChannel::Send(Message* aMsg, Message* aReply) {
   // msg will be destroyed soon, but name() is not owned by msg.
   const char* msgName = msg->name();
 
+  AddProfilerMarker(msg.get(), MessageDirection::eSending);
   SendMessageToLink(msg.release());
 
   while (true) {
@@ -1618,6 +1630,8 @@ bool MessageChannel::Send(Message* aMsg, Message* aReply) {
   MOZ_RELEASE_ASSERT(reply->type() == replyType, "wrong reply type");
   MOZ_RELEASE_ASSERT(reply->is_sync());
 
+  AddProfilerMarker(reply.get(), MessageDirection::eReceiving);
+
   *aReply = std::move(*reply);
   if (aReply->size() >= kMinTelemetryMessageSize) {
     Telemetry::Accumulate(Telemetry::IPC_REPLY_SIZE,
@@ -1668,6 +1682,9 @@ bool MessageChannel::Call(Message* aMsg, Message* aReply) {
   msg->set_interrupt_remote_stack_depth_guess(mRemoteStackDepthGuess);
   msg->set_interrupt_local_stack_depth(1 + InterruptStackDepth());
   mInterruptStack.push(MessageInfo(*msg));
+
+  AddProfilerMarker(msg.get(), MessageDirection::eSending);
+
   mLink->SendMessage(msg.release());
 
   while (true) {
@@ -1774,6 +1791,8 @@ bool MessageChannel::Call(Message* aMsg, Message* aReply) {
       // We received a reply to our most recent outstanding call. Pop
       // this frame and return the reply.
       mInterruptStack.pop();
+
+      AddProfilerMarker(&recvd, MessageDirection::eReceiving);
 
       bool is_reply_error = recvd.is_reply_error();
       if (!is_reply_error) {
@@ -2048,10 +2067,13 @@ MessageChannel::MessageTask::GetPriority(uint32_t* aPriority) {
       *aPriority = PRIORITY_NORMAL;
       break;
     case Message::INPUT_PRIORITY:
-      *aPriority = PRIORITY_INPUT;
+      *aPriority = PRIORITY_INPUT_HIGH;
       break;
     case Message::HIGH_PRIORITY:
       *aPriority = PRIORITY_HIGH;
+      break;
+    case Message::MEDIUMHIGH_PRIORITY:
+      *aPriority = PRIORITY_MEDIUMHIGH;
       break;
     default:
       MOZ_ASSERT(false);
@@ -2079,12 +2101,15 @@ void MessageChannel::DispatchMessage(Message&& aMsg) {
   RefPtr<ActorLifecycleProxy> listenerProxy = mListener->GetLifecycleProxy();
 
   Maybe<AutoNoJSAPI> nojsapi;
-  if (ScriptSettingsInitialized() && NS_IsMainThread()) nojsapi.emplace();
+  if (NS_IsMainThread() && CycleCollectedJSContext::Get()) {
+    nojsapi.emplace();
+  }
 
   nsAutoPtr<Message> reply;
 
   IPC_LOG("DispatchMessage: seqno=%d, xid=%d", aMsg.seqno(),
           aMsg.transaction_id());
+  AddProfilerMarker(&aMsg, MessageDirection::eReceiving);
 
   {
     AutoEnterTransaction transaction(this, aMsg);
@@ -2123,6 +2148,8 @@ void MessageChannel::DispatchMessage(Message&& aMsg) {
   if (reply && ChannelConnected == mChannelState) {
     IPC_LOG("Sending reply seqno=%d, xid=%d", aMsg.seqno(),
             aMsg.transaction_id());
+    AddProfilerMarker(reply.get(), MessageDirection::eSending);
+
     mLink->SendMessage(reply.forget());
   }
 }
@@ -2224,6 +2251,7 @@ void MessageChannel::DispatchInterruptMessage(ActorLifecycleProxy* aProxy,
 
   MonitorAutoLock lock(*mMonitor);
   if (ChannelConnected == mChannelState) {
+    AddProfilerMarker(reply.get(), MessageDirection::eSending);
     mLink->SendMessage(reply.forget());
   }
 }
@@ -2806,6 +2834,19 @@ void MessageChannel::DumpInterruptStack(const char* const pfx) const {
     printf_stderr("%s[(%u) %s %s %s(actor=%d) ]\n", pfx, i, dir, sems, name,
                   id);
   }
+}
+
+void MessageChannel::AddProfilerMarker(const IPC::Message* aMessage,
+                                       MessageDirection aDirection) {
+#ifdef MOZ_GECKO_PROFILER
+  if (profiler_feature_active(ProfilerFeature::IPCMessages)) {
+    int32_t pid = mPeerPid == -1 ? base::GetCurrentProcId() : mPeerPid;
+    PROFILER_ADD_MARKER_WITH_PAYLOAD(
+        "IPC", IPC, IPCMarkerPayload,
+        (pid, aMessage->seqno(), aMessage->type(), mSide, aDirection,
+         aMessage->is_sync(), TimeStamp::Now()));
+  }
+#endif
 }
 
 int32_t MessageChannel::GetTopmostMessageRoutingId() const {

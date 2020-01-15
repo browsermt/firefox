@@ -12,16 +12,12 @@
 #include "mozilla/ipc/URIUtils.h"
 #include "mozilla/net/NeckoCommon.h"
 
-#include "nsIApplicationCacheContainer.h"
 #include "nsIApplicationCacheChannel.h"
-#include "nsIApplicationCacheService.h"
 #include "nsIDocShell.h"
-#include "nsIDocShellTreeItem.h"
-#include "nsIDocShellTreeOwner.h"
 #include "nsPIDOMWindow.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/net/CookieSettings.h"
 #include "nsIObserverService.h"
-#include "nsIURL.h"
 #include "nsIBrowserChild.h"
 #include "nsNetCID.h"
 #include "nsNetUtil.h"
@@ -30,7 +26,6 @@
 #include "nsThreadUtils.h"
 #include "nsProxyRelease.h"
 #include "mozilla/Logging.h"
-#include "nsIAsyncVerifyRedirectCallback.h"
 #include "nsApplicationCache.h"
 
 using namespace mozilla::ipc;
@@ -118,6 +113,8 @@ void OfflineCacheUpdateChild::SetDocument(Document* aDocument) {
   // implicit (which are the reasons we collect documents here).
   if (!aDocument) return;
 
+  mCookieSettings = aDocument->CookieSettings();
+
   nsIChannel* channel = aDocument->GetChannel();
   nsCOMPtr<nsIApplicationCacheChannel> appCacheChannel =
       do_QueryInterface(channel);
@@ -202,7 +199,8 @@ NS_IMETHODIMP
 OfflineCacheUpdateChild::InitPartial(nsIURI* aManifestURI,
                                      const nsACString& clientID,
                                      nsIURI* aDocumentURI,
-                                     nsIPrincipal* aLoadingPrincipal) {
+                                     nsIPrincipal* aLoadingPrincipal,
+                                     nsICookieSettings* aCookieSettings) {
   MOZ_ASSERT_UNREACHABLE(
       "Not expected to do partial offline cache updates"
       " on the child process");
@@ -248,6 +246,14 @@ OfflineCacheUpdateChild::GetStatus(uint16_t* aStatus) {
 NS_IMETHODIMP
 OfflineCacheUpdateChild::GetPartial(bool* aPartial) {
   *aPartial = false;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+OfflineCacheUpdateChild::GetLoadingPrincipal(nsIPrincipal** aLoadingPrincipal) {
+  NS_ENSURE_TRUE(mState >= STATE_INITIALIZED, NS_ERROR_NOT_INITIALIZED);
+
+  NS_IF_ADDREF(*aLoadingPrincipal = mLoadingPrincipal);
   return NS_OK;
 }
 
@@ -386,8 +392,14 @@ OfflineCacheUpdateChild::Schedule() {
   // See also nsOfflineCacheUpdate::ScheduleImplicit.
   bool stickDocument = mDocument != nullptr;
 
+  CookieSettingsArgs csArgs;
+  if (mCookieSettings) {
+    CookieSettings::Cast(mCookieSettings)->Serialize(csArgs);
+  }
+
   ContentChild::GetSingleton()->SendPOfflineCacheUpdateConstructor(
-      this, manifestURI, documentURI, loadingPrincipalInfo, stickDocument);
+      this, manifestURI, documentURI, loadingPrincipalInfo, stickDocument,
+      csArgs);
 
   return NS_OK;
 }

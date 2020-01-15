@@ -81,21 +81,13 @@ class nsXPLookAndFeel : public mozilla::LookAndFeel {
 
   virtual void NativeInit() = 0;
 
-  void SetPrefersReducedMotionOverrideForTest(bool aValue) {
-    sIsInPrefersReducedMotionForTest = true;
-    sPrefersReducedMotionForTest = aValue;
-  }
-  void ResetPrefersReducedMotionOverrideForTest() {
-    sIsInPrefersReducedMotionForTest = false;
-    sPrefersReducedMotionForTest = false;
-  }
-
  protected:
-  nsXPLookAndFeel();
+  nsXPLookAndFeel() = default;
 
   static void IntPrefChanged(nsLookAndFeelIntPref* data);
   static void FloatPrefChanged(nsLookAndFeelFloatPref* data);
   static void ColorPrefChanged(unsigned int index, const char* prefName);
+  static void NotifyPrefChanged();
   void InitFromPref(nsLookAndFeelIntPref* aPref);
   void InitFromPref(nsLookAndFeelFloatPref* aPref);
   void InitColorFromPref(int32_t aIndex);
@@ -103,6 +95,7 @@ class nsXPLookAndFeel : public mozilla::LookAndFeel {
   bool IsSpecialColor(ColorID aID, nscolor& aColor);
   bool ColorIsNotCSSAccessible(ColorID aID);
   nscolor GetStandinForNativeColor(ColorID aID);
+  void RecordTelemetry();
 
   static void OnPrefChanged(const char* aPref, void* aClosure);
 
@@ -119,12 +112,11 @@ class nsXPLookAndFeel : public mozilla::LookAndFeel {
   static nsXPLookAndFeel* sInstance;
   static bool sShutdown;
 
-  static bool sIsInPrefersReducedMotionForTest;
-  static bool sPrefersReducedMotionForTest;
-
+  int32_t mPrefersReducedMotion = -1;
+  bool mPrefersReducedMotionCached = false;
   // True if we shouldn't clear the cache value in RefreshImpl().
   // NOTE: This should be used only for testing.
-  bool mShouldRetainCacheForTest;
+  bool mShouldRetainCacheForTest = false;
 };
 
 #endif

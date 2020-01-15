@@ -218,6 +218,12 @@ class FrameInfo {
     return Address(BaselineFrameReg,
                    BaselineFrame::reverseOffsetOfScratchValueHigh32());
   }
+#ifdef DEBUG
+  Address addressOfDebugFrameSize() const {
+    return Address(BaselineFrameReg,
+                   BaselineFrame::reverseOffsetOfDebugFrameSize());
+  }
+#endif
 };
 
 class CompilerFrameInfo : public FrameInfo {
@@ -231,7 +237,7 @@ class CompilerFrameInfo : public FrameInfo {
   MOZ_MUST_USE bool init(TempAllocator& alloc);
 
   size_t nlocals() const { return script->nfixed(); }
-  size_t nargs() const { return script->functionNonDelazifying()->nargs(); }
+  size_t nargs() const { return script->function()->nargs(); }
 
  private:
   inline StackValue* rawPush() {
@@ -336,6 +342,10 @@ class CompilerFrameInfo : public FrameInfo {
 
   void storeStackValue(int32_t depth, const Address& dest,
                        const ValueOperand& scratch);
+
+  uint32_t frameSize() const {
+    return BaselineFrame::frameSizeForNumValueSlots(nlocals() + stackDepth());
+  }
 
 #ifdef DEBUG
   // Assert the state is valid before excuting "pc".

@@ -287,6 +287,8 @@ class RustJSPrincipal : public JSPrincipals {
     if (this->destroyCallback) this->destroyCallback(this);
   }
 
+  bool isSystemOrAddonPrincipal() { return false; }
+
   bool write(JSContext* cx, JSStructuredCloneWriter* writer) {
     return this->writeCallback ? this->writeCallback(cx, writer) : false;
   }
@@ -633,6 +635,11 @@ void CallObjectTracer(JSTracer* trc, JS::Heap<JSObject*>* objp,
 void CallStringTracer(JSTracer* trc, JS::Heap<JSString*>* strp,
                       const char* name) {
   JS::TraceEdge(trc, strp, name);
+}
+
+void CallBigIntTracer(JSTracer* trc, JS::Heap<JS::BigInt*>* bip,
+                      const char* name) {
+  JS::TraceEdge(trc, bip, name);
 }
 
 void CallScriptTracer(JSTracer* trc, JS::Heap<JSScript*>* scriptp,

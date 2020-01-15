@@ -20,9 +20,9 @@
 #include "nsCSSPropertyID.h"
 #include "nsStyleStructFwd.h"
 #include "nsCSSKeywords.h"
+#include "mozilla/UseCounter.h"
 #include "mozilla/CSSEnabledState.h"
 #include "mozilla/CSSPropFlags.h"
-#include "mozilla/UseCounter.h"
 #include "mozilla/EnumTypeTraits.h"
 #include "mozilla/Preferences.h"
 #include "nsXULAppAPI.h"
@@ -86,21 +86,14 @@ class nsCSSProps {
     return Servo_Property_LookupEnabledForAllContent(&aProperty);
   }
 
-  static nsCSSPropertyID LookupProperty(const nsAString& aProperty) {
-    NS_ConvertUTF16toUTF8 utf8(aProperty);
-    return LookupProperty(utf8);
-  }
-
   // As above, but looked up using a property's IDL name.
-  // eCSSPropertyExtra_variable won't be returned from these methods.
-  static nsCSSPropertyID LookupPropertyByIDLName(
-      const nsAString& aPropertyIDLName, EnabledState aEnabled);
+  // eCSSPropertyExtra_variable won't be returned from this method.
   static nsCSSPropertyID LookupPropertyByIDLName(
       const nsACString& aPropertyIDLName, EnabledState aEnabled);
 
   // Returns whether aProperty is a custom property name, i.e. begins with
   // "--".  This assumes that the CSS Variables pref has been enabled.
-  static bool IsCustomPropertyName(const nsAString& aProperty);
+  static bool IsCustomPropertyName(const nsACString& aProperty);
 
   static bool IsShorthand(nsCSSPropertyID aProperty) {
     MOZ_ASSERT(0 <= aProperty && aProperty < eCSSProperty_COUNT,
@@ -109,7 +102,15 @@ class nsCSSProps {
   }
 
   // Same but for @font-face descriptors
-  static nsCSSFontDesc LookupFontDesc(const nsAString& aProperty);
+  static nsCSSFontDesc LookupFontDesc(const nsACString& aProperty);
+
+  // The relevant invariants are asserted in Document.cpp
+  static mozilla::UseCounter UseCounterFor(nsCSSPropertyID aProperty) {
+    MOZ_ASSERT(0 <= aProperty && aProperty < eCSSProperty_COUNT_with_aliases,
+               "out of range");
+    return mozilla::UseCounter(size_t(mozilla::eUseCounter_FirstCSSProperty) +
+                               size_t(aProperty));
+  }
 
   // Given a property enum, get the string value
   //
@@ -239,19 +240,7 @@ class nsCSSProps {
     return gPropertyEnabled[aProperty];
   }
 
-  // A table for the use counter associated with each CSS property.  If a
-  // property does not have a use counter defined in UseCounters.conf, then
-  // its associated entry is |eUseCounter_UNKNOWN|.
-  static const mozilla::UseCounter
-      gPropertyUseCounter[eCSSProperty_COUNT_no_shorthands];
-
  public:
-  static mozilla::UseCounter UseCounterFor(nsCSSPropertyID aProperty) {
-    MOZ_ASSERT(0 <= aProperty && aProperty < eCSSProperty_COUNT_no_shorthands,
-               "out of range");
-    return gPropertyUseCounter[aProperty];
-  }
-
   static bool IsEnabled(nsCSSPropertyID aProperty, EnabledState aEnabled) {
     if (IsEnabled(aProperty)) {
       return true;

@@ -10,22 +10,30 @@ from abc import ABCMeta, abstractmethod
 import json
 import os
 import posixpath
+import re
 import shutil
-import signal
+import six
+import subprocess
 import sys
 import tempfile
 import time
+import tarfile
 
 import requests
 
 import mozcrash
 import mozinfo
 import mozprocess
+import mozproxy.utils as mpu
+import mozversion
+from condprof.client import get_profile, ProfileNotFoundError
+from condprof.util import get_current_platform
 from logger.logger import RaptorLogger
 from mozdevice import ADBDevice
 from mozlog import commandline
 from mozpower import MozPower
 from mozprofile import create_profile
+from mozprofile.cli import parse_preferences
 from mozproxy import get_playback
 from mozrunner import runners
 
@@ -60,25 +68,18 @@ from manifest import get_raptor_test_list
 from memory import generate_android_memory_profile
 from performance_tuning import tune_performance
 from power import init_android_power_test, finish_android_power_test
-from results import RaptorResultsHandler
+from results import RaptorResultsHandler, BrowsertimeResultsHandler
 from utils import view_gecko_profile, write_yml_file
-from cpu import generate_android_cpu_profile
+from cpu import start_android_cpu_profiler
+
+from signal_handler import SignalHandler, SignalHandlerException
 
 LOG = RaptorLogger(component='raptor-main')
+# Bug 1547943 - Intermittent mozrunner.errors.RunnerNotStartedError
+# - mozproxy.utils LOG displayed INFO messages even when LOG.error() was used in mitm.py
+mpu.LOG = RaptorLogger(component='raptor-mitmproxy')
 
-
-class SignalHandler:
-
-    def __init__(self):
-        signal.signal(signal.SIGINT, self.handle_signal)
-        signal.signal(signal.SIGTERM, self.handle_signal)
-
-    def handle_signal(self, signum, frame):
-        raise SignalHandlerException("Program aborted due to signal %s" % signum)
-
-
-class SignalHandlerException(Exception):
-    pass
+DEFAULT_CHROMEVERSION = '77'
 
 
 class Perftest(object):
@@ -88,11 +89,13 @@ either Raptor or browsertime."""
     __metaclass__ = ABCMeta
 
     def __init__(self, app, binary, run_local=False, noinstall=False,
-                 obj_path=None, profile_class=None,
+                 obj_path=None, profile_class=None, installerpath=None,
                  gecko_profile=False, gecko_profile_interval=None, gecko_profile_entries=None,
                  symbols_path=None, host=None, power_test=False, cpu_test=False, memory_test=False,
                  is_release_build=False, debug_mode=False, post_startup_delay=None,
-                 interrupt_handler=None, e10s=True, enable_webrender=False, **kwargs):
+                 interrupt_handler=None, e10s=True, enable_webrender=False,
+                 results_handler_class=RaptorResultsHandler, no_conditioned_profile=False,
+                 device_name=None, extra_prefs={}, **kwargs):
 
         # Override the magic --host HOST_IP with the value of the environment variable.
         if host == 'HOST_IP':
@@ -114,15 +117,35 @@ either Raptor or browsertime."""
             'memory_test': memory_test,
             'cpu_test': cpu_test,
             'is_release_build': is_release_build,
-            'enable_control_server_wait': memory_test,
+            'enable_control_server_wait': memory_test or cpu_test,
             'e10s': e10s,
             'enable_webrender': enable_webrender,
+            'no_conditioned_profile': no_conditioned_profile,
+            'device_name': device_name,
+            'enable_fission': extra_prefs.get('fission.autostart', False),
+            'extra_prefs': extra_prefs
         }
+
+        self.firefox_android_apps = FIREFOX_ANDROID_APPS
+        # See bugs 1582757, 1606199, and 1606767; until we support win10-aarch64,
+        # fennec_aurora, and reference browser conditioned-profile builds,
+        # fall back to mozrunner-created profiles
+        self.no_condprof = ((self.config['platform'] == 'win'
+                             and self.config['processor'] == 'aarch64') or
+                            self.config['binary'] == 'org.mozilla.fennec_aurora' or
+                            self.config['binary'] == 'org.mozilla.reference.browser.raptor' or
+                            self.config['no_conditioned_profile'])
+        LOG.info("self.no_condprof is: {}".format(self.no_condprof))
+
         # We can never use e10s on fennec
         if self.config['app'] == 'fennec':
             self.config['e10s'] = False
 
+        self.browser_name = None
+        self.browser_version = None
+
         self.raptor_venv = os.path.join(os.getcwd(), 'raptor-venv')
+        self.installerpath = installerpath
         self.playback = None
         self.benchmark = None
         self.benchmark_port = 0
@@ -130,8 +153,14 @@ either Raptor or browsertime."""
         self.post_startup_delay = post_startup_delay
         self.device = None
         self.profile_class = profile_class or app
-        self.firefox_android_apps = FIREFOX_ANDROID_APPS
+        self.conditioned_profile_dir = None
         self.interrupt_handler = interrupt_handler
+        self.results_handler = results_handler_class(**self.config)
+
+        self.browser_name, self.browser_version = self.get_browser_meta()
+
+        browser_name, browser_version = self.get_browser_meta()
+        self.results_handler.add_browser_meta(self.config['app'], browser_version)
 
         # debug mode is currently only supported when running locally
         self.debug_mode = debug_mode if self.config['run_local'] else False
@@ -141,17 +170,59 @@ either Raptor or browsertime."""
             self.post_startup_delay = min(self.post_startup_delay, 3000)
             LOG.info("debug-mode enabled, reducing post-browser startup pause to %d ms"
                      % self.post_startup_delay)
-
         LOG.info("main raptor init, config is: %s" % str(self.config))
-
-        # setup the control server
-        self.results_handler = RaptorResultsHandler(self.config)
 
         self.build_browser_profile()
 
-    def build_browser_profile(self):
-        self.profile = create_profile(self.profile_class)
+    @property
+    def is_localhost(self):
+        return self.config.get('host') in ('localhost', '127.0.0.1')
 
+    def get_conditioned_profile(self):
+        """Downloads a platform-specific conditioned profile, using the
+        condprofile client API; returns a self.conditioned_profile_dir"""
+
+        # create a temp file to help ensure uniqueness
+        temp_download_dir = tempfile.mkdtemp()
+        LOG.info("Making temp_download_dir from inside get_conditioned_profile {}"
+                 .format(temp_download_dir))
+        # call condprof's client API to yield our platform-specific
+        # conditioned-profile binary
+        if isinstance(self, PerftestAndroid):
+            android_app = self.config["binary"].split("org.mozilla.")[-1]
+            device_name = self.config.get("device_name")
+            if device_name is None:
+                device_name = "g5"
+            platform = "%s-%s" % (device_name, android_app)
+        else:
+            platform = get_current_platform()
+        try:
+            cond_prof_target_dir = get_profile(temp_download_dir, platform, "settled")
+        except ProfileNotFoundError:
+            # If we can't find the profile on mozilla-central, we look on try
+            cond_prof_target_dir = get_profile(temp_download_dir, platform,
+                                               "settled", repo="try")
+        # now get the full directory path to our fetched conditioned profile
+        self.conditioned_profile_dir = os.path.join(temp_download_dir, cond_prof_target_dir)
+        if not os.path.exists(cond_prof_target_dir):
+            LOG.critical("Can't find target_dir {}, from get_profile()"
+                         "temp_download_dir {}, platform {}, settled"
+                         .format(cond_prof_target_dir, temp_download_dir, platform))
+            raise OSError
+
+        LOG.info("self.conditioned_profile_dir is now set: {}"
+                 .format(self.conditioned_profile_dir))
+        shutil.rmtree(temp_download_dir)
+
+        return self.conditioned_profile_dir
+
+    def build_browser_profile(self):
+        if self.no_condprof:
+            self.profile = create_profile(self.profile_class)
+        else:
+            self.get_conditioned_profile()
+            # use mozprofile to create a profile for us, from our conditioned profile's path
+            self.profile = create_profile(self.profile_class, profile=self.conditioned_profile_dir)
         # Merge extra profile data from testing/profiles
         with open(os.path.join(self.profile_data_dir, 'profiles.json'), 'r') as fh:
             base_profiles = json.load(fh)['raptor']
@@ -161,8 +232,14 @@ either Raptor or browsertime."""
             LOG.info("Merging profile: {}".format(path))
             self.profile.merge(path)
 
+        if self.config['extra_prefs'].get('fission.autostart', False):
+            LOG.info('Enabling fission via browser preferences')
+            LOG.info('Browser preferences: {}'.format(self.config['extra_prefs']))
+        self.profile.set_preferences(self.config['extra_prefs'])
+
         # share the profile dir with the config and the control server
         self.config['local_profile_dir'] = self.profile.profile
+        LOG.info('Local browser profile: {}'.format(self.profile.profile))
 
     @property
     def profile_data_dir(self):
@@ -189,6 +266,23 @@ either Raptor or browsertime."""
     def run_test_setup(self, test):
         LOG.info("starting test: %s" % test['name'])
 
+        # if 'alert_on' was provided in the test INI, add to our config for results/output
+        self.config['subtest_alert_on'] = test.get('alert_on')
+
+        if test.get('playback') is not None and self.playback is None:
+            self.start_playback(test)
+
+        if test.get("preferences") is not None:
+            self.set_browser_test_prefs(test['preferences'])
+
+    @abstractmethod
+    def setup_chrome_args(self):
+        pass
+
+    @abstractmethod
+    def get_browser_meta(self):
+        pass
+
     def run_tests(self, tests, test_names):
         try:
             for test in tests:
@@ -199,7 +293,7 @@ either Raptor or browsertime."""
                     LOG.error(e)
                 finally:
                     self.run_test_teardown(test)
-            return self.process_results(test_names)
+            return self.process_results(tests, test_names)
         finally:
             self.clean_up()
 
@@ -212,13 +306,13 @@ either Raptor or browsertime."""
         self.check_for_crashes()
 
         # gecko profiling symbolication
-        if self.config['gecko_profile'] is True:
+        if self.config['gecko_profile']:
             self.gecko_profiler.symbolicate()
             # clean up the temp gecko profiling folders
             LOG.info("cleaning up after gecko profiling")
             self.gecko_profiler.clean()
 
-    def process_results(self, test_names):
+    def process_results(self, tests, test_names):
         # when running locally output results in build/raptor.json; when running
         # in production output to a local.json to be turned into tc job artifact
         raptor_json_path = os.path.join(self.artifact_dir, 'raptor.json')
@@ -226,7 +320,12 @@ either Raptor or browsertime."""
             raptor_json_path = os.path.join(os.getcwd(), 'local.json')
 
         self.config['raptor_json_path'] = raptor_json_path
-        return self.results_handler.summarize_and_output(self.config, test_names)
+        self.config['artifact_dir'] = self.artifact_dir
+        return self.results_handler.summarize_and_output(self.config, tests, test_names)
+
+    @abstractmethod
+    def set_browser_test_prefs(self):
+        pass
 
     @abstractmethod
     def check_for_crashes(self):
@@ -307,7 +406,7 @@ either Raptor or browsertime."""
     def start_playback(self, test):
         # creating the playback tool
         self.get_playback_config(test)
-        self.playback = get_playback(self.config, self.device)
+        self.playback = get_playback(self.config)
 
         self.playback.config['playback_files'] = self.get_recording_paths(test)
 
@@ -316,19 +415,268 @@ either Raptor or browsertime."""
 
         self.log_recording_dates(test)
 
+    def _init_gecko_profiling(self, test):
+        LOG.info("initializing gecko profiler")
+        upload_dir = os.getenv('MOZ_UPLOAD_DIR')
+        if not upload_dir:
+            LOG.critical("Profiling ignored because MOZ_UPLOAD_DIR was not set")
+        else:
+            self.gecko_profiler = GeckoProfile(upload_dir,
+                                               self.config,
+                                               test)
+
+
+class PerftestDesktop(Perftest):
+    """Mixin class for Desktop-specific Perftest subclasses"""
+
+    def setup_chrome_args(self, test):
+        '''Sets up chrome/chromium cmd-line arguments.
+
+        Needs to be "implemented" here to deal with Python 2
+        unittest failures.
+        '''
+        raise NotImplementedError
+
+    def desktop_chrome_args(self, test):
+        '''Returns cmd line options required to run pageload tests on Desktop Chrome
+        and Chromium. Also add the cmd line options to turn on the proxy and
+        ignore security certificate errors if using host localhost, 127.0.0.1.
+        '''
+        chrome_args = [
+            '--use-mock-keychain',
+            '--no-default-browser-check',
+        ]
+
+        if test.get('playback', False):
+            pb_args = [
+                '--proxy-server=%s:%d' % (self.playback.host, self.playback.port),
+                '--proxy-bypass-list=localhost;127.0.0.1',
+                '--ignore-certificate-errors',
+            ]
+
+            if not self.is_localhost:
+                pb_args[0] = pb_args[0].replace('127.0.0.1', self.config['host'])
+
+            chrome_args.extend(pb_args)
+
+        if self.debug_mode:
+            chrome_args.extend(['--auto-open-devtools-for-tabs'])
+
+        return chrome_args
+
+    def get_browser_meta(self):
+        '''Returns the browser name and version in a tuple (name, version).
+
+        On desktop, we use mozversion but a fallback method also exists
+        for non-firefox browsers, where mozversion is known to fail. The
+        methods are OS-specific, with windows being the outlier.
+        '''
+        browser_name = None
+        browser_version = None
+
+        try:
+            meta = mozversion.get_version(binary=self.config['binary'])
+            browser_name = meta.get('application_name')
+            browser_version = meta.get('application_version')
+        except Exception as e:
+            LOG.warning(
+                "Failed to get browser meta data through mozversion: %s-%s" %
+                (e.__class__.__name__, e)
+            )
+            LOG.info("Attempting to get version through fallback method...")
+
+            # Fall-back method to get browser version on desktop
+            try:
+                if 'linux' in self.config['platform'] or 'mac' in self.config['platform']:
+                    command = [self.config['binary'], '--version']
+                    proc = mozprocess.ProcessHandler(command)
+                    proc.run(timeout=10, outputTimeout=10)
+                    proc.wait()
+
+                    bmeta = proc.output
+                    meta_re = re.compile(r"([A-z\s]+)\s+([\w.]*)")
+                    if len(bmeta) != 0:
+                        match = meta_re.match(bmeta[0])
+                        if match:
+                            browser_name = self.config['app']
+                            browser_version = match.group(2)
+                    else:
+                        LOG.info("Couldn't get browser version and name")
+                else:
+                    # On windows we need to use wimc to get the version
+                    command = r'wmic datafile where name="{0}"'.format(
+                        self.config['binary'].replace('\\', r"\\")
+                    )
+                    bmeta = subprocess.check_output(command)
+
+                    meta_re = re.compile(r"\s+([\d.a-z]+)\s+")
+                    match = meta_re.findall(bmeta)
+                    if len(match) > 0:
+                        browser_name = self.config['app']
+                        browser_version = match[-1]
+                    else:
+                        LOG.info("Couldn't get browser version and name")
+            except Exception as e:
+                LOG.warning(
+                    "Failed to get browser meta data through fallback method: %s-%s" %
+                    (e.__class__.__name__, e)
+                )
+
+        if not browser_name:
+            LOG.warning("Could not find a browser name")
+        else:
+            LOG.info("Browser name: %s" % browser_name)
+
+        if not browser_version:
+            LOG.warning("Could not find a browser version")
+        else:
+            LOG.info("Browser version: %s" % browser_version)
+
+        return (browser_name, browser_version)
+
+
+class PerftestAndroid(Perftest):
+    """Mixin class for Android-specific Perftest subclasses."""
+
+    def setup_chrome_args(self, test):
+        '''Sets up chrome/chromium cmd-line arguments.
+
+        Needs to be "implemented" here to deal with Python 2
+        unittest failures.
+        '''
+        raise NotImplementedError
+
+    def get_browser_meta(self):
+        '''Returns the browser name and version in a tuple (name, version).
+
+        Uses mozversion as the primary method to get this meta data and for
+        android this is the only method which exists to get this data. With android,
+        we use the installerpath attribute to determine this and this only works
+        with Firefox browsers.
+        '''
+        browser_name = None
+        browser_version = None
+
+        if self.config['app'] in self.firefox_android_apps:
+            try:
+                meta = mozversion.get_version(binary=self.installerpath)
+                browser_name = meta.get('application_name')
+                browser_version = meta.get('application_version')
+            except Exception as e:
+                LOG.warning(
+                    "Failed to get android browser meta data through mozversion: %s-%s" %
+                    (e.__class__.__name__, e)
+                )
+
+        if not browser_name:
+            LOG.warning("Could not find a browser name")
+        else:
+            LOG.info("Browser name: %s" % browser_name)
+
+        if not browser_version:
+            LOG.warning("Could not find a browser version")
+        else:
+            LOG.info("Browser version: %s" % browser_version)
+
+        return (browser_name, browser_version)
+
+    def set_reverse_port(self, port):
+        tcp_port = "tcp:{}".format(port)
+        self.device.create_socket_connection('reverse', tcp_port, tcp_port)
+
+    def set_reverse_ports(self):
+        if self.is_localhost:
+
+            # only raptor-webext uses the control server
+            if self.config.get('browsertime', False) is False:
+                LOG.info("making the raptor control server port available to device")
+                self.set_reverse_port(self.control_server.port)
+
+            if self.playback:
+                LOG.info("making the raptor playback server port available to device")
+                self.set_reverse_port(self.playback.port)
+
+            if self.benchmark:
+                LOG.info("making the raptor benchmarks server port available to device")
+                self.set_reverse_port(self.benchmark_port)
+        else:
+            LOG.info("Reverse port forwarding is uded only on local devices")
+
+    def build_browser_profile(self):
+        super(PerftestAndroid, self).build_browser_profile()
+
+        # Merge in the Android profile.
+        path = os.path.join(self.profile_data_dir, 'raptor-android')
+        LOG.info("Merging profile: {}".format(path))
+        self.profile.merge(path)
+        self.profile.set_preferences({'browser.tabs.remote.autostart': self.config['e10s']})
+
+    def clear_app_data(self):
+        LOG.info("clearing %s app data" % self.config['binary'])
+        self.device.shell("pm clear %s" % self.config['binary'])
+
+    def set_debug_app_flag(self):
+        # required so release apks will read the android config.yml file
+        LOG.info("setting debug-app flag for %s" % self.config['binary'])
+        self.device.shell("am set-debug-app --persistent %s" % self.config['binary'])
+
+    def copy_profile_to_device(self):
+        """Copy the profile to the device, and update permissions of all files."""
+        if not self.device.is_app_installed(self.config['binary']):
+            raise Exception('%s is not installed' % self.config['binary'])
+
+        try:
+            LOG.info("copying profile to device: %s" % self.remote_profile)
+            self.device.rm(self.remote_profile, force=True, recursive=True)
+            # self.device.mkdir(self.remote_profile)
+            self.device.push(self.profile.profile, self.remote_profile)
+            self.device.chmod(self.remote_profile, recursive=True, root=True)
+
+        except Exception:
+            LOG.error("Unable to copy profile to device.")
+            raise
+
+    def turn_on_android_app_proxy(self):
+        # for geckoview/android pageload playback we can't use a policy to turn on the
+        # proxy; we need to set prefs instead; note that the 'host' may be different
+        # than '127.0.0.1' so we must set the prefs accordingly
+        proxy_prefs = {}
+        proxy_prefs["network.proxy.type"] = 1
+        proxy_prefs["network.proxy.http"] = self.playback.host
+        proxy_prefs["network.proxy.http_port"] = self.playback.port
+        proxy_prefs["network.proxy.ssl"] = self.playback.host
+        proxy_prefs["network.proxy.ssl_port"] = self.playback.port
+        proxy_prefs["network.proxy.no_proxies_on"] = self.config['host']
+
+        LOG.info("setting profile prefs to turn on the android app proxy: {}".format(proxy_prefs))
+        self.profile.set_preferences(proxy_prefs)
+
 
 class Browsertime(Perftest):
-    """Container class for Browsertime"""
+    """Abstract base class for Browsertime"""
 
-    def __init__(self, *args, **kwargs):
-        for key in kwargs.keys():
+    __metaclass__ = ABCMeta
+
+    @property
+    @abstractmethod
+    def browsertime_args(self):
+        pass
+
+    def __init__(self, app, binary, process_handler=None, **kwargs):
+        self.process_handler = process_handler or mozprocess.ProcessHandler
+        for key in list(kwargs):
             if key.startswith('browsertime_'):
                 value = kwargs.pop(key)
                 setattr(self, key, value)
 
-        super(Browsertime, self).__init__(*args, **kwargs)
+        def klass(**config):
+            root_results_dir = os.path.join(os.environ.get('MOZ_UPLOAD_DIR', os.getcwd()),
+                                            'browsertime-results')
+            return BrowsertimeResultsHandler(config, root_results_dir=root_results_dir)
 
+        super(Browsertime, self).__init__(app, binary, results_handler_class=klass, **kwargs)
         LOG.info("cwd: '{}'".format(os.getcwd()))
+        self.config['browsertime'] = True
 
         # For debugging.
         for k in ("browsertime_node",
@@ -336,16 +684,50 @@ class Browsertime(Perftest):
                   "browsertime_ffmpeg",
                   "browsertime_geckodriver",
                   "browsertime_chromedriver"):
-            LOG.info("{}: {}".format(k, getattr(self, k)))
             try:
+                if not self.browsertime_video and k == "browsertime_ffmpeg":
+                    continue
+                LOG.info("{}: {}".format(k, getattr(self, k)))
                 LOG.info("{}: {}".format(k, os.stat(getattr(self, k))))
             except Exception as e:
                 LOG.info("{}: {}".format(k, e))
 
+    def build_browser_profile(self):
+        super(Browsertime, self).build_browser_profile()
+        self.remove_mozprofile_delimiters_from_profile()
+
+    def remove_mozprofile_delimiters_from_profile(self):
+        # Perftest.build_browser_profile uses mozprofile to create the profile and merge in prefs;
+        # while merging, mozprofile adds in special delimiters; these delimiters are not recognized
+        # by selenium-webdriver ultimately causing Firefox launch to fail. So we must remove these
+        # delimiters from the browser profile before passing into btime via firefox.profileTemplate
+        LOG.info("Removing mozprofile delimiters from browser profile")
+        userjspath = os.path.join(self.profile.profile, 'user.js')
+        try:
+            with open(userjspath) as userjsfile:
+                lines = userjsfile.readlines()
+            lines = [line for line in lines if not line.startswith('#MozRunner')]
+            with open(userjspath, 'w') as userjsfile:
+                userjsfile.writelines(lines)
+        except Exception as e:
+            LOG.critical("Exception {} while removing mozprofile delimiters".format(e))
+
+    def set_browser_test_prefs(self, raw_prefs):
+        # add test specific preferences
+        LOG.info("setting test-specific Firefox preferences")
+        self.profile.set_preferences(json.loads(raw_prefs))
+        self.remove_mozprofile_delimiters_from_profile()
+
     def run_test_setup(self, test):
         super(Browsertime, self).run_test_setup(test)
 
-        if test.get('playback') is not None:
+        if test.get('type') == "benchmark":
+            # benchmark-type tests require the benchmark test to be served out
+            self.benchmark = Benchmark(self.config, test)
+            test['test_url'] = test['test_url'].replace('<host>', self.benchmark.host)
+            test['test_url'] = test['test_url'].replace('<port>', self.benchmark.port)
+
+        if test.get('playback') is not None and self.playback is None:
             self.start_playback(test)
 
         # TODO: geckodriver/chromedriver from tasks.
@@ -353,13 +735,21 @@ class Browsertime(Perftest):
         if self.browsertime_geckodriver:
             self.driver_paths.extend(['--firefox.geckodriverPath', self.browsertime_geckodriver])
         if self.browsertime_chromedriver:
-            self.driver_paths.extend(['--chrome.chromedriverPath', self.browsertime_chromedriver])
+            if not self.config.get('run_local', None) or '{}' in self.browsertime_chromedriver:
+                if self.browser_version:
+                    bvers = str(self.browser_version)
+                    chromedriver_version = bvers.split('.')[0]
+                else:
+                    chromedriver_version = DEFAULT_CHROMEVERSION
 
-        self.resultdir = [
-            '--resultDir',
-            os.path.join(os.environ.get('MOZ_UPLOAD_DIR', os.getcwd()),
-                         'browsertime-results', test['name']),
-        ]
+                self.browsertime_chromedriver = self.browsertime_chromedriver.format(
+                    chromedriver_version
+                )
+
+            self.driver_paths.extend([
+                '--chrome.chromedriverPath',
+                self.browsertime_chromedriver
+            ])
 
         LOG.info('test: {}'.format(test))
 
@@ -369,6 +759,7 @@ class Browsertime(Perftest):
         # if we were using a playback tool, stop it
         if self.playback is not None:
             self.playback.stop()
+            self.playback = None
 
     def check_for_crashes(self):
         super(Browsertime, self).check_for_crashes()
@@ -376,61 +767,245 @@ class Browsertime(Perftest):
     def clean_up(self):
         super(Browsertime, self).clean_up()
 
-    def run_test(self, test, timeout):
+    def _compose_cmd(self, test, timeout):
+        browsertime_script = [os.path.join(os.path.dirname(__file__), "..",
+                              "browsertime", "browsertime_pageload.js")]
 
-        self.run_test_setup(test)
+        btime_args = self.browsertime_args
+        if self.config['app'] in ('chrome', 'chromium'):
+            btime_args.extend(self.setup_chrome_args(test))
 
-        cmd = [self.browsertime_node, self.browsertime_browsertimejs, '--browser', 'firefox'] + \
-            self.driver_paths + \
-            ['--firefox.binaryPath', self.config['binary'],
-             '--skipHar',
-             '--video', 'true',
-             '--visualMetrics', 'false',
-             '-vv'] + \
-            self.resultdir + \
-            ['-n', str(test.get('browser_cycles', 1)),
-             test['test_url']]
+        browsertime_script.extend(btime_args)
 
-        # timeout is a single page-load timeout value in ms from the test INI
-        # convert timeout to seconds and account for browser cycles
-        timeout = int(timeout / 1000) * int(test.get('browser_cycles', 1))
+        # pass a few extra options to the browsertime script
+        # XXX maybe these should be in the browsertime_args() func
+        browsertime_script.extend(["--browsertime.page_cycles",
+                                   str(test.get("page_cycles", 1))])
+        browsertime_script.extend(["--browsertime.url", test["test_url"]])
+
+        # Raptor's `pageCycleDelay` delay (ms) between pageload cycles
+        browsertime_script.extend(["--browsertime.page_cycle_delay", "1000"])
+
+        # Raptor's `post startup delay` is settle time after the browser has started
+        browsertime_script.extend(["--browsertime.post_startup_delay",
+                                   str(self.post_startup_delay)])
+
+        browsertime_options = ['--firefox.profileTemplate', str(self.profile.profile),
+                               '--skipHar',
+                               '--video', self.browsertime_video and 'true' or 'false',
+                               '--visualMetrics', 'false',
+                               # url load timeout (milliseconds)
+                               '--timeouts.pageLoad', str(timeout),
+                               # running browser scripts timeout (milliseconds)
+                               '--timeouts.script', str(timeout * int(test.get("page_cycles", 1))),
+                               '-vvv',
+                               '--resultDir', self.results_handler.result_dir_for_test(test)]
+
+        # have browsertime use our newly-created conditioned-profile path
+        if not self.no_condprof:
+            self.profile.profile = self.conditioned_profile_dir
+
+        if self.config['gecko_profile']:
+            self.config['browsertime_result_dir'] = self.results_handler.result_dir_for_test(test)
+            self._init_gecko_profiling(test)
+            browsertime_options.append('--firefox.geckoProfiler')
+
+            for option, browser_time_option in (('gecko_profile_interval',
+                                                 '--firefox.geckoProfilerParams.interval'),
+                                                ('gecko_profile_entries',
+                                                 '--firefox.geckoProfilerParams.bufferSize')):
+                value = self.config.get(option)
+                if value is None:
+                    value = test.get(option)
+                if value is not None:
+                    browsertime_options.extend([browser_time_option, str(value)])
+
+        return ([self.browsertime_node, self.browsertime_browsertimejs] +
+                self.driver_paths +
+                browsertime_script +
+                # -n option for the browsertime to restart the browser
+                browsertime_options +
+                ['-n', str(test.get('browser_cycles', 1))])
+
+    def _compute_process_timeout(self, test, timeout):
+        # bt_timeout will be the overall browsertime cmd/session timeout (seconds)
+        # browsertime deals with page cycles internally, so we need to give it a timeout
+        # value that includes all page cycles
+        bt_timeout = int(timeout / 1000) * int(test.get("page_cycles", 1))
+
+        # the post-startup-delay is a delay after the browser has started, to let it settle
+        # it's handled within browsertime itself by loading a 'preUrl' (about:blank) and having a
+        # delay after that ('preURLDelay') as the post-startup-delay, so we must add that in sec
+        bt_timeout += int(self.post_startup_delay / 1000)
 
         # add some time for browser startup, time for the browsertime measurement code
         # to be injected/invoked, and for exceptions to bubble up; be generous
-        timeout += (20 * int(test.get('browser_cycles', 1)))
+        bt_timeout += 20
+
+        # browsertime also handles restarting the browser/running all of the browser cycles;
+        # so we need to multiply our bt_timeout by the number of browser cycles
+        bt_timeout = bt_timeout * int(test.get('browser_cycles', 1))
 
         # if geckoProfile enabled, give browser more time for profiling
         if self.config['gecko_profile'] is True:
-            timeout += 5 * 60
+            bt_timeout += 5 * 60
+        return bt_timeout
+
+    def run_test(self, test, timeout):
+        self.run_test_setup(test)
+        # timeout is a single page-load timeout value (ms) from the test INI
+        # this will be used for btime --timeouts.pageLoad
+        cmd = self._compose_cmd(test, timeout)
+
+        if test.get('type') == "benchmark":
+            cmd.extend(['--script',
+                        os.path.join(os.path.dirname(__file__), "..",
+                                     "browsertime", "browsertime_benchmark.js")
+                        ])
 
         LOG.info('timeout (s): {}'.format(timeout))
         LOG.info('browsertime cwd: {}'.format(os.getcwd()))
-        LOG.info('browsertime cmd: {}'.format(cmd))
+        LOG.info('browsertime cmd: {}'.format(" ".join(cmd)))
+        if self.browsertime_video:
+            LOG.info('browsertime_ffmpeg: {}'.format(self.browsertime_ffmpeg))
 
         # browsertime requires ffmpeg on the PATH for `--video=true`.
         # It's easier to configure the PATH here than at the TC level.
         env = dict(os.environ)
-        if self.browsertime_ffmpeg:
+        if self.browsertime_video and self.browsertime_ffmpeg:
             ffmpeg_dir = os.path.dirname(os.path.abspath(self.browsertime_ffmpeg))
             old_path = env.setdefault('PATH', '')
             new_path = os.pathsep.join([ffmpeg_dir, old_path])
-            if isinstance(new_path, unicode):
+            if isinstance(new_path, six.text_type):
                 # Python 2 doesn't like unicode in the environment.
                 new_path = new_path.encode('utf-8', 'strict')
             env['PATH'] = new_path
 
+        LOG.info('PATH: {}'.format(env['PATH']))
+
         try:
-            proc = mozprocess.ProcessHandler(cmd, env=env)
-            proc.run(timeout=timeout,
+            proc = self.process_handler(cmd, env=env)
+            proc.run(timeout=self._compute_process_timeout(test, timeout),
                      outputTimeout=2*60)
             proc.wait()
 
         except Exception as e:
-            raise Exception("Error while attempting to run browsertime: %s" % str(e))
+            LOG.critical("Error while attempting to run browsertime: %s" % str(e))
+            raise
 
-    def process_results(self, test_names):
-        # TODO - Bug 1565316 - Process browsertime results and dump out for perfherder
-        LOG.info("TODO: Bug 1565316 - Process browsertime results and dump out for perfherder")
+
+class BrowsertimeDesktop(PerftestDesktop, Browsertime):
+    def __init__(self, *args, **kwargs):
+        super(BrowsertimeDesktop, self).__init__(*args, **kwargs)
+
+    @property
+    def browsertime_args(self):
+        binary_path = self.config['binary']
+        LOG.info('binary_path: {}'.format(binary_path))
+
+        if self.config['app'] == 'chrome':
+            return ['--browser', self.config['app'], '--chrome.binaryPath', binary_path]
+        return ['--browser', self.config['app'], '--firefox.binaryPath', binary_path]
+
+    def setup_chrome_args(self, test):
+        # Setup required chrome arguments
+        chrome_args = self.desktop_chrome_args(test)
+
+        # Add this argument here, it's added by mozrunner
+        # for raptor
+        chrome_args.append('--no-first-run')
+
+        btime_chrome_args = []
+        for arg in chrome_args:
+            btime_chrome_args.extend([
+                '--chrome.args=' + str(arg.replace("'", '"'))
+            ])
+
+        return btime_chrome_args
+
+
+class BrowsertimeAndroid(PerftestAndroid, Browsertime):
+    '''
+    When running raptor-browsertime tests on android, we create the profile (and set the proxy
+    prefs in the profile is using playback) but we don't need to copy it onto the device because
+    geckodriver takes care of that. We tell browsertime to use our profile (we pass it in with
+    the firefox.profileTemplate arg); browsertime creates a copy of that and passes that into
+    geckodriver. Geckodriver then takes the profile and copies it onto the mobile device's sdcard
+    for us; and then it even writes the geckoview app config.yaml file onto the device, which
+    points the app to the profile on the sdcard. Therefore raptor doesn't have to copy the profile
+    onto the scard (and create the config.yaml) file ourselves. Also note when using playback, the
+    nss certificate db is created as usual when mitmproxy is started (and saved in the profile) so
+    it is already included in the profile that browsertime/geckodriver copies onto the device.
+    '''
+    def __init__(self, app, binary, activity=None, intent=None, **kwargs):
+        super(BrowsertimeAndroid, self).__init__(app, binary, profile_class="firefox", **kwargs)
+
+        self.config.update({
+            'activity': activity,
+            'intent': intent,
+        })
+
+        self.remote_test_root = os.path.abspath(os.path.join(os.sep, 'sdcard', 'raptor'))
+        self.remote_profile = os.path.join(self.remote_test_root, "profile")
+
+    @property
+    def browsertime_args(self):
+        args_list = ['--browser', 'firefox', '--android',
+                     # Work around a `selenium-webdriver` issue where Browsertime
+                     # fails to find a Firefox binary even though we're going to
+                     # actually do things on an Android device.
+                     '--firefox.binaryPath', self.browsertime_node,
+                     '--firefox.android.package', self.config['binary'],
+                     '--firefox.android.activity', self.config['activity']]
+
+        # if running on Fenix we must add the intent as we use a special non-default one there
+        if self.config['app'] == "fenix" and self.config.get('intent') is not None:
+            args_list.extend(['--firefox.android.intentArgument=-a'])
+            args_list.extend(['--firefox.android.intentArgument', self.config['intent']])
+            args_list.extend(['--firefox.android.intentArgument=-d'])
+            args_list.extend(['--firefox.android.intentArgument', str('about:blank')])
+
+        return args_list
+
+    def build_browser_profile(self):
+        super(BrowsertimeAndroid, self).build_browser_profile()
+
+        # Merge in the Android profile.
+        path = os.path.join(self.profile_data_dir, 'raptor-android')
+        LOG.info("Merging profile: {}".format(path))
+        self.profile.merge(path)
+        self.profile.set_preferences({'browser.tabs.remote.autostart': self.config['e10s']})
+
+        # There's no great way to have "after" advice in Python, so we do this
+        # in super and then again here since the profile merging re-introduces
+        # the "#MozRunner" delimiters.
+        self.remove_mozprofile_delimiters_from_profile()
+
+    def setup_adb_device(self):
+        if self.device is None:
+            self.device = ADBDevice(verbose=True)
+            tune_performance(self.device, log=LOG)
+
+        self.clear_app_data()
+        self.set_debug_app_flag()
+
+    def run_test_setup(self, test):
+        super(BrowsertimeAndroid, self).run_test_setup(test)
+
+        self.set_reverse_ports()
+        self.turn_on_android_app_proxy()
+        self.remove_mozprofile_delimiters_from_profile()
+
+    def run_tests(self, tests, test_names):
+        self.setup_adb_device()
+
+        return super(BrowsertimeAndroid, self).run_tests(tests, test_names)
+
+    def run_test_teardown(self, test):
+        LOG.info('removing reverse socket connections')
+        self.device.remove_socket_connections('reverse')
+
+        super(BrowsertimeAndroid, self).run_test_teardown(test)
 
 
 class Raptor(Perftest):
@@ -439,8 +1014,21 @@ class Raptor(Perftest):
     def __init__(self, *args, **kwargs):
         self.raptor_webext = None
         self.control_server = None
+        self.cpu_profiler = None
 
         super(Raptor, self).__init__(*args, **kwargs)
+
+        # set up the results handler
+        self.results_handler = RaptorResultsHandler(
+            gecko_profile=self.config.get('gecko_profile'),
+            power_test=self.config.get('power_test'),
+            cpu_test=self.config.get('cpu_test'),
+            memory_test=self.config.get('memory_test'),
+            no_conditioned_profile=self.config['no_conditioned_profile'],
+            extra_prefs=self.config.get('extra_prefs')
+        )
+        browser_name, browser_version = self.get_browser_meta()
+        self.results_handler.add_browser_meta(self.config['app'], browser_version)
 
         self.start_control_server()
 
@@ -466,12 +1054,6 @@ class Raptor(Perftest):
         )
 
         self.install_raptor_webext()
-
-        if test.get("preferences") is not None:
-            self.set_browser_test_prefs(test['preferences'])
-
-        # if 'alert_on' was provided in the test INI, add to our config for results/output
-        self.config['subtest_alert_on'] = test.get('alert_on')
 
     def wait_for_test_finish(self, test, timeout):
         # this is a 'back-stop' i.e. if for some reason Raptor doesn't finish for some
@@ -505,6 +1087,9 @@ class Raptor(Perftest):
                 if response == 'webext_shutdownBrowser':
                     if self.config['memory_test']:
                         generate_android_memory_profile(self, test['name'])
+                    if self.cpu_profiler:
+                        self.cpu_profiler.generate_android_cpu_profile(test['name'])
+
                     self.control_server_wait_continue()
             time.sleep(1)
             # we only want to force browser-shutdown on timeout if not in debug mode;
@@ -521,6 +1106,7 @@ class Raptor(Perftest):
 
         if self.playback is not None:
             self.playback.stop()
+            self.playback = None
 
         self.remove_raptor_webext()
 
@@ -580,16 +1166,6 @@ class Raptor(Perftest):
         if self.config['app'] in chrome_apps:
             self.profile.addons.remove(self.raptor_webext)
 
-    def _init_gecko_profiling(self, test):
-        LOG.info("initializing gecko profiler")
-        upload_dir = os.getenv('MOZ_UPLOAD_DIR')
-        if not upload_dir:
-            LOG.critical("Profiling ignored because MOZ_UPLOAD_DIR was not set")
-        else:
-            self.gecko_profiler = GeckoProfile(upload_dir,
-                                               self.config,
-                                               test)
-
     def clean_up(self):
         super(Raptor, self).clean_up()
 
@@ -602,30 +1178,30 @@ class Raptor(Perftest):
     def control_server_wait_set(self, state):
         response = requests.post("http://127.0.0.1:%s/" % self.control_server.port,
                                  json={"type": "wait-set", "data": state})
-        return response.content
+        return response.text
 
     def control_server_wait_timeout(self, timeout):
         response = requests.post("http://127.0.0.1:%s/" % self.control_server.port,
                                  json={"type": "wait-timeout", "data": timeout})
-        return response.content
+        return response.text
 
     def control_server_wait_get(self):
         response = requests.post("http://127.0.0.1:%s/" % self.control_server.port,
                                  json={"type": "wait-get", "data": ""})
-        return response.content
+        return response.text
 
     def control_server_wait_continue(self):
         response = requests.post("http://127.0.0.1:%s/" % self.control_server.port,
                                  json={"type": "wait-continue", "data": ""})
-        return response.content
+        return response.text
 
     def control_server_wait_clear(self, state):
         response = requests.post("http://127.0.0.1:%s/" % self.control_server.port,
                                  json={"type": "wait-clear", "data": state})
-        return response.content
+        return response.text
 
 
-class RaptorDesktop(Raptor):
+class RaptorDesktop(PerftestDesktop, Raptor):
 
     def __init__(self, *args, **kwargs):
         super(RaptorDesktop, self).__init__(*args, **kwargs)
@@ -665,17 +1241,18 @@ class RaptorDesktop(Raptor):
         # unless otheriwse specified in the test INI by using 'cold = true'
         mozpower_measurer = None
         if self.config.get('power_test', False):
-            output_dir = os.path.join(self.artifact_dir, 'power-measurements')
-            test_dir = os.path.join(output_dir, test['name'].replace('/', '-').replace('\\', '-'))
+            powertest_name = test['name'].replace('/', '-').replace('\\', '-')
+            output_dir = os.path.join(self.artifact_dir, 'power-measurements-%s' % powertest_name)
+            test_dir = os.path.join(output_dir, powertest_name)
 
             try:
                 if not os.path.exists(output_dir):
                     os.mkdir(output_dir)
                 if not os.path.exists(test_dir):
                     os.mkdir(test_dir)
-            except Exception as e:
+            except Exception:
                 LOG.critical("Could not create directories to store power testing data.")
-                raise e
+                raise
 
             # Start power measurements with IPG creating a power usage log
             # every 30 seconds with 1 data point per second (or a 1000 milli-
@@ -699,12 +1276,18 @@ class RaptorDesktop(Raptor):
             if not self.config.get('run_local', False):
                 # when not running locally, zip the data and delete the folder which
                 # was placed in the zip
-                power_data_path = os.path.join(self.artifact_dir, 'power-measurements')
-                shutil.make_archive(power_data_path + '.zip', 'zip', power_data_path)
+                powertest_name = test['name'].replace('/', '-').replace('\\', '-')
+                power_data_path = os.path.join(
+                    self.artifact_dir,
+                    'power-measurements-%s' % powertest_name
+                )
+                shutil.make_archive(power_data_path, 'zip', power_data_path)
                 shutil.rmtree(power_data_path)
 
-            self.control_server.submit_supporting_data(perfherder_data['utilization'])
-            self.control_server.submit_supporting_data(perfherder_data['power-usage'])
+            for data_type in perfherder_data:
+                self.control_server.submit_supporting_data(
+                    perfherder_data[data_type]
+                )
 
     def __run_test_cold(self, test, timeout):
         '''
@@ -738,16 +1321,16 @@ class RaptorDesktop(Raptor):
 
             if test['browser_cycle'] == 1:
 
-                if test.get('playback') is not None:
-                    self.start_playback(test)
-
-                if self.config['host'] not in ('localhost', '127.0.0.1'):
+                if not self.is_localhost:
                     self.delete_proxy_settings_from_profile()
 
             else:
                 # initial browser profile was already created before run_test was called;
                 # now additional browser cycles we want to create a new one each time
                 self.build_browser_profile()
+
+                # Update runner profile
+                self.runner.profile = self.profile
 
                 self.run_test_setup(test)
 
@@ -762,10 +1345,7 @@ class RaptorDesktop(Raptor):
     def __run_test_warm(self, test, timeout):
         self.run_test_setup(test)
 
-        if test.get('playback') is not None:
-            self.start_playback(test)
-
-        if self.config['host'] not in ('localhost', '127.0.0.1'):
+        if not self.is_localhost:
             self.delete_proxy_settings_from_profile()
 
         # start the browser/app under test
@@ -843,32 +1423,17 @@ class RaptorDesktopFirefox(RaptorDesktop):
 
 class RaptorDesktopChrome(RaptorDesktop):
 
-    def setup_chrome_desktop_for_playback(self):
-        # if running a pageload test on google chrome, add the cmd line options
-        # to turn on the proxy and ignore security certificate errors
-        # if using host localhost, 127.0.0.1.
-        chrome_args = [
-            '--proxy-server=127.0.0.1:8080',
-            '--proxy-bypass-list=localhost;127.0.0.1',
-            '--ignore-certificate-errors',
-        ]
-        if self.config['host'] not in ('localhost', '127.0.0.1'):
-            chrome_args[0] = chrome_args[0].replace('127.0.0.1', self.config['host'])
+    def setup_chrome_args(self, test):
+        # Setup chrome args and add them to the runner's args
+        chrome_args = self.desktop_chrome_args(test)
         if ' '.join(chrome_args) not in ' '.join(self.runner.cmdargs):
             self.runner.cmdargs.extend(chrome_args)
 
     def launch_desktop_browser(self, test):
         LOG.info("starting %s" % self.config['app'])
-        # some chromium-specfic cmd line opts required
-        self.runner.cmdargs.extend(['--use-mock-keychain', '--no-default-browser-check'])
 
-        # if running in debug-mode, open the devtools on the raptor test tab
-        if self.debug_mode:
-            self.runner.cmdargs.extend(['--auto-open-devtools-for-tabs'])
-
-        if test.get('playback') is not None:
-            self.setup_chrome_desktop_for_playback()
-
+        # Setup chrome/chromium specific arguments then start the runner
+        self.setup_chrome_args(test)
         self.start_runner_proc()
 
     def set_browser_test_prefs(self, raw_prefs):
@@ -877,7 +1442,7 @@ class RaptorDesktopChrome(RaptorDesktop):
                         we currently do not install them on non-Firefox browsers.")
 
 
-class RaptorAndroid(Raptor):
+class RaptorAndroid(PerftestAndroid, Raptor):
 
     def __init__(self, app, binary, activity=None, intent=None, **kwargs):
         super(RaptorAndroid, self).__init__(app, binary, profile_class="firefox", **kwargs)
@@ -895,24 +1460,6 @@ class RaptorAndroid(Raptor):
         self.screen_brightness = 127
         self.app_launched = False
 
-    def set_reverse_port(self, port):
-        tcp_port = "tcp:{}".format(port)
-        self.device.create_socket_connection('reverse', tcp_port, tcp_port)
-
-    def set_reverse_ports(self, is_benchmark=False):
-        # Make services running on the host available to the device
-        if self.config['host'] in ('localhost', '127.0.0.1'):
-            LOG.info("making the raptor control server port available to device")
-            self.set_reverse_port(self.control_server.port)
-
-        if self.config['host'] in ('localhost', '127.0.0.1'):
-            LOG.info("making the raptor playback server port available to device")
-            self.set_reverse_port(8080)
-
-        if is_benchmark and self.config['host'] in ('localhost', '127.0.0.1'):
-            LOG.info("making the raptor benchmarks server port available to device")
-            self.set_reverse_port(self.benchmark_port)
-
     def setup_adb_device(self):
         if self.device is None:
             self.device = ADBDevice(verbose=True)
@@ -925,66 +1472,6 @@ class RaptorAndroid(Raptor):
 
         self.clear_app_data()
         self.set_debug_app_flag()
-
-    def build_browser_profile(self):
-        super(RaptorAndroid, self).build_browser_profile()
-
-        # Merge in the android profile
-        path = os.path.join(self.profile_data_dir, 'raptor-android')
-        LOG.info("Merging profile: {}".format(path))
-        self.profile.merge(path)
-        self.profile.set_preferences({'browser.tabs.remote.autostart': self.config['e10s']})
-
-    def clear_app_data(self):
-        LOG.info("clearing %s app data" % self.config['binary'])
-        self.device.shell("pm clear %s" % self.config['binary'])
-
-    def set_debug_app_flag(self):
-        # required so release apks will read the android config.yml file
-        LOG.info("setting debug-app flag for %s" % self.config['binary'])
-        self.device.shell("am set-debug-app --persistent %s" % self.config['binary'])
-
-    def copy_profile_to_device(self):
-        """Copy the profile to the device, and update permissions of all files."""
-        if not self.device.is_app_installed(self.config['binary']):
-            raise Exception('%s is not installed' % self.config['binary'])
-
-        try:
-            LOG.info("copying profile to device: %s" % self.remote_profile)
-            self.device.rm(self.remote_profile, force=True, recursive=True)
-            # self.device.mkdir(self.remote_profile)
-            self.device.push(self.profile.profile, self.remote_profile)
-            self.device.chmod(self.remote_profile, recursive=True, root=True)
-
-        except Exception:
-            LOG.error("Unable to copy profile to device.")
-            raise
-
-    def turn_on_android_app_proxy(self):
-        # for geckoview/android pageload playback we can't use a policy to turn on the
-        # proxy; we need to set prefs instead; note that the 'host' may be different
-        # than '127.0.0.1' so we must set the prefs accordingly
-        LOG.info("setting profile prefs to turn on the android app proxy")
-        proxy_prefs = {}
-        proxy_prefs["network.proxy.type"] = 1
-        proxy_prefs["network.proxy.http"] = self.config['host']
-        proxy_prefs["network.proxy.http_port"] = 8080
-        proxy_prefs["network.proxy.ssl"] = self.config['host']
-        proxy_prefs["network.proxy.ssl_port"] = 8080
-        proxy_prefs["network.proxy.no_proxies_on"] = self.config['host']
-        self.profile.set_preferences(proxy_prefs)
-
-    def log_android_device_temperature(self):
-        try:
-            # retrieve and log the android device temperature
-            thermal_zone0 = self.device.shell_output('cat sys/class/thermal/thermal_zone0/temp')
-            thermal_zone0 = float(thermal_zone0)
-            zone_type = self.device.shell_output('cat sys/class/thermal/thermal_zone0/type')
-            LOG.info("(thermal_zone0) device temperature: %.3f zone type: %s"
-                     % (thermal_zone0 / 1000, zone_type))
-        except Exception as exc:
-            LOG.warning("Unexpected error: {} - {}"
-                        .format(exc.__class__.__name__, exc))
 
     def write_android_app_config(self):
         # geckoview supports having a local on-device config file; use this file
@@ -1019,6 +1506,18 @@ class RaptorAndroid(Raptor):
         except Exception:
             LOG.critical("failed to push %s to device!" % yml_on_device)
             raise
+
+    def log_android_device_temperature(self):
+        try:
+            # retrieve and log the android device temperature
+            thermal_zone0 = self.device.shell_output('cat sys/class/thermal/thermal_zone0/temp')
+            thermal_zone0 = float(thermal_zone0)
+            zone_type = self.device.shell_output('cat sys/class/thermal/thermal_zone0/type')
+            LOG.info("(thermal_zone0) device temperature: %.3f zone type: %s"
+                     % (thermal_zone0 / 1000, zone_type))
+        except Exception as exc:
+            LOG.warning("Unexpected error: {} - {}"
+                        .format(exc.__class__.__name__, exc))
 
     def launch_firefox_android_app(self, test_name):
         LOG.info("starting %s" % self.config['app'])
@@ -1084,9 +1583,7 @@ class RaptorAndroid(Raptor):
 
     def run_test_setup(self, test):
         super(RaptorAndroid, self).run_test_setup(test)
-
-        is_benchmark = test.get('type') == "benchmark"
-        self.set_reverse_ports(is_benchmark=is_benchmark)
+        self.set_reverse_ports()
 
     def run_test_teardown(self, test):
         LOG.info('removing reverse socket connections')
@@ -1160,7 +1657,6 @@ class RaptorAndroid(Raptor):
 
             if test['browser_cycle'] == 1:
                 if test.get('playback') is not None:
-                    self.start_playback(test)
 
                     # an ssl cert db has now been created in the profile; copy it out so we
                     # can use the same cert db in future test cycles / browser restarts
@@ -1168,7 +1664,7 @@ class RaptorAndroid(Raptor):
                     LOG.info("backing up browser ssl cert db that was created via certutil")
                     self.copy_cert_db(self.config['local_profile_dir'], local_cert_db_dir)
 
-                if self.config['host'] not in ('localhost', '127.0.0.1'):
+                if not self.is_localhost:
                     self.delete_proxy_settings_from_profile()
 
             else:
@@ -1199,12 +1695,12 @@ class RaptorAndroid(Raptor):
             # now start the browser/app under test
             self.launch_firefox_android_app(test['name'])
 
-            # If we are measuring CPU, let's grab a snapshot
-            if self.config['cpu_test']:
-                generate_android_cpu_profile(self, test['name'])
-
             # set our control server flag to indicate we are running the browser/app
             self.control_server._finished = False
+
+            if self.config['cpu_test']:
+                # start measuring CPU usage
+                self.cpu_profiler = start_android_cpu_profiler(self)
 
             self.wait_for_test_finish(test, timeout)
 
@@ -1223,10 +1719,7 @@ class RaptorAndroid(Raptor):
 
         self.run_test_setup(test)
 
-        if test.get('playback') is not None:
-            self.start_playback(test)
-
-        if self.config['host'] not in ('localhost', '127.0.0.1'):
+        if not self.is_localhost:
             self.delete_proxy_settings_from_profile()
 
         if test.get('playback') is not None:
@@ -1243,19 +1736,18 @@ class RaptorAndroid(Raptor):
         # now start the browser/app under test
         self.launch_firefox_android_app(test['name'])
 
-        # If we are collecting CPU info, let's grab the details
-        if self.config['cpu_test']:
-            generate_android_cpu_profile(self, test['name'])
-
         # set our control server flag to indicate we are running the browser/app
         self.control_server._finished = False
+
+        if self.config['cpu_test']:
+            # start measuring CPU usage
+            self.cpu_profiler = start_android_cpu_profiler(self)
 
         self.wait_for_test_finish(test, timeout)
 
         # in debug mode, and running locally, leave the browser running
         if self.debug_mode and self.config['run_local']:
             LOG.info("* debug-mode enabled - please shutdown the browser manually...")
-            self.runner.wait(timeout=None)
 
     def check_for_crashes(self):
         super(RaptorAndroid, self).check_for_crashes()
@@ -1277,7 +1769,6 @@ class RaptorAndroid(Raptor):
             dump_dir = tempfile.mkdtemp()
             remote_dir = posixpath.join(self.remote_profile, 'minidumps')
             if not self.device.is_dir(remote_dir):
-                LOG.error("No crash directory (%s) found on remote device" % remote_dir)
                 return
             self.device.pull(remote_dir, dump_dir)
             mozcrash.log_crashes(LOG, dump_dir, self.config['symbols_path'])
@@ -1296,6 +1787,19 @@ class RaptorAndroid(Raptor):
 
 def main(args=sys.argv[1:]):
     args = parse_args()
+
+    args.extra_prefs = parse_preferences(args.extra_prefs or [])
+
+    if args.enable_fission:
+        args.extra_prefs.update({
+            'fission.autostart': True,
+            'dom.serviceWorkers.parent_intercept': True,
+            'browser.tabs.documentchannel': True,
+        })
+
+    if args.extra_prefs and args.extra_prefs.get('fission.autostart', False):
+        args.enable_fission = True
+
     commandline.setup_logging('raptor', args, {'tbpl': sys.stdout})
 
     LOG.info("raptor-start")
@@ -1335,12 +1839,18 @@ def main(args=sys.argv[1:]):
                     value = outer_kwargs.pop(key)
                     inner_kwargs[key] = value
 
-            return Browsertime(*inner_args, **inner_kwargs)
+            if args.app == "firefox" or args.app in CHROMIUM_DISTROS:
+                klass = BrowsertimeDesktop
+            else:
+                klass = BrowsertimeAndroid
+
+            return klass(*inner_args, **inner_kwargs)
 
     raptor = raptor_class(args.app,
                           args.binary,
                           run_local=args.run_local,
                           noinstall=args.noinstall,
+                          installerpath=args.installerpath,
                           obj_path=args.obj_path,
                           gecko_profile=args.gecko_profile,
                           gecko_profile_interval=args.gecko_profile_interval,
@@ -1357,6 +1867,9 @@ def main(args=sys.argv[1:]):
                           intent=args.intent,
                           interrupt_handler=SignalHandler(),
                           enable_webrender=args.enable_webrender,
+                          extra_prefs=args.extra_prefs or {},
+                          device_name=args.device_name,
+                          no_conditioned_profile=args.no_conditioned_profile
                           )
 
     success = raptor.run_tests(raptor_test_list, raptor_test_names)
@@ -1375,11 +1888,21 @@ def main(args=sys.argv[1:]):
         for _page in pages_that_timed_out:
             message = [("TEST-UNEXPECTED-FAIL", "test '%s'" % _page['test_name']),
                        ("timed out loading test page", _page['url'])]
-            if raptor_test.get("type") == 'pageload':
+            if _page.get('pending_metrics') is not None:
                 message.append(("pending metrics", _page['pending_metrics']))
 
             LOG.critical(" ".join("%s: %s" % (subject, msg) for subject, msg in message))
         os.sys.exit(1)
+
+    # if we're running browsertime in the CI, we want to zip the result dir
+    if args.browsertime and not args.run_local:
+        result_dir = raptor.results_handler.result_dir()
+        if os.path.exists(result_dir):
+            LOG.info("Creating tarball at %s" % result_dir + ".tgz")
+            with tarfile.open(result_dir + ".tgz", "w:gz") as tar:
+                tar.add(result_dir, arcname=os.path.basename(result_dir))
+            LOG.info("Removing %s" % result_dir)
+            shutil.rmtree(result_dir)
 
     # when running raptor locally with gecko profiling on, use the view-gecko-profile
     # tool to automatically load the latest gecko profile in profiler.firefox.com

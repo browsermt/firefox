@@ -82,6 +82,7 @@ def update_channel(config, jobs):
             resolve_keyed_by(
                 job, key, item_name=job['name'],
                 **{
+                    'project': config.params['project'],
                     'release-type': config.params['release_type'],
                 }
             )
@@ -135,7 +136,7 @@ def use_profile_data(config, jobs):
         dependencies = 'generate-profile-{}'.format(name)
         job.setdefault('dependencies', {})['generate-profile'] = dependencies
         job.setdefault('fetches', {})['generate-profile'] = ['profdata.tar.xz']
-        job['worker']['env'].update({"MOZ_PGO_PROFILE_USE": "1"})
+        job['worker']['env'].update({"TASKCLUSTER_PGO_PROFILE_USE": "1"})
         yield job
 
 
@@ -172,7 +173,7 @@ def enable_full_crashsymbols(config, jobs):
 def use_artifact(config, jobs):
     if config.params['try_mode'] == 'try_task_config':
         use_artifact = config.params['try_task_config'] \
-            .get('templates', {}).get('artifact', {}).get('enabled')
+            .get('use-artifact-builds', False)
     elif config.params['try_mode'] == 'try_option_syntax':
         use_artifact = config.params['try_options'].get('artifact')
     else:

@@ -18,7 +18,6 @@ import {
 import { addBreakpoint } from "../breakpoints";
 
 import { prettyPrintSource } from "./prettyPrint";
-import { setBreakableLines } from "./breakableLines";
 import { isFulfilled, fulfilled } from "../../utils/async-value";
 
 import { isOriginal, isPretty } from "../../utils/source";
@@ -74,18 +73,32 @@ async function loadSource(
     return result;
   }
 
-  const actors = getSourceActorsForSource(state, source.id);
-  if (!actors.length) {
-    throw new Error("No source actor for loadSource");
+  // We only need the source text from one actor, but messages sent to retrieve
+  // the source might fail if the actor has or is about to shut down. Keep
+  // trying with different actors until one request succeeds.
+  let response;
+  const handledActors = new Set();
+  while (true) {
+    const actors = getSourceActorsForSource(state, source.id);
+    const actor = actors.find(({ actor: a }) => !handledActors.has(a));
+    if (!actor) {
+      throw new Error("Unknown source");
+    }
+    handledActors.add(actor.actor);
+
+    try {
+      telemetry.start(loadSourceHistogram, source);
+      response = await client.sourceContents(actor);
+      telemetry.finish(loadSourceHistogram, source);
+      break;
+    } catch (e) {
+      console.warn(`sourceContents failed: ${e}`);
+    }
   }
 
-  telemetry.start(loadSourceHistogram, source);
-  const response = await client.sourceContents(actors[0]);
-  telemetry.finish(loadSourceHistogram, source);
-
   return {
-    text: response.source,
-    contentType: response.contentType || "text/javascript",
+    text: (response: any).source,
+    contentType: (response: any).contentType || "text/javascript",
   };
 }
 
@@ -117,7 +130,6 @@ async function loadSourceTextPromise(
         : { type: "text", value: "", contentType: undefined }
     );
 
-    await dispatch(setBreakableLines(cx, source.id));
     // Update the text in any breakpoints for this source by re-adding them.
     const breakpoints = getBreakpointsForSource(getState(), source.id);
     for (const { location, options, disabled } of breakpoints) {
@@ -134,7 +146,7 @@ export function loadSourceById(cx: Context, sourceId: string) {
 }
 
 export const loadSourceText: MemoizedAction<
-  { cx: Context, source: Source },
+  {| cx: Context, source: Source |},
   ?Source
 > = memoizeableAction("loadSourceText", {
   getValue: ({ source }, { getState }) => {

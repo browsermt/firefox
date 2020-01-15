@@ -16,12 +16,13 @@
 #include "frontend/BytecodeOffset.h"  // BytecodeOffset
 #include "frontend/EmitterScope.h"    // EmitterScope
 #include "frontend/NameOpEmitter.h"   // NameOpEmitter
-#include "frontend/TDZCheckCache.h"   // TDZCheckCache
-#include "js/RootingAPI.h"            // JS::Handle, JS::Rooted
-#include "vm/BytecodeUtil.h"          // JSOp
-#include "vm/JSAtom.h"                // JSAtom
-#include "vm/NativeObject.h"          // PlainObject
-#include "vm/Scope.h"                 // LexicalScope
+#include "frontend/ObjLiteral.h"     // ObjLiteralWriter, ObjLiteralCreationData
+#include "frontend/TDZCheckCache.h"  // TDZCheckCache
+#include "js/RootingAPI.h"           // JS::Handle, JS::Rooted
+#include "vm/BytecodeUtil.h"         // JSOp
+#include "vm/JSAtom.h"               // JSAtom
+#include "vm/NativeObject.h"         // PlainObject
+#include "vm/Scope.h"                // LexicalScope
 
 namespace js {
 
@@ -54,13 +55,6 @@ class MOZ_STACK_CLASS PropertyEmitter {
 
   // True if the property has computed or index key.
   bool isIndexOrComputed_ = false;
-
-  // An object which keeps the shape of this object literal.
-  // This fields is reset to nullptr whenever the object literal turns out to
-  // have at least one numeric, computed, spread or __proto__ property, or
-  // the object becomes dictionary mode.
-  // This field is used only in ObjectEmitter.
-  JS::Rooted<PlainObject*> obj_;
 
 #ifdef DEBUG
   // The state of this emitter.
@@ -383,10 +377,6 @@ class MOZ_STACK_CLASS PropertyEmitter {
 //
 class MOZ_STACK_CLASS ObjectEmitter : public PropertyEmitter {
  private:
-  // The offset of JSOP_NEWINIT, which is replced by JSOP_NEWOBJECT later
-  // when the object is known to have a fixed shape.
-  BytecodeOffset top_;
-
 #ifdef DEBUG
   // The state of this emitter.
   //
@@ -416,6 +406,9 @@ class MOZ_STACK_CLASS ObjectEmitter : public PropertyEmitter {
   explicit ObjectEmitter(BytecodeEmitter* bce);
 
   MOZ_MUST_USE bool emitObject(size_t propertyCount);
+  // Same as `emitObject()`, but start with an empty template object already on
+  // the stack.
+  MOZ_MUST_USE bool emitObjectWithTemplateOnStack();
   MOZ_MUST_USE bool emitEnd();
 };
 
@@ -442,8 +435,8 @@ class MOZ_RAII AutoSaveLocalStrictMode {
 //     ce.emitScope(scopeBindings);
 //     ce.emitClass(nullptr, nullptr, false);
 //
-//     ce.emitInitDefaultConstructor(Some(offset_of_class),
-//                                   Some(offset_of_closing_bracket));
+//     ce.emitInitDefaultConstructor(offset_of_class,
+//                                   offset_of_closing_bracket);
 //
 //     ce.emitEnd(ClassEmitter::Kind::Expression);
 //
@@ -454,16 +447,6 @@ class MOZ_RAII AutoSaveLocalStrictMode {
 //
 //     emit(function_for_constructor);
 //     ce.emitInitConstructor(/* needsHomeObject = */ false);
-//
-//     ce.emitEnd(ClassEmitter::Kind::Expression);
-//
-//   `class X { constructor() { ... } }`
-//     ClassEmitter ce(this);
-//     ce.emitScope(scopeBindings);
-//     ce.emitClass(atom_of_X, nullptr, false);
-//
-//     ce.emitInitDefaultConstructor(Some(offset_of_class),
-//                                   Some(offset_of_closing_bracket));
 //
 //     ce.emitEnd(ClassEmitter::Kind::Expression);
 //
@@ -764,9 +747,8 @@ class MOZ_STACK_CLASS ClassEmitter : public PropertyEmitter {
   //   |
   //   classStart
   //
-  MOZ_MUST_USE bool emitInitDefaultConstructor(
-      const mozilla::Maybe<uint32_t>& classStart,
-      const mozilla::Maybe<uint32_t>& classEnd);
+  MOZ_MUST_USE bool emitInitDefaultConstructor(uint32_t classStart,
+                                               uint32_t classEnd);
 
   MOZ_MUST_USE bool prepareForFieldInitializers(size_t numFields);
   MOZ_MUST_USE bool emitFieldInitializerHomeObject();

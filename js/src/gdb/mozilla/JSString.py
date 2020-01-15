@@ -10,7 +10,7 @@ from mozilla.prettyprinters import ptr_pretty_printer
 
 try:
     chr(10000)  # UPPER RIGHT PENCIL
-except ValueError as exc:  # yuck, we are in Python 2.x, so chr() is 8-bit
+except ValueError:  # yuck, we are in Python 2.x, so chr() is 8-bit
     chr = unichr  # replace with teh unicodes
 
 # Forget any printers from previous loads of this module.
@@ -84,7 +84,7 @@ class JSStringPtr(Common):
                 yield chars[i]
 
     def to_string(self, maxlen=200):
-        s = u''
+        s = ''
         invalid_chars_allowed = 2
         for c in self.chars():
             if len(s) >= maxlen:

@@ -7,6 +7,7 @@
 // HttpLog.h should generally be included first
 #include "HttpLog.h"
 
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/Preferences.h"
 #include "nsHttpChannelAuthProvider.h"
 #include "nsNetUtil.h"
@@ -30,7 +31,6 @@
 #include "nsHttpNegotiateAuth.h"
 #include "nsHttpNTLMAuth.h"
 #include "nsServiceManagerUtils.h"
-#include "nsILoadContext.h"
 #include "nsIURL.h"
 #include "mozilla/StaticPrefs_network.h"
 #include "mozilla/Telemetry.h"
@@ -919,7 +919,7 @@ bool nsHttpChannelAuthProvider::BlockPrompt(bool proxyAuth) {
 
   if (!topDoc) {
     nsCOMPtr<nsIPrincipal> triggeringPrinc = loadInfo->TriggeringPrincipal();
-    if (nsContentUtils::IsSystemPrincipal(triggeringPrinc)) {
+    if (triggeringPrinc->IsSystemPrincipal()) {
       nonWebContent = true;
     }
   }
@@ -1429,9 +1429,14 @@ nsresult nsHttpChannelAuthProvider::ContinueOnAuthAvailable(
 bool nsHttpChannelAuthProvider::ConfirmAuth(const char* bundleKey,
                                             bool doYesNoPrompt) {
   // skip prompting the user if
-  //   1) we've already prompted the user
-  //   2) we're not a toplevel channel
-  //   3) the userpass length is less than the "phishy" threshold
+  //   1) prompts are disabled by pref
+  //   2) we've already prompted the user
+  //   3) we're not a toplevel channel
+  //   4) the userpass length is less than the "phishy" threshold
+
+  if (!StaticPrefs::network_auth_confirmAuth_enabled()) {
+    return true;
+  }
 
   uint32_t loadFlags;
   nsresult rv = mAuthChannel->GetLoadFlags(&loadFlags);

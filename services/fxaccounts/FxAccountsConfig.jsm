@@ -34,23 +34,12 @@ XPCOMUtils.defineLazyPreferenceGetter(
 );
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
-  "TERMS_URL",
-  "services.sync.fxa.termsURL"
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
-  "PRIVACY_URL",
-  "services.sync.fxa.privacyURL"
-);
-XPCOMUtils.defineLazyPreferenceGetter(
-  this,
   "CONTEXT_PARAM",
   "identity.fxaccounts.contextParam"
 );
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "REQUIRES_HTTPS",
-  // Also used in FxAccountsOAuthGrantClient.jsm.
   "identity.fxaccounts.allowHttp",
   false,
   null,
@@ -67,25 +56,13 @@ const CONFIG_PREFS = [
 ];
 
 var FxAccountsConfig = {
-  async promiseSignUpURI(entrypoint, extraParams = {}) {
-    return this._buildURL("signup", {
-      extraParams: { entrypoint, ...extraParams },
-    });
-  },
-
-  async promiseSignInURI(entrypoint, extraParams = {}) {
-    return this._buildURL("signin", {
-      extraParams: { entrypoint, ...extraParams },
-    });
-  },
-
   async promiseEmailURI(email, entrypoint, extraParams = {}) {
     return this._buildURL("", {
       extraParams: { entrypoint, email, ...extraParams },
     });
   },
 
-  async promiseEmailFirstURI(entrypoint, extraParams = {}) {
+  async promiseConnectAccountURI(entrypoint, extraParams = {}) {
     return this._buildURL("", {
       extraParams: { entrypoint, action: "email", ...extraParams },
     });
@@ -145,17 +122,6 @@ var FxAccountsConfig = {
       extraParams: { entrypoint, ...extraParams },
       includeDefaultParams: false,
     });
-  },
-
-  // Terms and Privacy URLs are special:
-  // For Reasons, we want them to always point
-  // to our servers even if a custom server is used.
-  async promiseLegalTermsURI(extraParams = {}) {
-    return this._buildURLFromString(TERMS_URL, extraParams);
-  },
-
-  async promiseLegalPrivacyURI(extraParams = {}) {
-    return this._buildURLFromString(PRIVACY_URL, extraParams);
   },
 
   get defaultParams() {

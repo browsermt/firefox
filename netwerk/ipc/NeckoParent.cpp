@@ -31,9 +31,8 @@
 #include "mozilla/net/SocketProcessParent.h"
 #include "mozilla/net/PSocketProcessBridgeParent.h"
 #ifdef MOZ_WEBRTC
-#  include "mozilla/net/ProxyConfigLookupParent.h"
 #  include "mozilla/net/StunAddrsRequestParent.h"
-#  include "mozilla/net/WebrtcProxyChannelParent.h"
+#  include "mozilla/net/WebrtcTCPSocketParent.h"
 #endif
 #include "mozilla/dom/ChromeUtils.h"
 #include "mozilla/dom/ContentParent.h"
@@ -324,10 +323,10 @@ bool NeckoParent::DeallocPStunAddrsRequestParent(
   return true;
 }
 
-PWebrtcProxyChannelParent* NeckoParent::AllocPWebrtcProxyChannelParent(
-    const TabId& aTabId) {
+PWebrtcTCPSocketParent* NeckoParent::AllocPWebrtcTCPSocketParent(
+    const Maybe<TabId>& aTabId) {
 #ifdef MOZ_WEBRTC
-  WebrtcProxyChannelParent* parent = new WebrtcProxyChannelParent(aTabId);
+  WebrtcTCPSocketParent* parent = new WebrtcTCPSocketParent(aTabId);
   parent->AddRef();
   return parent;
 #else
@@ -335,11 +334,10 @@ PWebrtcProxyChannelParent* NeckoParent::AllocPWebrtcProxyChannelParent(
 #endif
 }
 
-bool NeckoParent::DeallocPWebrtcProxyChannelParent(
-    PWebrtcProxyChannelParent* aActor) {
+bool NeckoParent::DeallocPWebrtcTCPSocketParent(
+    PWebrtcTCPSocketParent* aActor) {
 #ifdef MOZ_WEBRTC
-  WebrtcProxyChannelParent* parent =
-      static_cast<WebrtcProxyChannelParent*>(aActor);
+  WebrtcTCPSocketParent* parent = static_cast<WebrtcTCPSocketParent*>(aActor);
   parent->Release();
 #endif
   return true;
@@ -411,7 +409,7 @@ mozilla::ipc::IPCResult NeckoParent::RecvPFTPChannelConstructor(
 
 already_AddRefed<PDocumentChannelParent>
 NeckoParent::AllocPDocumentChannelParent(
-    const PBrowserOrId& aBrowser, const SerializedLoadContext& aSerialized,
+    PBrowserParent* aBrowser, const SerializedLoadContext& aSerialized,
     const DocumentChannelCreationArgs& args) {
   nsCOMPtr<nsIPrincipal> requestingPrincipal =
       GetRequestingPrincipal(Some(args.loadInfo()));
@@ -424,17 +422,21 @@ NeckoParent::AllocPDocumentChannelParent(
   }
   PBOverrideStatus overrideStatus =
       PBOverrideStatusFromLoadContext(aSerialized);
+  RefPtr<dom::BrowserParent> browser =
+      static_cast<dom::BrowserParent*>(aBrowser);
   RefPtr<DocumentChannelParent> p =
-      new DocumentChannelParent(aBrowser, loadContext, overrideStatus);
+      new DocumentChannelParent(browser, loadContext, overrideStatus);
   return p.forget();
 }
 
 mozilla::ipc::IPCResult NeckoParent::RecvPDocumentChannelConstructor(
-    PDocumentChannelParent* aActor, const PBrowserOrId& aBrowser,
+    PDocumentChannelParent* aActor, PBrowserParent* aBrowser,
     const SerializedLoadContext& aSerialized,
     const DocumentChannelCreationArgs& aArgs) {
   DocumentChannelParent* p = static_cast<DocumentChannelParent*>(aActor);
-  if (!p->Init(aArgs)) {
+  RefPtr<dom::BrowserParent> browser =
+      static_cast<dom::BrowserParent*>(aBrowser);
+  if (!p->Init(browser, aArgs)) {
     return IPC_FAIL_NO_REASON(this);
   }
   return IPC_OK();
@@ -600,12 +602,11 @@ bool NeckoParent::DeallocPUDPSocketParent(PUDPSocketParent* actor) {
   return true;
 }
 
-PDNSRequestParent* NeckoParent::AllocPDNSRequestParent(
+already_AddRefed<PDNSRequestParent> NeckoParent::AllocPDNSRequestParent(
     const nsCString& aHost, const OriginAttributes& aOriginAttributes,
     const uint32_t& aFlags) {
-  DNSRequestParent* p = new DNSRequestParent();
-  p->AddRef();
-  return p;
+  RefPtr<DNSRequestParent> actor = new DNSRequestParent();
+  return actor.forget();
 }
 
 mozilla::ipc::IPCResult NeckoParent::RecvPDNSRequestConstructor(
@@ -614,12 +615,6 @@ mozilla::ipc::IPCResult NeckoParent::RecvPDNSRequestConstructor(
   static_cast<DNSRequestParent*>(aActor)->DoAsyncResolve(
       aHost, aOriginAttributes, aFlags);
   return IPC_OK();
-}
-
-bool NeckoParent::DeallocPDNSRequestParent(PDNSRequestParent* aParent) {
-  DNSRequestParent* p = static_cast<DNSRequestParent*>(aParent);
-  p->Release();
-  return true;
 }
 
 mozilla::ipc::IPCResult NeckoParent::RecvSpeculativeConnect(
@@ -639,14 +634,14 @@ mozilla::ipc::IPCResult NeckoParent::RecvSpeculativeConnect(
 
 mozilla::ipc::IPCResult NeckoParent::RecvHTMLDNSPrefetch(
     const nsString& hostname, const bool& isHttps,
-    const OriginAttributes& aOriginAttributes, const uint16_t& flags) {
+    const OriginAttributes& aOriginAttributes, const uint32_t& flags) {
   nsHTMLDNSPrefetch::Prefetch(hostname, isHttps, aOriginAttributes, flags);
   return IPC_OK();
 }
 
 mozilla::ipc::IPCResult NeckoParent::RecvCancelHTMLDNSPrefetch(
     const nsString& hostname, const bool& isHttps,
-    const OriginAttributes& aOriginAttributes, const uint16_t& flags,
+    const OriginAttributes& aOriginAttributes, const uint32_t& flags,
     const nsresult& reason) {
   nsHTMLDNSPrefetch::CancelPrefetch(hostname, isHttps, aOriginAttributes, flags,
                                     reason);
@@ -1000,35 +995,6 @@ mozilla::ipc::IPCResult NeckoParent::RecvEnsureHSTSData(
       new HSTSDataCallbackWrapper(std::move(callback));
   gHttpHandler->EnsureHSTSDataReadyNative(wrapper);
   return IPC_OK();
-}
-
-PProxyConfigLookupParent* NeckoParent::AllocPProxyConfigLookupParent() {
-#ifdef MOZ_WEBRTC
-  RefPtr<ProxyConfigLookupParent> actor = new ProxyConfigLookupParent();
-  return actor.forget().take();
-#else
-  return nullptr;
-#endif
-}
-
-mozilla::ipc::IPCResult NeckoParent::RecvPProxyConfigLookupConstructor(
-    PProxyConfigLookupParent* aActor) {
-#ifdef MOZ_WEBRTC
-  ProxyConfigLookupParent* actor =
-      static_cast<ProxyConfigLookupParent*>(aActor);
-  actor->DoProxyLookup();
-#endif
-  return IPC_OK();
-}
-
-bool NeckoParent::DeallocPProxyConfigLookupParent(
-    PProxyConfigLookupParent* aActor) {
-#ifdef MOZ_WEBRTC
-  RefPtr<ProxyConfigLookupParent> actor =
-      dont_AddRef(static_cast<ProxyConfigLookupParent*>(aActor));
-  MOZ_ASSERT(actor);
-#endif
-  return true;
 }
 
 }  // namespace net

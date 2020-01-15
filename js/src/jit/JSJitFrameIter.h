@@ -7,6 +7,8 @@
 #ifndef jit_JSJitFrameIter_h
 #define jit_JSJitFrameIter_h
 
+#include "mozilla/Maybe.h"
+
 #include "jstypes.h"
 
 #include "jit/IonCode.h"
@@ -29,7 +31,7 @@ enum class FrameType {
   // compiler.
   IonJS,
 
-  // JS frame used by the baseline JIT.
+  // JS frame used by the Baseline Interpreter and Baseline JIT.
   BaselineJS,
 
   // Frame pushed by Baseline stubs that make non-tail calls, so that the
@@ -108,6 +110,10 @@ class JSJitFrameIter {
   FrameType type_;
   uint8_t* resumePCinCurrentFrame_;
   size_t frameSize_;
+
+  // Size of the current Baseline frame. Equivalent to
+  // BaselineFrame::debugFrameSize_ in debug builds.
+  mozilla::Maybe<uint32_t> baselineFrameSize_;
 
  private:
   mutable const SafepointIndex* cachedSafepointIndex_;
@@ -256,6 +262,10 @@ class JSJitFrameIter {
 
   inline BaselineFrame* baselineFrame() const;
 
+  // Returns the number of local and expression stack Values for the current
+  // Baseline frame.
+  inline uint32_t baselineFrameNumValueSlots() const;
+
   // This function isn't used, but we keep it here (debug-only) because it is
   // helpful when chasing issues with the jitcode map.
 #ifdef DEBUG
@@ -290,7 +300,8 @@ class JSJitProfilingFrameIterator {
   bool done() const { return fp_ == nullptr; }
 
   const char* baselineInterpreterLabel() const;
-  void baselineInterpreterScriptPC(JSScript** script, jsbytecode** pc) const;
+  void baselineInterpreterScriptPC(JSScript** script, jsbytecode** pc,
+                                   uint64_t* realmID) const;
 
   void* fp() const {
     MOZ_ASSERT(!done());

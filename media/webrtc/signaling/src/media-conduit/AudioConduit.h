@@ -35,6 +35,7 @@ DOMHighResTimeStamp NTPtoDOMHighResTimeStamp(uint32_t ntpHigh, uint32_t ntpLow);
  */
 class WebrtcAudioConduit : public AudioSessionConduit,
                            public webrtc::Transport,
+                           public webrtc::RtcpEventObserver,
                            public webrtc::RtpPacketObserver {
  public:
   // VoiceEngine defined constant for Payload Name Size.
@@ -52,6 +53,8 @@ class WebrtcAudioConduit : public AudioSessionConduit,
    * feed in received RTCP Frames to the VoiceEngine for decoding
    */
   MediaConduitErrorCode ReceivedRTCPPacket(const void* data, int len) override;
+  Maybe<DOMHighResTimeStamp> LastRtcpReceived() const override;
+  DOMHighResTimeStamp GetNow() const override { return mCall->GetNow(); }
 
   MediaConduitErrorCode StopTransmitting() override;
   MediaConduitErrorCode StartTransmitting() override;
@@ -137,6 +140,8 @@ class WebrtcAudioConduit : public AudioSessionConduit,
    * @param capture_delay [in]: Estimated Time between reading of the samples
    *                            to rendering/playback
    * @param lengthSamples [in]: Contain maximum length of speechData array.
+   * @param numChannels [out]: Number of channels in the audio frame,
+   *                           guaranteed to be non-zero.
    * @param lengthSamples [out]: Will contain length of the audio frame in
    *                             samples at return.
    *                             Ex: A value of 160 implies 160 samples each of
@@ -151,7 +156,8 @@ class WebrtcAudioConduit : public AudioSessionConduit,
   MediaConduitErrorCode GetAudioFrame(int16_t speechData[],
                                       int32_t samplingFreqHz,
                                       int32_t capture_delay,
-                                      int& lengthSamples) override;
+                                      size_t& numChannels,
+                                      size_t& lengthSamples) override;
 
   /**
    * Webrtc transport implementation to send and receive RTP packet.
@@ -173,7 +179,7 @@ class WebrtcAudioConduit : public AudioSessionConduit,
   void DeleteStreams() override {}
 
   WebrtcAudioConduit(RefPtr<WebRtcCallWrapper> aCall,
-                     nsCOMPtr<nsIEventTarget> aStsThread)
+                     nsCOMPtr<nsISerialEventTarget> aStsThread)
       : mTransportMonitor("WebrtcAudioConduit"),
         mTransmitterTransport(nullptr),
         mReceiverTransport(nullptr),
@@ -241,10 +247,17 @@ class WebrtcAudioConduit : public AudioSessionConduit,
   void OnRtpPacket(const webrtc::RTPHeader& aRtpHeader,
                    const int64_t aTimestamp, const uint32_t aJitter) override;
 
+  void OnRtcpBye() override;
+  void OnRtcpTimeout() override;
+
+  void SetRtcpEventObserver(mozilla::RtcpEventObserver* observer) override;
+
   // test-only: inserts fake CSRCs and audio level data
-  void InsertAudioLevelForContributingSource(uint32_t aSource,
-                                             int64_t aTimestamp, bool aHasLevel,
-                                             uint8_t aLevel);
+  void InsertAudioLevelForContributingSource(const uint32_t aCsrcSource,
+                                             const int64_t aTimestamp,
+                                             const uint32_t aRtpTimestamp,
+                                             const bool aHasAudioLevel,
+                                             const uint8_t aAudioLevel);
 
   bool IsSamplingFreqSupported(int freq) const override;
 
@@ -348,10 +361,16 @@ class WebrtcAudioConduit : public AudioSessionConduit,
   RtpSourceObserver mRtpSourceObserver;
 
   // Socket transport service thread. Any thread.
-  const nsCOMPtr<nsIEventTarget> mStsThread;
+  const nsCOMPtr<nsISerialEventTarget> mStsThread;
 
   // Accessed from mStsThread. Last successfully polled RTT
   Maybe<DOMHighResTimeStamp> mRttSec;
+
+  // Accessed only on mStsThread
+  Maybe<DOMHighResTimeStamp> mLastRtcpReceived;
+
+  // Accessed only on main thread.
+  mozilla::RtcpEventObserver* mRtcpEventObserver = nullptr;
 };
 
 }  // namespace mozilla

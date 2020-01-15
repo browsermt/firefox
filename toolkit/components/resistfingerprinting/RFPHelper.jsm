@@ -21,7 +21,6 @@ const kPrefLetterboxingDimensions =
 const kPrefLetterboxingTesting =
   "privacy.resistFingerprinting.letterboxing.testing";
 const kTopicDOMWindowOpened = "domwindowopened";
-const kEventLetterboxingSizeUpdate = "Letterboxing:ContentSizeUpdated";
 
 var logConsole;
 function log(msg) {
@@ -116,17 +115,6 @@ class _RFPHelper {
     }
   }
 
-  receiveMessage(aMessage) {
-    switch (aMessage.name) {
-      case kEventLetterboxingSizeUpdate:
-        let win = aMessage.target.ownerGlobal;
-        this._updateMarginsForTabsInWindow(win);
-        break;
-      default:
-        break;
-    }
-  }
-
   _handlePrefChanged(data) {
     switch (data) {
       case kPrefResistFingerprinting:
@@ -141,6 +129,10 @@ class _RFPHelper {
       default:
         break;
     }
+  }
+
+  contentSizeUpdated(win) {
+    this._updateMarginsForTabsInWindow(win);
   }
 
   // ============================================================================
@@ -318,11 +310,32 @@ class _RFPHelper {
   _handleLetterboxingPrefChanged() {
     if (Services.prefs.getBoolPref(kPrefLetterboxing, false)) {
       Services.ww.registerNotification(this);
+      this._registerActor();
       this._attachAllWindows();
     } else {
+      this._unregisterActor();
       this._detachAllWindows();
       Services.ww.unregisterNotification(this);
     }
+  }
+
+  _registerActor() {
+    ChromeUtils.registerWindowActor("RFPHelper", {
+      parent: {
+        moduleURI: "resource:///actors/RFPHelperParent.jsm",
+      },
+      child: {
+        moduleURI: "resource:///actors/RFPHelperChild.jsm",
+        events: {
+          resize: {},
+        },
+      },
+      allFrames: true,
+    });
+  }
+
+  _unregisterActor() {
+    ChromeUtils.unregisterWindowActor("RFPHelper");
   }
 
   // The function to parse the dimension set from the pref value. The pref value
@@ -579,10 +592,6 @@ class _RFPHelper {
   _attachWindow(aWindow) {
     aWindow.gBrowser.addTabsProgressListener(this);
     aWindow.addEventListener("TabOpen", this);
-    aWindow.messageManager.addMessageListener(
-      kEventLetterboxingSizeUpdate,
-      this
-    );
 
     // Rounding the content viewport.
     this._updateMarginsForTabsInWindow(aWindow);
@@ -606,10 +615,6 @@ class _RFPHelper {
     let tabBrowser = aWindow.gBrowser;
     tabBrowser.removeTabsProgressListener(this);
     aWindow.removeEventListener("TabOpen", this);
-    aWindow.messageManager.removeMessageListener(
-      kEventLetterboxingSizeUpdate,
-      this
-    );
 
     // Clear all margins and tooltip for all browsers.
     for (let tab of tabBrowser.tabs) {

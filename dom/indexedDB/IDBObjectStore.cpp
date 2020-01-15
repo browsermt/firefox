@@ -7,7 +7,7 @@
 #include "IDBObjectStore.h"
 
 #include "FileInfo.h"
-#include "IDBCursor.h"
+#include "IDBCursorType.h"
 #include "IDBDatabase.h"
 #include "IDBEvents.h"
 #include "IDBFactory.h"
@@ -19,6 +19,7 @@
 #include "IndexedDatabase.h"
 #include "IndexedDatabaseInlines.h"
 #include "IndexedDatabaseManager.h"
+#include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject
 #include "js/Class.h"
 #include "js/Date.h"
 #include "js/StructuredClone.h"
@@ -30,7 +31,6 @@
 #include "mozilla/Move.h"
 #include "mozilla/NullPrincipal.h"
 #include "mozilla/dom/BindingUtils.h"
-#include "mozilla/dom/DOMStringList.h"
 #include "mozilla/dom/File.h"
 #include "mozilla/dom/FileBlobImpl.h"
 #include "mozilla/dom/IDBMutableFileBinding.h"
@@ -47,11 +47,14 @@
 #include "mozilla/ipc/PBackgroundSharedTypes.h"
 #include "mozilla/SystemGroup.h"
 #include "nsCOMPtr.h"
+#include "nsIXPConnect.h"
 #include "nsQueryObject.h"
 #include "nsStreamUtils.h"
 #include "nsStringStream.h"
 #include "ProfilerHelpers.h"
 #include "ReportInternalError.h"
+
+#include <numeric>
 
 // Include this last to avoid path problems on Windows.
 #include "ActorsChild.h"
@@ -73,7 +76,7 @@ IndexUpdateInfo MakeIndexUpdateInfo(const int64_t aIndexID, const Key& aKey,
   indexUpdateInfo.value() = aKey;
   if (!aLocale.IsEmpty()) {
     const auto result =
-        aKey.ToLocaleBasedKey(indexUpdateInfo.localizedValue(), aLocale, *aRv);
+        aKey.ToLocaleAwareKey(indexUpdateInfo.localizedValue(), aLocale, *aRv);
     if (result.Is(Invalid, *aRv)) {
       aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
     }
@@ -99,7 +102,7 @@ struct IDBObjectStore::StructuredCloneWriteInfo {
     MOZ_COUNT_CTOR(StructuredCloneWriteInfo);
   }
 
-  StructuredCloneWriteInfo(StructuredCloneWriteInfo&& aCloneWriteInfo)
+  StructuredCloneWriteInfo(StructuredCloneWriteInfo&& aCloneWriteInfo) noexcept
       : mCloneBuffer(std::move(aCloneWriteInfo.mCloneBuffer)),
         mDatabase(aCloneWriteInfo.mDatabase),
         mOffsetToKeyProp(aCloneWriteInfo.mOffsetToKeyProp) {
@@ -177,18 +180,15 @@ struct MOZ_STACK_CLASS GetAddInfoClosure final {
   ~GetAddInfoClosure() { MOZ_COUNT_DTOR(GetAddInfoClosure); }
 };
 
-already_AddRefed<IDBRequest> GenerateRequest(JSContext* aCx,
-                                             IDBObjectStore* aObjectStore) {
+RefPtr<IDBRequest> GenerateRequest(JSContext* aCx,
+                                   IDBObjectStore* aObjectStore) {
   MOZ_ASSERT(aObjectStore);
   aObjectStore->AssertIsOnOwningThread();
 
-  IDBTransaction* transaction = aObjectStore->Transaction();
+  IDBTransaction* const transaction = aObjectStore->Transaction();
 
-  RefPtr<IDBRequest> request = IDBRequest::Create(
-      aCx, aObjectStore, transaction->Database(), transaction);
-  MOZ_ASSERT(request);
-
-  return request.forget();
+  return IDBRequest::Create(aCx, aObjectStore, transaction->Database(),
+                            transaction);
 }
 
 bool StructuredCloneWriteCallback(JSContext* aCx,
@@ -198,7 +198,7 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
   MOZ_ASSERT(aWriter);
   MOZ_ASSERT(aClosure);
 
-  auto* cloneWriteInfo =
+  auto* const cloneWriteInfo =
       static_cast<IDBObjectStore::StructuredCloneWriteInfo*>(aClosure);
 
   if (JS_GetClass(aObj) == IDBObjectStore::DummyPropClass()) {
@@ -219,7 +219,7 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
       return false;
     }
 
-    IDBDatabase* database = mutableFile->Database();
+    IDBDatabase* const database = mutableFile->Database();
     MOZ_ASSERT(database);
 
     // Throw when trying to store IDBMutableFile objects that live in a
@@ -257,12 +257,12 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
 
     const uint32_t index = cloneWriteInfo->mFiles.Length();
 
-    NS_ConvertUTF16toUTF8 convType(mutableFile->Type());
-    uint32_t convTypeLength =
+    const NS_ConvertUTF16toUTF8 convType(mutableFile->Type());
+    const uint32_t convTypeLength =
         NativeEndian::swapToLittleEndian(convType.Length());
 
-    NS_ConvertUTF16toUTF8 convName(mutableFile->Name());
-    uint32_t convNameLength =
+    const NS_ConvertUTF16toUTF8 convName(mutableFile->Name());
+    const uint32_t convNameLength =
         NativeEndian::swapToLittleEndian(convName.Length());
 
     if (!JS_WriteUint32Pair(aWriter, SCTAG_DOM_MUTABLEFILE, uint32_t(index)) ||
@@ -273,9 +273,9 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
       return false;
     }
 
-    StructuredCloneFile* newFile = cloneWriteInfo->mFiles.AppendElement();
-    newFile->mMutableFile = mutableFile;
-    newFile->mType = StructuredCloneFile::eMutableFile;
+    const DebugOnly<StructuredCloneFile*> newFile =
+        cloneWriteInfo->mFiles.EmplaceBack(mutableFile);
+    MOZ_ASSERT(newFile);
 
     return true;
   }
@@ -284,16 +284,16 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
     Blob* blob = nullptr;
     if (NS_SUCCEEDED(UNWRAP_OBJECT(Blob, &obj, blob))) {
       ErrorResult rv;
-      uint64_t size = blob->GetSize(rv);
+      const uint64_t nativeEndianSize = blob->GetSize(rv);
       MOZ_ASSERT(!rv.Failed());
 
-      size = NativeEndian::swapToLittleEndian(size);
+      const uint64_t size = NativeEndian::swapToLittleEndian(nativeEndianSize);
 
       nsString type;
       blob->GetType(type);
 
-      NS_ConvertUTF16toUTF8 convType(type);
-      uint32_t convTypeLength =
+      const NS_ConvertUTF16toUTF8 convType(type);
+      const uint32_t convTypeLength =
           NativeEndian::swapToLittleEndian(convType.Length());
 
       if (cloneWriteInfo->mFiles.Length() > size_t(UINT32_MAX)) {
@@ -313,19 +313,20 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
         return false;
       }
 
-      RefPtr<File> file = blob->ToFile();
+      const RefPtr<File> file = blob->ToFile();
       if (file) {
         ErrorResult rv;
-        int64_t lastModifiedDate = file->GetLastModified(rv);
+        const int64_t nativeEndianLastModifiedDate = file->GetLastModified(rv);
         MOZ_ALWAYS_TRUE(!rv.Failed());
 
-        lastModifiedDate = NativeEndian::swapToLittleEndian(lastModifiedDate);
+        const int64_t lastModifiedDate =
+            NativeEndian::swapToLittleEndian(nativeEndianLastModifiedDate);
 
         nsString name;
         file->GetName(name);
 
-        NS_ConvertUTF16toUTF8 convName(name);
-        uint32_t convNameLength =
+        const NS_ConvertUTF16toUTF8 convName(name);
+        const uint32_t convNameLength =
             NativeEndian::swapToLittleEndian(convName.Length());
 
         if (!JS_WriteBytes(aWriter, &lastModifiedDate,
@@ -336,9 +337,9 @@ bool StructuredCloneWriteCallback(JSContext* aCx,
         }
       }
 
-      StructuredCloneFile* newFile = cloneWriteInfo->mFiles.AppendElement();
-      newFile->mBlob = blob;
-      newFile->mType = StructuredCloneFile::eBlob;
+      const DebugOnly<StructuredCloneFile*> newFile =
+          cloneWriteInfo->mFiles.EmplaceBack(StructuredCloneFile::eBlob, blob);
+      MOZ_ASSERT(newFile);
 
       return true;
     }
@@ -356,7 +357,8 @@ bool CopyingStructuredCloneWriteCallback(JSContext* aCx,
   MOZ_ASSERT(aWriter);
   MOZ_ASSERT(aClosure);
 
-  auto* cloneInfo = static_cast<IDBObjectStore::StructuredCloneInfo*>(aClosure);
+  auto* const cloneInfo =
+      static_cast<IDBObjectStore::StructuredCloneInfo*>(aClosure);
 
   // UNWRAP_OBJECT calls might mutate this.
   JS::Rooted<JSObject*> obj(aCx, aObj);
@@ -378,9 +380,9 @@ bool CopyingStructuredCloneWriteCallback(JSContext* aCx,
         return false;
       }
 
-      StructuredCloneFile* newFile = cloneInfo->mFiles.AppendElement();
-      newFile->mBlob = blob;
-      newFile->mType = StructuredCloneFile::eBlob;
+      const DebugOnly<StructuredCloneFile*> newFile =
+          cloneInfo->mFiles.EmplaceBack(StructuredCloneFile::eBlob, blob);
+      MOZ_ASSERT(newFile);
 
       return true;
     }
@@ -401,9 +403,9 @@ bool CopyingStructuredCloneWriteCallback(JSContext* aCx,
         return false;
       }
 
-      StructuredCloneFile* newFile = cloneInfo->mFiles.AppendElement();
-      newFile->mMutableFile = mutableFile;
-      newFile->mType = StructuredCloneFile::eMutableFile;
+      const DebugOnly<StructuredCloneFile*> newFile =
+          cloneInfo->mFiles.EmplaceBack(mutableFile);
+      MOZ_ASSERT(newFile);
 
       return true;
     }
@@ -426,7 +428,7 @@ nsresult GetAddInfoCallback(JSContext* aCx, void* aClosure) {
 
   MOZ_ASSERT(aCx);
 
-  auto* data = static_cast<GetAddInfoClosure*>(aClosure);
+  auto* const data = static_cast<GetAddInfoClosure*>(aClosure);
   MOZ_ASSERT(data);
 
   data->mCloneWriteInfo.mOffsetToKeyProp = 0;
@@ -460,7 +462,7 @@ bool StructuredCloneReadString(JSStructuredCloneReader* aReader,
     NS_WARNING("Out of memory?");
     return false;
   }
-  char* buffer = aString.BeginWriting();
+  char* const buffer = aString.BeginWriting();
 
   if (!JS_ReadBytes(aReader, buffer, length)) {
     NS_WARNING("Failed to read type!");
@@ -623,31 +625,14 @@ class ValueDeserializationHelper {
 
     RefPtr<Blob> blob = aFile.mBlob;
 
-    /* If we are creating an index, we do not have an mBlob but do have an
-     * mInfo.  Unlike other index or upgrade cases, we do need a real-looking
-     * Blob/File instance because the index's key path can reference their
-     * properties.  Rather than create a fake-looking object, create a real
-     * Blob. */
-    if (!blob) {
-      MOZ_ASSERT(aFile.mFileInfo);
-      nsCOMPtr<nsIFile> file = FileInfo::GetFileForFileInfo(aFile.mFileInfo);
-      if (!file) {
-        return false;
-      }
-
-      RefPtr<FileBlobImpl> impl = new FileBlobImpl(file);
-      impl->SetFileId(aFile.mFileInfo->Id());
-      blob = File::Create(nullptr, impl);
-    }
-
     // It can happen that this IDB is chrome code, so there is no parent, but
     // still we want to set a correct parent for the new File object.
-    nsCOMPtr<nsISupports> parent;
+    nsCOMPtr<nsIGlobalObject> global;
     if (NS_IsMainThread()) {
       if (aDatabase && aDatabase->GetParentObject()) {
-        parent = aDatabase->GetParentObject();
+        global = aDatabase->GetParentObject();
       } else {
-        parent = xpc::CurrentNativeGlobal(aCx);
+        global = xpc::CurrentNativeGlobal(aCx);
       }
     } else {
       WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
@@ -656,10 +641,31 @@ class ValueDeserializationHelper {
       WorkerGlobalScope* globalScope = workerPrivate->GlobalScope();
       MOZ_ASSERT(globalScope);
 
-      parent = do_QueryObject(globalScope);
+      global = do_QueryObject(globalScope);
     }
 
-    MOZ_ASSERT(parent);
+    MOZ_ASSERT(global);
+
+    /* If we are creating an index, we do not have an mBlob but do have an
+     * mInfo.  Unlike other index or upgrade cases, we do need a real-looking
+     * Blob/File instance because the index's key path can reference their
+     * properties.  Rather than create a fake-looking object, create a real
+     * Blob. */
+    if (!blob) {
+      MOZ_ASSERT(aFile.mFileInfo);
+      const nsCOMPtr<nsIFile> file =
+          FileInfo::GetFileForFileInfo(aFile.mFileInfo);
+      if (!file) {
+        return false;
+      }
+
+      const RefPtr<FileBlobImpl> impl = new FileBlobImpl(file);
+      impl->SetFileId(aFile.mFileInfo->Id());
+      blob = File::Create(global, impl);
+      if (NS_WARN_IF(!blob)) {
+        return false;
+      }
+    }
 
     if (aData.tag == SCTAG_DOM_BLOB) {
       blob->Impl()->SetLazyData(VoidString(), aData.type, aData.size,
@@ -673,8 +679,12 @@ class ValueDeserializationHelper {
       // File wrapping.
       // Before exposing it to content, we must recreate a DOM Blob object.
 
-      RefPtr<Blob> exposedBlob =
+      const RefPtr<Blob> exposedBlob =
           Blob::Create(blob->GetParentObject(), blob->Impl());
+      if (NS_WARN_IF(!exposedBlob)) {
+        return false;
+      }
+
       MOZ_ASSERT(exposedBlob);
       JS::Rooted<JS::Value> wrappedBlob(aCx);
       if (!ToJSValue(aCx, exposedBlob, &wrappedBlob)) {
@@ -689,7 +699,7 @@ class ValueDeserializationHelper {
                               aData.lastModifiedDate * PR_USEC_PER_MSEC);
 
     MOZ_ASSERT(blob->IsFile());
-    RefPtr<File> file = blob->ToFile();
+    const RefPtr<File> file = blob->ToFile();
     MOZ_ASSERT(file);
 
     JS::Rooted<JS::Value> wrappedFile(aCx);
@@ -740,7 +750,7 @@ JSObject* CommonStructuredCloneReadCallback(JSContext* aCx,
   if (aTag == SCTAG_DOM_FILE_WITHOUT_LASTMODIFIEDDATE ||
       aTag == SCTAG_DOM_BLOB || aTag == SCTAG_DOM_FILE ||
       aTag == SCTAG_DOM_MUTABLEFILE || aTag == SCTAG_DOM_WASM) {
-    auto* cloneReadInfo = static_cast<StructuredCloneReadInfo*>(aClosure);
+    auto* const cloneReadInfo = static_cast<StructuredCloneReadInfo*>(aClosure);
 
     JS::Rooted<JSObject*> result(aCx);
 
@@ -815,7 +825,7 @@ JSObject* CopyingStructuredCloneReadCallback(JSContext* aCx,
 
   if (aTag == SCTAG_DOM_BLOB || aTag == SCTAG_DOM_FILE ||
       aTag == SCTAG_DOM_MUTABLEFILE) {
-    auto* cloneInfo =
+    auto* const cloneInfo =
         static_cast<IDBObjectStore::StructuredCloneInfo*>(aClosure);
 
     JS::Rooted<JSObject*> result(aCx);
@@ -847,10 +857,10 @@ JSObject* CopyingStructuredCloneReadCallback(JSContext* aCx,
       {
         // Create a scope so ~RefPtr fires before returning an unwrapped
         // JS::Value.
-        RefPtr<Blob> blob = file.mBlob;
+        const RefPtr<Blob> blob = file.mBlob;
         MOZ_ASSERT(blob->IsFile());
 
-        RefPtr<File> file = blob->ToFile();
+        const RefPtr<File> file = blob->ToFile();
         MOZ_ASSERT(file);
 
         JS::Rooted<JS::Value> wrappedFile(aCx);
@@ -908,14 +918,12 @@ IDBObjectStore::~IDBObjectStore() {
 }
 
 // static
-already_AddRefed<IDBObjectStore> IDBObjectStore::Create(
-    IDBTransaction* aTransaction, const ObjectStoreSpec& aSpec) {
+RefPtr<IDBObjectStore> IDBObjectStore::Create(IDBTransaction* aTransaction,
+                                              const ObjectStoreSpec& aSpec) {
   MOZ_ASSERT(aTransaction);
   aTransaction->AssertIsOnOwningThread();
 
-  RefPtr<IDBObjectStore> objectStore = new IDBObjectStore(aTransaction, &aSpec);
-
-  return objectStore.forget();
+  return new IDBObjectStore(aTransaction, &aSpec);
 }
 
 // static
@@ -923,6 +931,9 @@ void IDBObjectStore::AppendIndexUpdateInfo(
     const int64_t aIndexID, const KeyPath& aKeyPath, const bool aMultiEntry,
     const nsCString& aLocale, JSContext* const aCx, JS::Handle<JS::Value> aVal,
     nsTArray<IndexUpdateInfo>* const aUpdateInfoArray, ErrorResult* const aRv) {
+  // This precondition holds when `aVal` is the result of a structured clone.
+  js::AutoAssertNoContentJS noContentJS(aCx);
+
   if (!aMultiEntry) {
     Key key;
     *aRv = aKeyPath.ExtractKey(aCx, aVal, key);
@@ -948,7 +959,7 @@ void IDBObjectStore::AppendIndexUpdateInfo(
   }
 
   bool isArray;
-  if (!JS_IsArrayObject(aCx, val, &isArray)) {
+  if (NS_WARN_IF(!JS::IsArrayObject(aCx, val, &isArray))) {
     IDB_REPORT_INTERNAL_ERR();
     aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
     return;
@@ -956,15 +967,34 @@ void IDBObjectStore::AppendIndexUpdateInfo(
   if (isArray) {
     JS::Rooted<JSObject*> array(aCx, &val.toObject());
     uint32_t arrayLength;
-    if (NS_WARN_IF(!JS_GetArrayLength(aCx, array, &arrayLength))) {
+    if (NS_WARN_IF(!JS::GetArrayLength(aCx, array, &arrayLength))) {
       IDB_REPORT_INTERNAL_ERR();
       aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
       return;
     }
 
     for (uint32_t arrayIndex = 0; arrayIndex < arrayLength; arrayIndex++) {
-      JS::Rooted<JS::Value> arrayItem(aCx);
-      if (NS_WARN_IF(!JS_GetElement(aCx, array, arrayIndex, &arrayItem))) {
+      JS::RootedId indexId(aCx);
+      if (NS_WARN_IF(!JS_IndexToId(aCx, arrayIndex, &indexId))) {
+        IDB_REPORT_INTERNAL_ERR();
+        aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
+        return;
+      }
+
+      bool hasOwnProperty;
+      if (NS_WARN_IF(
+              !JS_HasOwnPropertyById(aCx, array, indexId, &hasOwnProperty))) {
+        IDB_REPORT_INTERNAL_ERR();
+        aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
+        return;
+      }
+
+      if (!hasOwnProperty) {
+        continue;
+      }
+
+      JS::RootedValue arrayItem(aCx);
+      if (NS_WARN_IF(!JS_GetPropertyById(aCx, array, indexId, &arrayItem))) {
         IDB_REPORT_INTERNAL_ERR();
         aRv->Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
         return;
@@ -1034,14 +1064,10 @@ bool IDBObjectStore::DeserializeValue(JSContext* aCx,
 
   // FIXME: Consider to use StructuredCloneHolder here and in other
   //        deserializing methods.
-  if (!JS_ReadStructuredClone(
-          aCx, aCloneReadInfo.mData, JS_STRUCTURED_CLONE_VERSION,
-          JS::StructuredCloneScope::DifferentProcessForIndexedDB, aValue,
-          &callbacks, &aCloneReadInfo)) {
-    return false;
-  }
-
-  return true;
+  return JS_ReadStructuredClone(
+      aCx, aCloneReadInfo.mData, JS_STRUCTURED_CLONE_VERSION,
+      JS::StructuredCloneScope::DifferentProcessForIndexedDB, aValue,
+      JS::CloneDataPolicy(), &callbacks, &aCloneReadInfo);
 }
 
 namespace {
@@ -1073,11 +1099,11 @@ class SandboxHolder final {
 
   JSObject* GetSandboxInternal(JSContext* aCx) {
     if (!mSandbox) {
-      nsIXPConnect* xpc = nsContentUtils::XPConnect();
+      nsIXPConnect* const xpc = nsContentUtils::XPConnect();
       MOZ_ASSERT(xpc, "This should never be null!");
 
       // Let's use a null principal.
-      nsCOMPtr<nsIPrincipal> principal =
+      const nsCOMPtr<nsIPrincipal> principal =
           NullPrincipal::CreateWithoutOriginAttributes();
 
       JS::Rooted<JSObject*> sandbox(aCx);
@@ -1151,7 +1177,7 @@ class DeserializeIndexValueHelper final : public Runnable {
 
     AutoJSAPI jsapi;
     jsapi.Init();
-    JSContext* cx = jsapi.cx();
+    JSContext* const cx = jsapi.cx();
 
     JS::Rooted<JSObject*> global(cx, SandboxHolder::GetSandbox(cx));
     if (NS_WARN_IF(!global)) {
@@ -1159,7 +1185,7 @@ class DeserializeIndexValueHelper final : public Runnable {
       return NS_OK;
     }
 
-    JSAutoRealm ar(cx, global);
+    const JSAutoRealm ar(cx, global);
 
     JS::Rooted<JS::Value> value(cx);
     const nsresult rv = DeserializeIndexValue(cx, &value);
@@ -1196,7 +1222,7 @@ class DeserializeIndexValueHelper final : public Runnable {
     if (!JS_ReadStructuredClone(
             aCx, mCloneReadInfo.mData, JS_STRUCTURED_CLONE_VERSION,
             JS::StructuredCloneScope::DifferentProcessForIndexedDB, aValue,
-            &callbacks, &mCloneReadInfo)) {
+            JS::CloneDataPolicy(), &callbacks, &mCloneReadInfo)) {
       return NS_ERROR_DOM_DATA_CLONE_ERR;
     }
 
@@ -1212,9 +1238,9 @@ class DeserializeIndexValueHelper final : public Runnable {
 
   Monitor mMonitor;
 
-  int64_t mIndexID;
+  const int64_t mIndexID;
   const KeyPath& mKeyPath;
-  bool mMultiEntry;
+  const bool mMultiEntry;
   const nsCString mLocale;
   StructuredCloneReadInfo& mCloneReadInfo;
   nsTArray<IndexUpdateInfo>& mUpdateInfoArray;
@@ -1244,7 +1270,8 @@ class DeserializeUpgradeValueHelper final : public Runnable {
     MonitorAutoLock lock(mMonitor);
 
     RefPtr<Runnable> self = this;
-    nsresult rv = SystemGroup::Dispatch(TaskCategory::Other, self.forget());
+    const nsresult rv =
+        SystemGroup::Dispatch(TaskCategory::Other, self.forget());
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
     }
@@ -1273,10 +1300,10 @@ class DeserializeUpgradeValueHelper final : public Runnable {
       return NS_OK;
     }
 
-    JSAutoRealm ar(cx, global);
+    const JSAutoRealm ar(cx, global);
 
     JS::Rooted<JS::Value> value(cx);
-    nsresult rv = DeserializeUpgradeValue(cx, &value);
+    const nsresult rv = DeserializeUpgradeValue(cx, &value);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       OperationCompleted(rv);
       return NS_OK;
@@ -1301,7 +1328,7 @@ class DeserializeUpgradeValueHelper final : public Runnable {
     if (!JS_ReadStructuredClone(
             aCx, mCloneReadInfo.mData, JS_STRUCTURED_CLONE_VERSION,
             JS::StructuredCloneScope::DifferentProcessForIndexedDB, aValue,
-            &callbacks, &mCloneReadInfo)) {
+            JS::CloneDataPolicy(), &callbacks, &mCloneReadInfo)) {
       return NS_ERROR_DOM_DATA_CLONE_ERR;
     }
 
@@ -1311,7 +1338,7 @@ class DeserializeUpgradeValueHelper final : public Runnable {
   void PopulateFileIds(nsAString& aFileIds) {
     for (uint32_t count = mCloneReadInfo.mFiles.Length(), index = 0;
          index < count; index++) {
-      StructuredCloneFile& file = mCloneReadInfo.mFiles[index];
+      const StructuredCloneFile& file = mCloneReadInfo.mFiles[index];
       MOZ_ASSERT(file.mFileInfo);
 
       const int64_t id = file.mFileInfo->Id();
@@ -1344,7 +1371,7 @@ void IDBObjectStore::DeserializeIndexValueToUpdateInfos(
     nsTArray<IndexUpdateInfo>& aUpdateInfoArray, ErrorResult& aRv) {
   MOZ_ASSERT(!NS_IsMainThread());
 
-  RefPtr<DeserializeIndexValueHelper> helper =
+  const RefPtr<DeserializeIndexValueHelper> helper =
       new DeserializeIndexValueHelper(aIndexID, aKeyPath, aMultiEntry, aLocale,
                                       aCloneReadInfo, aUpdateInfoArray);
   helper->DispatchAndWait(aRv);
@@ -1355,7 +1382,7 @@ nsresult IDBObjectStore::DeserializeUpgradeValueToFileIds(
     StructuredCloneReadInfo& aCloneReadInfo, nsAString& aFileIds) {
   MOZ_ASSERT(!NS_IsMainThread());
 
-  RefPtr<DeserializeUpgradeValueHelper> helper =
+  const RefPtr<DeserializeUpgradeValueHelper> helper =
       new DeserializeUpgradeValueHelper(aCloneReadInfo);
   return helper->DispatchAndWait(aFileIds);
 }
@@ -1382,11 +1409,11 @@ void IDBObjectStore::GetAddInfo(JSContext* aCx, ValueWrapper& aValueWrapper,
     return;
   }
 
-  bool isAutoIncrement = AutoIncrement();
+  const bool isAutoIncrement = AutoIncrement();
 
   if (!HasValidKeyPath()) {
     // Out-of-line keys must be passed in.
-    auto result = aKey.SetFromJSVal(aCx, aKeyVal, aRv);
+    const auto result = aKey.SetFromJSVal(aCx, aKeyVal, aRv);
     if (!result.Is(Ok, aRv)) {
       if (result.Is(Invalid, aRv)) {
         aRv.Throw(NS_ERROR_DOM_INDEXEDDB_DATA_ERR);
@@ -1421,7 +1448,7 @@ void IDBObjectStore::GetAddInfo(JSContext* aCx, ValueWrapper& aValueWrapper,
 
   {
     const nsTArray<IndexMetadata>& indexes = mSpec->indexes();
-    uint32_t idxCount = indexes.Length();
+    const uint32_t idxCount = indexes.Length();
 
     aUpdateInfoArray.SetCapacity(idxCount);  // Pretty good estimate
 
@@ -1456,19 +1483,22 @@ void IDBObjectStore::GetAddInfo(JSContext* aCx, ValueWrapper& aValueWrapper,
   }
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
-    JSContext* aCx, ValueWrapper& aValueWrapper, JS::Handle<JS::Value> aKey,
-    bool aOverwrite, bool aFromCursor, ErrorResult& aRv) {
+RefPtr<IDBRequest> IDBObjectStore::AddOrPut(JSContext* aCx,
+                                            ValueWrapper& aValueWrapper,
+                                            JS::Handle<JS::Value> aKey,
+                                            bool aOverwrite, bool aFromCursor,
+                                            ErrorResult& aRv) {
   AssertIsOnOwningThread();
   MOZ_ASSERT(aCx);
   MOZ_ASSERT_IF(aFromCursor, aOverwrite);
 
-  if (mTransaction->GetMode() == IDBTransaction::CLEANUP || mDeletedSpec) {
+  if (mTransaction->GetMode() == IDBTransaction::Mode::Cleanup ||
+      mDeletedSpec) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_NOT_ALLOWED_ERR);
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
@@ -1482,12 +1512,17 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
   StructuredCloneWriteInfo cloneWriteInfo(mTransaction->Database());
   nsTArray<IndexUpdateInfo> updateInfo;
 
-  GetAddInfo(aCx, aValueWrapper, aKey, cloneWriteInfo, key, updateInfo, aRv);
+  {
+    const auto autoStateRestore =
+        mTransaction->TemporarilyTransitionToInactive();
+    GetAddInfo(aCx, aValueWrapper, aKey, cloneWriteInfo, key, updateInfo, aRv);
+  }
+
   if (aRv.Failed()) {
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
@@ -1502,14 +1537,15 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
   MOZ_ASSERT(maximalSizeFromPref > kMaxIDBMsgOverhead);
   const size_t kMaxMessageSize = maximalSizeFromPref - kMaxIDBMsgOverhead;
 
-  size_t indexUpdateInfoSize = 0;
-  for (size_t i = 0; i < updateInfo.Length(); i++) {
-    indexUpdateInfoSize += updateInfo[i].value().GetBuffer().Length();
-    indexUpdateInfoSize += updateInfo[i].localizedValue().GetBuffer().Length();
-  }
+  const size_t indexUpdateInfoSize =
+      std::accumulate(updateInfo.cbegin(), updateInfo.cend(), 0u,
+                      [](size_t old, const IndexUpdateInfo& updateInfo) {
+                        return old + updateInfo.value().GetBuffer().Length() +
+                               updateInfo.localizedValue().GetBuffer().Length();
+                      });
 
-  size_t messageSize = cloneWriteInfo.mCloneBuffer.data().Size() +
-                       key.GetBuffer().Length() + indexUpdateInfoSize;
+  const size_t messageSize = cloneWriteInfo.mCloneBuffer.data().Size() +
+                             key.GetBuffer().Length() + indexUpdateInfoSize;
 
   if (messageSize > kMaxMessageSize) {
     IDB_REPORT_INTERNAL_ERR();
@@ -1540,12 +1576,12 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
       return nullptr;
     }
 
-    IDBDatabase* database = mTransaction->Database();
+    IDBDatabase* const database = mTransaction->Database();
 
     for (uint32_t index = 0; index < count; index++) {
       StructuredCloneFile& file = files[index];
 
-      FileAddInfo* fileAddInfo = fileAddInfos.AppendElement(fallible);
+      FileAddInfo* const fileAddInfo = fileAddInfos.AppendElement(fallible);
       MOZ_ASSERT(fileAddInfo);
 
       switch (file.mType) {
@@ -1553,7 +1589,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
           MOZ_ASSERT(file.mBlob);
           MOZ_ASSERT(!file.mMutableFile);
 
-          PBackgroundIDBDatabaseFileChild* fileActor =
+          PBackgroundIDBDatabaseFileChild* const fileActor =
               database->GetOrCreateFileActorForBlob(file.mBlob);
           if (NS_WARN_IF(!fileActor)) {
             IDB_REPORT_INTERNAL_ERR();
@@ -1571,7 +1607,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
           MOZ_ASSERT(file.mMutableFile);
           MOZ_ASSERT(!file.mBlob);
 
-          PBackgroundMutableFileChild* mutableFileActor =
+          PBackgroundMutableFileChild* const mutableFileActor =
               file.mMutableFile->GetBackgroundActor();
           if (NS_WARN_IF(!mutableFileActor)) {
             IDB_REPORT_INTERNAL_ERR();
@@ -1590,7 +1626,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
           MOZ_ASSERT(file.mBlob);
           MOZ_ASSERT(!file.mMutableFile);
 
-          PBackgroundIDBDatabaseFileChild* fileActor =
+          PBackgroundIDBDatabaseFileChild* const fileActor =
               database->GetOrCreateFileActorForBlob(file.mBlob);
           if (NS_WARN_IF(!fileActor)) {
             IDB_REPORT_INTERNAL_ERR();
@@ -1612,33 +1648,26 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
     commonParams.fileAddInfos().SwapElements(fileAddInfos);
   }
 
-  RequestParams params;
-  if (aOverwrite) {
-    params = ObjectStorePutParams(commonParams);
-  } else {
-    params = ObjectStoreAddParams(commonParams);
-  }
+  const auto& params = aOverwrite
+                           ? RequestParams{ObjectStorePutParams(commonParams)}
+                           : RequestParams{ObjectStoreAddParams(commonParams)};
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
   if (!aFromCursor) {
     if (aOverwrite) {
-      IDB_LOG_MARK(
-          "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+      IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
           "database(%s).transaction(%s).objectStore(%s).put(%s)",
-          "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.put()",
-          IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+          "IDBObjectStore.put()", mTransaction->LoggingSerialNumber(),
           request->LoggingSerialNumber(),
           IDB_LOG_STRINGIFY(mTransaction->Database()),
           IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
           IDB_LOG_STRINGIFY(key));
     } else {
-      IDB_LOG_MARK(
-          "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+      IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
           "database(%s).transaction(%s).objectStore(%s).add(%s)",
-          "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.add()",
-          IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+          "IDBObjectStore.add()", mTransaction->LoggingSerialNumber(),
           request->LoggingSerialNumber(),
           IDB_LOG_STRINGIFY(mTransaction->Database()),
           IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
@@ -1648,10 +1677,12 @@ already_AddRefed<IDBRequest> IDBObjectStore::AddOrPut(
 
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  mTransaction->InvalidateCursorCaches();
+
+  return request;
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::GetAllInternal(
+RefPtr<IDBRequest> IDBObjectStore::GetAllInternal(
     bool aKeysOnly, JSContext* aCx, JS::Handle<JS::Value> aKey,
     const Optional<uint32_t>& aLimit, ErrorResult& aRv) {
   AssertIsOnOwningThread();
@@ -1661,13 +1692,13 @@ already_AddRefed<IDBRequest> IDBObjectStore::GetAllInternal(
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
 
   RefPtr<IDBKeyRange> keyRange;
-  IDBKeyRange::FromJSVal(aCx, aKey, getter_AddRefs(keyRange), aRv);
+  IDBKeyRange::FromJSVal(aCx, aKey, &keyRange, aRv);
   if (NS_WARN_IF(aRv.Failed())) {
     return nullptr;
   }
@@ -1690,40 +1721,86 @@ already_AddRefed<IDBRequest> IDBObjectStore::GetAllInternal(
     params = ObjectStoreGetAllParams(id, optionalKeyRange, limit);
   }
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
   if (aKeysOnly) {
-    IDB_LOG_MARK(
-        "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+    IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
         "database(%s).transaction(%s).objectStore(%s)."
         "getAllKeys(%s, %s)",
-        "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.getAllKeys()",
-        IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+        "IDBObjectStore.getAllKeys()", mTransaction->LoggingSerialNumber(),
         request->LoggingSerialNumber(),
         IDB_LOG_STRINGIFY(mTransaction->Database()),
         IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
         IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(aLimit));
   } else {
-    IDB_LOG_MARK(
-        "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+    IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
         "database(%s).transaction(%s).objectStore(%s)."
         "getAll(%s, %s)",
-        "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.getAll()",
-        IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+        "IDBObjectStore.getAll()", mTransaction->LoggingSerialNumber(),
         request->LoggingSerialNumber(),
         IDB_LOG_STRINGIFY(mTransaction->Database()),
         IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
         IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(aLimit));
   }
 
+  // TODO: This is necessary to preserve request ordering only. Proper
+  // sequencing of requests should be done in a more sophisticated manner that
+  // doesn't require invalidating cursor caches (Bug 1580499).
+  mTransaction->InvalidateCursorCaches();
+
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  return request;
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::Clear(JSContext* aCx,
-                                                   ErrorResult& aRv) {
+RefPtr<IDBRequest> IDBObjectStore::Add(JSContext* aCx,
+                                       JS::Handle<JS::Value> aValue,
+                                       JS::Handle<JS::Value> aKey,
+                                       ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  ValueWrapper valueWrapper(aCx, aValue);
+
+  return AddOrPut(aCx, valueWrapper, aKey, false, /* aFromCursor */ false, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::Put(JSContext* aCx,
+                                       JS::Handle<JS::Value> aValue,
+                                       JS::Handle<JS::Value> aKey,
+                                       ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  ValueWrapper valueWrapper(aCx, aValue);
+
+  return AddOrPut(aCx, valueWrapper, aKey, true, /* aFromCursor */ false, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::Delete(JSContext* aCx,
+                                          JS::Handle<JS::Value> aKey,
+                                          ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return DeleteInternal(aCx, aKey, /* aFromCursor */ false, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::Get(JSContext* aCx,
+                                       JS::Handle<JS::Value> aKey,
+                                       ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return GetInternal(/* aKeyOnly */ false, aCx, aKey, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::GetKey(JSContext* aCx,
+                                          JS::Handle<JS::Value> aKey,
+                                          ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return GetInternal(/* aKeyOnly */ true, aCx, aKey, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::Clear(JSContext* aCx, ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
   if (mDeletedSpec) {
@@ -1731,7 +1808,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::Clear(JSContext* aCx,
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
@@ -1741,75 +1818,115 @@ already_AddRefed<IDBRequest> IDBObjectStore::Clear(JSContext* aCx,
     return nullptr;
   }
 
-  ObjectStoreClearParams params;
-  params.objectStoreId() = Id();
+  const ObjectStoreClearParams params = {Id()};
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s).clear()",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.clear()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.clear()", mTransaction->LoggingSerialNumber(),
       request->LoggingSerialNumber(),
       IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this));
 
+  mTransaction->InvalidateCursorCaches();
+
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  return request;
 }
 
-already_AddRefed<IDBIndex> IDBObjectStore::Index(const nsAString& aName,
+RefPtr<IDBRequest> IDBObjectStore::GetAll(JSContext* aCx,
+                                          JS::Handle<JS::Value> aKey,
+                                          const Optional<uint32_t>& aLimit,
+                                          ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return GetAllInternal(/* aKeysOnly */ false, aCx, aKey, aLimit, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::GetAllKeys(JSContext* aCx,
+                                              JS::Handle<JS::Value> aKey,
+                                              const Optional<uint32_t>& aLimit,
+                                              ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return GetAllInternal(/* aKeysOnly */ true, aCx, aKey, aLimit, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::OpenCursor(JSContext* aCx,
+                                              JS::Handle<JS::Value> aRange,
+                                              IDBCursorDirection aDirection,
+                                              ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return OpenCursorInternal(/* aKeysOnly */ false, aCx, aRange, aDirection,
+                            aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::OpenCursor(JSContext* aCx,
+                                              IDBCursorDirection aDirection,
+                                              ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  return OpenCursorInternal(/* aKeysOnly */ false, aCx,
+                            JS::UndefinedHandleValue, aDirection, aRv);
+}
+
+RefPtr<IDBRequest> IDBObjectStore::OpenKeyCursor(JSContext* aCx,
+                                                 JS::Handle<JS::Value> aRange,
+                                                 IDBCursorDirection aDirection,
                                                  ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
-  if (mTransaction->IsCommittingOrDone() || mDeletedSpec) {
+  return OpenCursorInternal(/* aKeysOnly */ true, aCx, aRange, aDirection, aRv);
+}
+
+RefPtr<IDBIndex> IDBObjectStore::Index(const nsAString& aName,
+                                       ErrorResult& aRv) {
+  AssertIsOnOwningThread();
+
+  if (mTransaction->IsCommittingOrFinished() || mDeletedSpec) {
     aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
     return nullptr;
   }
 
-  const nsTArray<IndexMetadata>& indexes = mSpec->indexes();
+  const nsTArray<IndexMetadata>& indexMetadatas = mSpec->indexes();
 
-  const IndexMetadata* metadata = nullptr;
+  const auto endIndexMetadatas = indexMetadatas.cend();
+  const auto foundMetadata =
+      std::find_if(indexMetadatas.cbegin(), endIndexMetadatas,
+                   [&aName](const auto& indexMetadata) {
+                     return indexMetadata.name() == aName;
+                   });
 
-  for (uint32_t idxCount = indexes.Length(), idxIndex = 0; idxIndex < idxCount;
-       idxIndex++) {
-    const IndexMetadata& index = indexes[idxIndex];
-    if (index.name() == aName) {
-      metadata = &index;
-      break;
-    }
-  }
-
-  if (!metadata) {
+  if (foundMetadata == endIndexMetadatas) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_NOT_FOUND_ERR);
     return nullptr;
   }
 
-  const int64_t desiredId = metadata->id();
+  const IndexMetadata& metadata = *foundMetadata;
+
+  const auto endIndexes = mIndexes.cend();
+  const auto foundIndex =
+      std::find_if(mIndexes.cbegin(), endIndexes,
+                   [desiredId = metadata.id()](const auto& index) {
+                     return index->Id() == desiredId;
+                   });
 
   RefPtr<IDBIndex> index;
 
-  for (uint32_t idxCount = mIndexes.Length(), idxIndex = 0; idxIndex < idxCount;
-       idxIndex++) {
-    RefPtr<IDBIndex>& existingIndex = mIndexes[idxIndex];
-
-    if (existingIndex->Id() == desiredId) {
-      index = existingIndex;
-      break;
-    }
-  }
-
-  if (!index) {
-    index = IDBIndex::Create(this, *metadata);
+  if (foundIndex == endIndexes) {
+    index = IDBIndex::Create(this, metadata);
     MOZ_ASSERT(index);
 
     mIndexes.AppendElement(index);
+  } else {
+    index = *foundIndex;
   }
 
-  return index.forget();
+  return index;
 }
 
 NS_IMPL_CYCLE_COLLECTION_CLASS(IDBObjectStore)
@@ -1879,28 +1996,16 @@ void IDBObjectStore::GetKeyPath(JSContext* aCx,
   aResult.set(mCachedKeyPath);
 }
 
-already_AddRefed<DOMStringList> IDBObjectStore::IndexNames() {
+RefPtr<DOMStringList> IDBObjectStore::IndexNames() {
   AssertIsOnOwningThread();
 
-  const nsTArray<IndexMetadata>& indexes = mSpec->indexes();
-
-  RefPtr<DOMStringList> list = new DOMStringList();
-
-  if (!indexes.IsEmpty()) {
-    nsTArray<nsString>& listNames = list->StringArray();
-    listNames.SetCapacity(indexes.Length());
-
-    for (uint32_t index = 0; index < indexes.Length(); index++) {
-      listNames.InsertElementSorted(indexes[index].name());
-    }
-  }
-
-  return list.forget();
+  return CreateSortedDOMStringList(
+      mSpec->indexes(), [](const auto& index) { return index.name(); });
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::GetInternal(
-    bool aKeyOnly, JSContext* aCx, JS::Handle<JS::Value> aKey,
-    ErrorResult& aRv) {
+RefPtr<IDBRequest> IDBObjectStore::GetInternal(bool aKeyOnly, JSContext* aCx,
+                                               JS::Handle<JS::Value> aKey,
+                                               ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
   if (mDeletedSpec) {
@@ -1908,13 +2013,13 @@ already_AddRefed<IDBRequest> IDBObjectStore::GetInternal(
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
 
   RefPtr<IDBKeyRange> keyRange;
-  IDBKeyRange::FromJSVal(aCx, aKey, getter_AddRefs(keyRange), aRv);
+  IDBKeyRange::FromJSVal(aCx, aKey, &keyRange, aRv);
   if (aRv.Failed()) {
     return nullptr;
   }
@@ -1930,34 +2035,35 @@ already_AddRefed<IDBRequest> IDBObjectStore::GetInternal(
   SerializedKeyRange serializedKeyRange;
   keyRange->ToSerialized(serializedKeyRange);
 
-  RequestParams params;
-  if (aKeyOnly) {
-    params = ObjectStoreGetKeyParams(id, serializedKeyRange);
-  } else {
-    params = ObjectStoreGetParams(id, serializedKeyRange);
-  }
+  const auto& params =
+      aKeyOnly ? RequestParams{ObjectStoreGetKeyParams(id, serializedKeyRange)}
+               : RequestParams{ObjectStoreGetParams(id, serializedKeyRange)};
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s).get(%s)",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.get()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.get()", mTransaction->LoggingSerialNumber(),
       request->LoggingSerialNumber(),
       IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
       IDB_LOG_STRINGIFY(keyRange));
 
+  // TODO: This is necessary to preserve request ordering only. Proper
+  // sequencing of requests should be done in a more sophisticated manner that
+  // doesn't require invalidating cursor caches (Bug 1580499).
+  mTransaction->InvalidateCursorCaches();
+
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  return request;
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::DeleteInternal(
-    JSContext* aCx, JS::Handle<JS::Value> aKey, bool aFromCursor,
-    ErrorResult& aRv) {
+RefPtr<IDBRequest> IDBObjectStore::DeleteInternal(JSContext* aCx,
+                                                  JS::Handle<JS::Value> aKey,
+                                                  bool aFromCursor,
+                                                  ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
   if (mDeletedSpec) {
@@ -1965,7 +2071,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::DeleteInternal(
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
@@ -1976,7 +2082,7 @@ already_AddRefed<IDBRequest> IDBObjectStore::DeleteInternal(
   }
 
   RefPtr<IDBKeyRange> keyRange;
-  IDBKeyRange::FromJSVal(aCx, aKey, getter_AddRefs(keyRange), aRv);
+  IDBKeyRange::FromJSVal(aCx, aKey, &keyRange, aRv);
   if (NS_WARN_IF((aRv.Failed()))) {
     return nullptr;
   }
@@ -1991,15 +2097,13 @@ already_AddRefed<IDBRequest> IDBObjectStore::DeleteInternal(
   params.objectStoreId() = Id();
   keyRange->ToSerialized(params.keyRange());
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
   if (!aFromCursor) {
-    IDB_LOG_MARK(
-        "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+    IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
         "database(%s).transaction(%s).objectStore(%s).delete(%s)",
-        "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.delete()",
-        IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+        "IDBObjectStore.delete()", mTransaction->LoggingSerialNumber(),
         request->LoggingSerialNumber(),
         IDB_LOG_STRINGIFY(mTransaction->Database()),
         IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
@@ -2008,35 +2112,41 @@ already_AddRefed<IDBRequest> IDBObjectStore::DeleteInternal(
 
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  mTransaction->InvalidateCursorCaches();
+
+  return request;
 }
 
-already_AddRefed<IDBIndex> IDBObjectStore::CreateIndex(
+RefPtr<IDBIndex> IDBObjectStore::CreateIndex(
     const nsAString& aName, const StringOrStringSequence& aKeyPath,
     const IDBIndexParameters& aOptionalParameters, ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
-  if (mTransaction->GetMode() != IDBTransaction::VERSION_CHANGE ||
+  if (mTransaction->GetMode() != IDBTransaction::Mode::VersionChange ||
       mDeletedSpec) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_NOT_ALLOWED_ERR);
     return nullptr;
   }
 
-  IDBTransaction* transaction = IDBTransaction::GetCurrent();
-  if (!transaction || transaction != mTransaction || !transaction->IsOpen()) {
+  IDBTransaction* const transaction = IDBTransaction::GetCurrent();
+  if (!transaction || transaction != mTransaction ||
+      !transaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
 
   auto& indexes = const_cast<nsTArray<IndexMetadata>&>(mSpec->indexes());
-  for (uint32_t count = indexes.Length(), index = 0; index < count; index++) {
-    if (aName == indexes[index].name()) {
-      aRv.ThrowDOMException(
-          NS_ERROR_DOM_INDEXEDDB_CONSTRAINT_ERR,
-          nsPrintfCString("Index named '%s' already exists at index '%u'",
-                          NS_ConvertUTF16toUTF8(aName).get(), index));
-      return nullptr;
-    }
+  const auto end = indexes.cend();
+  const auto foundIt = std::find_if(
+      indexes.cbegin(), end,
+      [&aName](const auto& index) { return aName == index.name(); });
+  if (foundIt != end) {
+    aRv.ThrowDOMException(
+        NS_ERROR_DOM_INDEXEDDB_CONSTRAINT_ERR,
+        nsPrintfCString("Index named '%s' already exists at index '%zu'",
+                        NS_ConvertUTF16toUTF8(aName).get(),
+                        foundIt.GetIndex()));
+    return nullptr;
   }
 
   KeyPath keyPath(0);
@@ -2062,12 +2172,15 @@ already_AddRefed<IDBIndex> IDBObjectStore::CreateIndex(
   }
 
 #ifdef DEBUG
-  for (uint32_t count = mIndexes.Length(), index = 0; index < count; index++) {
-    MOZ_ASSERT(mIndexes[index]->Name() != aName);
+  {
+    const auto duplicateIndexName = std::any_of(
+        mIndexes.cbegin(), mIndexes.cend(),
+        [&aName](const auto& index) { return index->Name() == aName; });
+    MOZ_ASSERT(!duplicateIndexName);
   }
 #endif
 
-  const IndexMetadata* oldMetadataElements =
+  const IndexMetadata* const oldMetadataElements =
       indexes.IsEmpty() ? nullptr : indexes.Elements();
 
   // With this setup we only validate the passed in locale name by the time we
@@ -2080,7 +2193,7 @@ already_AddRefed<IDBIndex> IDBObjectStore::CreateIndex(
     locale = IndexedDatabaseManager::GetLocale();
   }
 
-  IndexMetadata* metadata = indexes.AppendElement(
+  IndexMetadata* const metadata = indexes.AppendElement(
       IndexMetadata(transaction->NextIndexId(), nsString(aName), keyPath,
                     locale, aOptionalParameters.mUnique,
                     aOptionalParameters.mMultiEntry, autoLocale));
@@ -2094,8 +2207,7 @@ already_AddRefed<IDBIndex> IDBObjectStore::CreateIndex(
 
   transaction->CreateIndex(this, *metadata);
 
-  RefPtr<IDBIndex> index = IDBIndex::Create(this, *metadata);
-  MOZ_ASSERT(index);
+  auto index = IDBIndex::Create(this, *metadata);
 
   mIndexes.AppendElement(index);
 
@@ -2103,83 +2215,76 @@ already_AddRefed<IDBIndex> IDBObjectStore::CreateIndex(
   // number to keep in sync with the parent.
   const uint64_t requestSerialNumber = IDBRequest::NextSerialNumber();
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s).createIndex(%s)",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.createIndex()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.createIndex()", mTransaction->LoggingSerialNumber(),
       requestSerialNumber, IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
       IDB_LOG_STRINGIFY(index));
 
-  return index.forget();
+  return index;
 }
 
 void IDBObjectStore::DeleteIndex(const nsAString& aName, ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
-  if (mTransaction->GetMode() != IDBTransaction::VERSION_CHANGE ||
+  if (mTransaction->GetMode() != IDBTransaction::Mode::VersionChange ||
       mDeletedSpec) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_NOT_ALLOWED_ERR);
     return;
   }
 
   IDBTransaction* transaction = IDBTransaction::GetCurrent();
-  if (!transaction || transaction != mTransaction || !transaction->IsOpen()) {
+  if (!transaction || transaction != mTransaction ||
+      !transaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return;
   }
 
   auto& metadataArray = const_cast<nsTArray<IndexMetadata>&>(mSpec->indexes());
 
-  int64_t foundId = 0;
+  const auto endMetadata = metadataArray.cend();
+  const auto foundMetadataIt = std::find_if(
+      metadataArray.cbegin(), endMetadata,
+      [&aName](const auto& metadata) { return aName == metadata.name(); });
 
-  for (uint32_t metadataCount = metadataArray.Length(), metadataIndex = 0;
-       metadataIndex < metadataCount; metadataIndex++) {
-    const IndexMetadata& metadata = metadataArray[metadataIndex];
-    MOZ_ASSERT(metadata.id());
-
-    if (aName == metadata.name()) {
-      foundId = metadata.id();
-
-      // Must do this before altering the metadata array!
-      for (uint32_t indexCount = mIndexes.Length(), indexIndex = 0;
-           indexIndex < indexCount; indexIndex++) {
-        RefPtr<IDBIndex>& index = mIndexes[indexIndex];
-
-        if (index->Id() == foundId) {
-          index->NoteDeletion();
-
-          RefPtr<IDBIndex>* deletedIndex = mDeletedIndexes.AppendElement();
-          deletedIndex->swap(mIndexes[indexIndex]);
-
-          mIndexes.RemoveElementAt(indexIndex);
-          break;
-        }
-      }
-
-      metadataArray.RemoveElementAt(metadataIndex);
-
-      RefreshSpec(/* aMayDelete */ false);
-      break;
-    }
-  }
-
-  if (!foundId) {
+  if (foundMetadataIt == endMetadata) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_NOT_FOUND_ERR);
     return;
   }
+
+  const auto foundId = foundMetadataIt->id();
+  MOZ_ASSERT(foundId);
+
+  // Must remove index from mIndexes before altering the metadata array!
+  {
+    const auto end = mIndexes.end();
+    const auto foundIt = std::find_if(
+        mIndexes.begin(), end,
+        [foundId](const auto& index) { return index->Id() == foundId; });
+    // TODO: Or should we assert foundIt != end?
+    if (foundIt != end) {
+      auto& index = *foundIt;
+
+      index->NoteDeletion();
+
+      mDeletedIndexes.EmplaceBack(std::move(index));
+      mIndexes.RemoveElementAt(foundIt.GetIndex());
+    }
+  }
+
+  metadataArray.RemoveElementAt(foundMetadataIt.GetIndex());
+
+  RefreshSpec(/* aMayDelete */ false);
 
   // Don't do this in the macro because we always need to increment the serial
   // number to keep in sync with the parent.
   const uint64_t requestSerialNumber = IDBRequest::NextSerialNumber();
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s)."
       "deleteIndex(\"%s\")",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.deleteIndex()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.deleteIndex()", mTransaction->LoggingSerialNumber(),
       requestSerialNumber, IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
       NS_ConvertUTF16toUTF8(aName).get());
@@ -2187,9 +2292,9 @@ void IDBObjectStore::DeleteIndex(const nsAString& aName, ErrorResult& aRv) {
   transaction->DeleteIndex(this, foundId);
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::Count(JSContext* aCx,
-                                                   JS::Handle<JS::Value> aKey,
-                                                   ErrorResult& aRv) {
+RefPtr<IDBRequest> IDBObjectStore::Count(JSContext* aCx,
+                                         JS::Handle<JS::Value> aKey,
+                                         ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
   if (mDeletedSpec) {
@@ -2197,13 +2302,13 @@ already_AddRefed<IDBRequest> IDBObjectStore::Count(JSContext* aCx,
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
 
   RefPtr<IDBKeyRange> keyRange;
-  IDBKeyRange::FromJSVal(aCx, aKey, getter_AddRefs(keyRange), aRv);
+  IDBKeyRange::FromJSVal(aCx, aKey, &keyRange, aRv);
   if (aRv.Failed()) {
     return nullptr;
   }
@@ -2217,25 +2322,28 @@ already_AddRefed<IDBRequest> IDBObjectStore::Count(JSContext* aCx,
     params.optionalKeyRange().emplace(serializedKeyRange);
   }
 
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s).count(%s)",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.count()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.count()", mTransaction->LoggingSerialNumber(),
       request->LoggingSerialNumber(),
       IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
       IDB_LOG_STRINGIFY(keyRange));
 
+  // TODO: This is necessary to preserve request ordering only. Proper
+  // sequencing of requests should be done in a more sophisticated manner that
+  // doesn't require invalidating cursor caches (Bug 1580499).
+  mTransaction->InvalidateCursorCaches();
+
   mTransaction->StartRequest(request, params);
 
-  return request.forget();
+  return request;
 }
 
-already_AddRefed<IDBRequest> IDBObjectStore::OpenCursorInternal(
+RefPtr<IDBRequest> IDBObjectStore::OpenCursorInternal(
     bool aKeysOnly, JSContext* aCx, JS::Handle<JS::Value> aRange,
     IDBCursorDirection aDirection, ErrorResult& aRv) {
   AssertIsOnOwningThread();
@@ -2246,18 +2354,18 @@ already_AddRefed<IDBRequest> IDBObjectStore::OpenCursorInternal(
     return nullptr;
   }
 
-  if (!mTransaction->IsOpen()) {
+  if (!mTransaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return nullptr;
   }
 
   RefPtr<IDBKeyRange> keyRange;
-  IDBKeyRange::FromJSVal(aCx, aRange, getter_AddRefs(keyRange), aRv);
+  IDBKeyRange::FromJSVal(aCx, aRange, &keyRange, aRv);
   if (NS_WARN_IF(aRv.Failed())) {
     return nullptr;
   }
 
-  int64_t objectStoreId = Id();
+  const int64_t objectStoreId = Id();
 
   Maybe<SerializedKeyRange> optionalKeyRange;
 
@@ -2268,98 +2376,85 @@ already_AddRefed<IDBRequest> IDBObjectStore::OpenCursorInternal(
     optionalKeyRange.emplace(std::move(serializedKeyRange));
   }
 
-  IDBCursor::Direction direction = IDBCursor::ConvertDirection(aDirection);
+  const CommonOpenCursorParams commonParams = {
+      objectStoreId, std::move(optionalKeyRange), aDirection};
 
-  OpenCursorParams params;
-  if (aKeysOnly) {
-    ObjectStoreOpenKeyCursorParams openParams;
-    openParams.objectStoreId() = objectStoreId;
-    openParams.optionalKeyRange() = std::move(optionalKeyRange);
-    openParams.direction() = direction;
+  // TODO: It would be great if the IPDL generator created a constructor
+  // accepting a CommonOpenCursorParams by value or rvalue reference.
+  const auto params =
+      aKeysOnly ? OpenCursorParams{ObjectStoreOpenKeyCursorParams{commonParams}}
+                : OpenCursorParams{ObjectStoreOpenCursorParams{commonParams}};
 
-    params = std::move(openParams);
-  } else {
-    ObjectStoreOpenCursorParams openParams;
-    openParams.objectStoreId() = objectStoreId;
-    openParams.optionalKeyRange() = std::move(optionalKeyRange);
-    openParams.direction() = direction;
-
-    params = std::move(openParams);
-  }
-
-  RefPtr<IDBRequest> request = GenerateRequest(aCx, this);
+  auto request = GenerateRequest(aCx, this);
   MOZ_ASSERT(request);
 
   if (aKeysOnly) {
-    IDB_LOG_MARK(
-        "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+    IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
         "database(%s).transaction(%s).objectStore(%s)."
         "openKeyCursor(%s, %s)",
-        "IndexedDB %s: C T[%lld] R[%llu]: "
-        "IDBObjectStore.openKeyCursor()",
-        IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+        "IDBObjectStore.openKeyCursor()", mTransaction->LoggingSerialNumber(),
         request->LoggingSerialNumber(),
         IDB_LOG_STRINGIFY(mTransaction->Database()),
         IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
-        IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(direction));
+        IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(aDirection));
   } else {
-    IDB_LOG_MARK(
-        "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+    IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
         "database(%s).transaction(%s).objectStore(%s)."
         "openCursor(%s, %s)",
-        "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.openCursor()",
-        IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+        "IDBObjectStore.openCursor()", mTransaction->LoggingSerialNumber(),
         request->LoggingSerialNumber(),
         IDB_LOG_STRINGIFY(mTransaction->Database()),
         IDB_LOG_STRINGIFY(mTransaction), IDB_LOG_STRINGIFY(this),
-        IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(direction));
+        IDB_LOG_STRINGIFY(keyRange), IDB_LOG_STRINGIFY(aDirection));
   }
 
-  BackgroundCursorChild* actor =
-      new BackgroundCursorChild(request, this, direction);
+  BackgroundCursorChildBase* const actor =
+      aKeysOnly ? static_cast<BackgroundCursorChildBase*>(
+                      new BackgroundCursorChild<IDBCursorType::ObjectStoreKey>(
+                          request, this, aDirection))
+                : new BackgroundCursorChild<IDBCursorType::ObjectStore>(
+                      request, this, aDirection);
+
+  // TODO: This is necessary to preserve request ordering only. Proper
+  // sequencing of requests should be done in a more sophisticated manner that
+  // doesn't require invalidating cursor caches (Bug 1580499).
+  mTransaction->InvalidateCursorCaches();
 
   mTransaction->OpenCursor(actor, params);
 
-  return request.forget();
+  return request;
 }
 
 void IDBObjectStore::RefreshSpec(bool aMayDelete) {
   AssertIsOnOwningThread();
-  MOZ_ASSERT_IF(mDeletedSpec, mSpec == mDeletedSpec);
+  MOZ_ASSERT_IF(mDeletedSpec, mSpec == mDeletedSpec.get());
 
   const DatabaseSpec* dbSpec = mTransaction->Database()->Spec();
   MOZ_ASSERT(dbSpec);
 
   const nsTArray<ObjectStoreSpec>& objectStores = dbSpec->objectStores();
 
-  bool found = false;
+  const auto foundIt = std::find_if(objectStores.cbegin(), objectStores.cend(),
+                                    [id = Id()](const auto& objSpec) {
+                                      return objSpec.metadata().id() == id;
+                                    });
+  const bool found = foundIt != objectStores.cend();
+  if (found) {
+    mSpec = &*foundIt;
 
-  for (uint32_t objCount = objectStores.Length(), objIndex = 0;
-       objIndex < objCount; objIndex++) {
-    const ObjectStoreSpec& objSpec = objectStores[objIndex];
+    for (auto& index : mIndexes) {
+      index->RefreshMetadata(aMayDelete);
+    }
 
-    if (objSpec.metadata().id() == Id()) {
-      mSpec = &objSpec;
-
-      for (uint32_t idxCount = mIndexes.Length(), idxIndex = 0;
-           idxIndex < idxCount; idxIndex++) {
-        mIndexes[idxIndex]->RefreshMetadata(aMayDelete);
-      }
-
-      for (uint32_t idxCount = mDeletedIndexes.Length(), idxIndex = 0;
-           idxIndex < idxCount; idxIndex++) {
-        mDeletedIndexes[idxIndex]->RefreshMetadata(false);
-      }
-
-      found = true;
-      break;
+    for (auto& index : mDeletedIndexes) {
+      index->RefreshMetadata(false);
     }
   }
 
   MOZ_ASSERT_IF(!aMayDelete && !mDeletedSpec, found);
 
   if (found) {
-    MOZ_ASSERT(mSpec != mDeletedSpec);
+    MOZ_ASSERT(mSpec != mDeletedSpec.get());
     mDeletedSpec = nullptr;
   } else {
     NoteDeletion();
@@ -2379,21 +2474,18 @@ void IDBObjectStore::NoteDeletion() {
   MOZ_ASSERT(Id() == mSpec->metadata().id());
 
   if (mDeletedSpec) {
-    MOZ_ASSERT(mDeletedSpec == mSpec);
+    MOZ_ASSERT(mDeletedSpec.get() == mSpec);
     return;
   }
 
   // Copy the spec here.
-  mDeletedSpec = new ObjectStoreSpec(*mSpec);
+  mDeletedSpec = MakeUnique<ObjectStoreSpec>(*mSpec);
   mDeletedSpec->indexes().Clear();
 
-  mSpec = mDeletedSpec;
+  mSpec = mDeletedSpec.get();
 
-  if (!mIndexes.IsEmpty()) {
-    for (uint32_t count = mIndexes.Length(), index = 0; index < count;
-         index++) {
-      mIndexes[index]->NoteDeletion();
-    }
+  for (const auto& index : mIndexes) {
+    index->NoteDeletion();
   }
 }
 
@@ -2407,14 +2499,15 @@ const nsString& IDBObjectStore::Name() const {
 void IDBObjectStore::SetName(const nsAString& aName, ErrorResult& aRv) {
   AssertIsOnOwningThread();
 
-  if (mTransaction->GetMode() != IDBTransaction::VERSION_CHANGE ||
+  if (mTransaction->GetMode() != IDBTransaction::Mode::VersionChange ||
       mDeletedSpec) {
     aRv.Throw(NS_ERROR_DOM_INVALID_STATE_ERR);
     return;
   }
 
   IDBTransaction* transaction = IDBTransaction::GetCurrent();
-  if (!transaction || transaction != mTransaction || !transaction->IsOpen()) {
+  if (!transaction || transaction != mTransaction ||
+      !transaction->CanAcceptRequests()) {
     aRv.Throw(NS_ERROR_DOM_INDEXEDDB_TRANSACTION_INACTIVE_ERR);
     return;
   }
@@ -2426,7 +2519,7 @@ void IDBObjectStore::SetName(const nsAString& aName, ErrorResult& aRv) {
   // Cache logging string of this object store before renaming.
   const LoggingString loggingOldObjectStore(this);
 
-  nsresult rv =
+  const nsresult rv =
       transaction->Database()->RenameObjectStore(mSpec->metadata().id(), aName);
 
   if (NS_FAILED(rv)) {
@@ -2438,11 +2531,9 @@ void IDBObjectStore::SetName(const nsAString& aName, ErrorResult& aRv) {
   // number to keep in sync with the parent.
   const uint64_t requestSerialNumber = IDBRequest::NextSerialNumber();
 
-  IDB_LOG_MARK(
-      "IndexedDB %s: Child  Transaction[%lld] Request[%llu]: "
+  IDB_LOG_MARK_CHILD_TRANSACTION_REQUEST(
       "database(%s).transaction(%s).objectStore(%s).rename(%s)",
-      "IndexedDB %s: C T[%lld] R[%llu]: IDBObjectStore.rename()",
-      IDB_LOG_ID_STRING(), mTransaction->LoggingSerialNumber(),
+      "IDBObjectStore.rename()", mTransaction->LoggingSerialNumber(),
       requestSerialNumber, IDB_LOG_STRINGIFY(mTransaction->Database()),
       IDB_LOG_STRINGIFY(mTransaction), loggingOldObjectStore.get(),
       IDB_LOG_STRINGIFY(this));

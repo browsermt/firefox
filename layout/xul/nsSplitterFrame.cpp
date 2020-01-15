@@ -24,7 +24,6 @@
 #include "nsHTMLParts.h"
 #include "mozilla/ComputedStyle.h"
 #include "nsBoxLayoutState.h"
-#include "nsIServiceManager.h"
 #include "nsContainerFrame.h"
 #include "nsContentCID.h"
 #include "nsLayoutUtils.h"
@@ -36,10 +35,10 @@
 #include "mozilla/MouseEvents.h"
 #include "mozilla/PresShell.h"
 #include "mozilla/UniquePtr.h"
-#include "nsBindingManager.h"
 
 using namespace mozilla;
 
+using mozilla::dom::Element;
 using mozilla::dom::Event;
 
 class nsSplitterInfo {

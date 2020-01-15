@@ -19,7 +19,7 @@ add_task(async function test() {
   let certItems = adjustedCerts[0].certItems;
 
   await BrowserTestUtils.withNewTab(url, async function(browser) {
-    await ContentTask.spawn(browser, [certItems, tabName], async function([
+    await SpecialPowers.spawn(browser, [[certItems, tabName]], async function([
       adjustedCerts,
       expectedTabName,
     ]) {
@@ -38,8 +38,8 @@ add_task(async function test() {
       );
 
       let tabName = certificateSection.shadowRoot.querySelector(
-        ".certificate-tabs"
-      ).children[0].innerText;
+        ".tab[idnumber='0']"
+      ).textContent;
       Assert.equal(tabName, expectedTabName, "Tab name should be the same");
 
       function getElementByAttribute(source, property, target) {
@@ -51,15 +51,31 @@ add_task(async function test() {
         return null;
       }
 
+      function checkBooleans(got, expected) {
+        info(
+          "If adjustedCertElments returned true, this value should be Yes, otherwise it should be No"
+        );
+        let gotBool;
+        if (got === "Yes") {
+          gotBool = true;
+        } else if (got === "No") {
+          gotBool = false;
+        } else {
+          gotBool = null;
+        }
+        Assert.equal(gotBool, expected, `Expected ${expected}, got ${gotBool}`);
+      }
+
       for (let infoGroup of infoGroups) {
-        let sectionTitle = infoGroup.shadowRoot.querySelector(
-          ".info-group-title"
-        ).innerText;
+        let sectionId = infoGroup.shadowRoot
+          .querySelector(".info-group-title")
+          .getAttribute("data-l10n-id")
+          .replace("certificate-viewer-", "");
 
         let adjustedCertsElem = getElementByAttribute(
           adjustedCerts,
-          "sectionTitle",
-          sectionTitle
+          "sectionId",
+          sectionId
         );
         Assert.ok(adjustedCertsElem, "The element exists in adjustedCerts");
 
@@ -71,13 +87,18 @@ add_task(async function test() {
         );
 
         let i = 0;
+        // Message ID mappings
+        let stringMapping = {
+          signaturealgorithm: "signature-algorithm",
+        };
         for (let infoItem of infoItems) {
           let infoItemLabel = infoItem.shadowRoot
             .querySelector("label")
             .getAttribute("data-l10n-id");
           let infoElem = infoItem.shadowRoot.querySelector(".info");
           let infoItemInfo = infoElem.textContent;
-          let adjustedCertsElemLabel = adjustedCertsElem.sectionItems[i].label;
+          let adjustedCertsElemLabel =
+            adjustedCertsElem.sectionItems[i].labelId;
           let adjustedCertsElemInfo = adjustedCertsElem.sectionItems[i].info;
 
           if (adjustedCertsElemLabel == null) {
@@ -89,15 +110,22 @@ add_task(async function test() {
             .replace(/\//g, "")
             .replace(/--/g, "-")
             .toLowerCase();
+          adjustedCertsElemLabel =
+            stringMapping[adjustedCertsElemLabel] || adjustedCertsElemLabel;
 
           if (adjustedCertsElemInfo == null) {
             adjustedCertsElemInfo = "";
+          }
+          if (typeof adjustedCertsElemInfo === "boolean") {
+            checkBooleans(infoItemInfo, adjustedCertsElemInfo);
+            continue;
           }
 
           if (
             adjustedCertsElemLabel === "timestamp" ||
             adjustedCertsElemLabel === "not-after" ||
-            adjustedCertsElemLabel === "not-before"
+            adjustedCertsElemLabel === "not-before" ||
+            adjustedCertsElemLabel === "download"
           ) {
             Assert.equal(
               infoElem.getAttribute("title"),
@@ -108,10 +136,7 @@ add_task(async function test() {
             continue;
           }
 
-          if (
-            typeof adjustedCertsElemInfo !== "string" ||
-            Array.isArray(adjustedCertsElemInfo)
-          ) {
+          if (Array.isArray(adjustedCertsElemInfo)) {
             // there is a case where we have a boolean
             adjustedCertsElemInfo = adjustedCertsElemInfo
               .toString()

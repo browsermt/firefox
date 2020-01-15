@@ -9,7 +9,19 @@ const TEST_URL = `data:text/html;charset=utf-8,${TEST_CONTENT}`;
 // Test for the tooltip coordinate on the browsing document in RDM.
 
 addRDMTask(TEST_URL, async ({ ui }) => {
-  await injectEventUtilsInContentTask(ui.getViewportBrowser());
+  // On ubuntu1804, the test fails if the real mouse cursor is on the test document.
+  // See Bug 1600183
+  info("Disable non test mouse event");
+  window.windowUtils.disableNonTestMouseEvents(true);
+  registerCleanupFunction(() => {
+    window.windowUtils.disableNonTestMouseEvents(false);
+  });
+
+  info("Create a promise which waits until the tooltip will be shown");
+  const tooltip = ui.browserWindow.gBrowser.ownerDocument.getElementById(
+    "remoteBrowserTooltip"
+  );
+  const onTooltipShown = BrowserTestUtils.waitForEvent(tooltip, "popupshown");
 
   info("Show a tooltip");
   await spawnViewportTask(ui, {}, async () => {
@@ -38,10 +50,7 @@ addRDMTask(TEST_URL, async ({ ui }) => {
   });
 
   info("Wait for showing the tooltip");
-  const tooltip = ui.browserWindow.gBrowser.ownerDocument.getElementById(
-    "remoteBrowserTooltip"
-  );
-  await waitUntil(() => tooltip.state === "open");
+  await onTooltipShown;
 
   info("Test the X coordinate of the tooltip");
   isnot(tooltip.screenX, 0, "The X coordinate of tooltip should not be 0");

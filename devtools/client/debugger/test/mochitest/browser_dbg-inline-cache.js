@@ -10,11 +10,8 @@
  *   - Reload inside debugger with toolbox caching enabled
  */
 
-// Debugger operations may still be in progress when we navigate.
-const { PromiseTestUtils } = ChromeUtils.import(
-  "resource://testing-common/PromiseTestUtils.jsm"
-);
-PromiseTestUtils.whitelistRejectionsGlobally(/Page has navigated/);
+// Breakpoint position calculations can throw when interrupted by a navigation.
+PromiseTestUtils.whitelistRejectionsGlobally(/Resource .*? does not exist/);
 
 const server = createTestHTTPServer();
 
@@ -48,7 +45,7 @@ function makeChanges() {
 }
 
 function getPageValue(tab) {
-  return ContentTask.spawn(tab.linkedBrowser, {}, function() {
+  return SpecialPowers.spawn(tab.linkedBrowser, [], function() {
     return content.document.querySelector("script").textContent.trim();
   });
 }

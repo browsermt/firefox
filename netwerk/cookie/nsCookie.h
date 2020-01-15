@@ -7,11 +7,13 @@
 #define nsCookie_h__
 
 #include "nsICookie.h"
+#include "nsIMemoryReporter.h"
 #include "nsString.h"
 
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/BasePrincipal.h"
 #include "mozilla/net/NeckoChannelParams.h"
+#include "nsIMemoryReporter.h"
 
 using mozilla::OriginAttributes;
 
@@ -70,6 +72,7 @@ class nsCookie final : public nsICookie {
     return nsDependentCSubstring(mData.host(), IsDomain() ? 1 : 0);
   }
   inline const nsCString& Path() const { return mData.path(); }
+  const nsCString& GetFilePath();
   inline int64_t Expiry() const { return mData.expiry(); }  // in seconds
   inline int64_t LastAccessed() const {
     return mData.lastAccessed();
@@ -108,6 +111,7 @@ class nsCookie final : public nsICookie {
   // Please update SizeOfIncludingThis if this strategy changes.
   mozilla::net::CookieStruct mData;
   mozilla::OriginAttributes mOriginAttributes;
+  nsCString mFilePathCache;
 };
 
 // Comparator class for sorting cookies before sending to a server.

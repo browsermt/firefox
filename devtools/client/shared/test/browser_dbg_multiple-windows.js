@@ -75,7 +75,7 @@ async function testNewWindow(client, win) {
 
 async function testFocusFirst(client) {
   const tab = window.gBrowser.selectedTab;
-  await ContentTask.spawn(tab.linkedBrowser, {}, async function() {
+  await ContentTask.spawn(tab.linkedBrowser, null, async function() {
     const onFocus = new Promise(resolve => {
       content.addEventListener("focus", resolve, { once: true });
     });
@@ -112,6 +112,6 @@ async function continue_remove_tab(client, tab) {
 async function addWindow(url) {
   info("Adding window: " + url);
   const onNewWindow = BrowserTestUtils.waitForNewWindow({ url });
-  window.open(url);
+  window.open(url, "_blank", "noopener");
   return onNewWindow;
 }

@@ -40,14 +40,14 @@ class BlobImplSnapshot final : public BlobImpl, public PIBlobImplSnapshot {
   nsWeakPtr mFileHandle;
 
  public:
-  BlobImplSnapshot(BlobImpl* aImpl, IDBFileHandle* aFileHandle);
+  BlobImplSnapshot(BlobImpl* aFileImpl, IDBFileHandle* aFileHandle);
 
   NS_DECL_ISUPPORTS_INHERITED
 
  private:
-  BlobImplSnapshot(BlobImpl* aImpl, nsIWeakReference* aFileHandle);
+  BlobImplSnapshot(BlobImpl* aFileImpl, nsIWeakReference* aFileHandle);
 
-  ~BlobImplSnapshot();
+  ~BlobImplSnapshot() = default;
 
   // BlobImpl
   virtual void GetName(nsAString& aName) const override {
@@ -121,14 +121,6 @@ class BlobImplSnapshot final : public BlobImpl, public PIBlobImplSnapshot {
                                nsACString& aCharset) override {
     return mBlobImpl->GetSendInfo(aBody, aContentLength, aContentType,
                                   aCharset);
-  }
-
-  virtual nsresult GetMutable(bool* aMutable) const override {
-    return mBlobImpl->GetMutable(aMutable);
-  }
-
-  virtual nsresult SetMutable(bool aMutable) override {
-    return mBlobImpl->SetMutable(aMutable);
   }
 
   virtual void SetLazyData(const nsAString& aName,

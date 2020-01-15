@@ -50,8 +50,7 @@ class SideBar extends Component {
     return {
       serviceContainer: PropTypes.object,
       dispatch: PropTypes.func.isRequired,
-      visible: PropTypes.bool,
-      grip: PropTypes.object,
+      front: PropTypes.object,
       onResized: PropTypes.func,
     };
   }
@@ -62,9 +61,8 @@ class SideBar extends Component {
   }
 
   shouldComponentUpdate(nextProps) {
-    const { grip, visible } = nextProps;
-
-    return visible !== this.props.visible || grip !== this.props.grip;
+    const { front } = nextProps;
+    return front !== this.props.front;
   }
 
   onClickSidebarClose() {
@@ -72,16 +70,13 @@ class SideBar extends Component {
   }
 
   render() {
-    if (!this.props.visible) {
-      return null;
-    }
+    const { front, serviceContainer } = this.props;
 
-    const { grip, serviceContainer } = this.props;
-
-    const objectInspector = getObjectInspector(grip, serviceContainer, {
+    const objectInspector = getObjectInspector(front, serviceContainer, {
       autoExpandDepth: 1,
       mode: reps.MODE.SHORT,
       autoFocusRoot: true,
+      pathPrefix: "WebConsoleSidebar",
     });
 
     return [
@@ -123,7 +118,7 @@ class SideBar extends Component {
 
 function mapStateToProps(state, props) {
   return {
-    grip: state.ui.gripInSidebar,
+    front: state.ui.frontInSidebar,
   };
 }
 

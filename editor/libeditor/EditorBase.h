@@ -28,7 +28,6 @@
 #include "mozilla/dom/Document.h"
 #include "nsIContentInlines.h"       // for nsINode::IsEditable()
 #include "nsIEditor.h"               // for nsIEditor, etc.
-#include "nsIObserver.h"             // for NS_DECL_NSIOBSERVER, etc.
 #include "nsIPlaintextEditor.h"      // for nsIPlaintextEditor, etc.
 #include "nsISelectionController.h"  // for nsISelectionController constants
 #include "nsISelectionListener.h"    // for nsISelectionListener
@@ -58,6 +57,7 @@ class nsIWidget;
 class nsRange;
 
 namespace mozilla {
+class AlignStateAtSelection;
 class AutoSelectionRestorer;
 class AutoTopLevelEditSubActionNotifier;
 class AutoTransactionBatch;
@@ -81,13 +81,15 @@ class IMEContentObserver;
 class InsertNodeTransaction;
 class InsertTextTransaction;
 class JoinNodeTransaction;
+class ListElementSelectionState;
+class ListItemElementSelectionState;
+class ParagraphStateAtSelection;
 class PlaceholderTransaction;
 class PresShell;
 class SplitNodeResult;
 class SplitNodeTransaction;
 class TextComposition;
 class TextEditor;
-class TextEditRules;
 class TextInputListener;
 class TextServicesDocument;
 class TypeInState;
@@ -208,7 +210,9 @@ class EditorBase : public nsIEditor,
   nsPIDOMWindowInner* GetInnerWindow() const {
     return mDocument ? mDocument->GetInnerWindow() : nullptr;
   }
-  bool HasMutationEventListeners(
+  // @param aMutationEventType One or multiple of NS_EVENT_BITS_MUTATION_*.
+  // @return true, iff at least one of NS_EVENT_BITS_MUTATION_* is set.
+  bool MaybeHasMutationEventListeners(
       uint32_t aMutationEventType = 0xFFFFFFFF) const {
     if (!mIsHTMLEditorClass) {
       // DOM mutation event listeners cannot catch the changes of
@@ -507,10 +511,6 @@ class EditorBase : public nsIEditor,
     return (mFlags & nsIPlaintextEditor::eEditorAllowInteraction) != 0;
   }
 
-  bool DontEchoPassword() const {
-    return (mFlags & nsIPlaintextEditor::eEditorDontEchoPassword) != 0;
-  }
-
   bool ShouldSkipSpellCheck() const {
     return (mFlags & nsIPlaintextEditor::eEditorSkipSpellCheck) != 0;
   }
@@ -629,7 +629,10 @@ class EditorBase : public nsIEditor,
     //     styles because inline style can be specified with "style" attribute
     //     and/or CSS in <style> elements or CSS files.  So, we need to look
     //     for better implementation about this.
-    AutoStyleCacheArray mCachedInlineStyles;
+    // FYI: Initialization cost of AutoStyleCacheArray is expensive and it is
+    //      not used by TextEditor so that we should construct it only when
+    //      we're an HTMLEditor.
+    Maybe<AutoStyleCacheArray> mCachedInlineStyles;
 
     // If we tried to delete selection, set to true.
     bool mDidDeleteSelection;
@@ -657,6 +660,56 @@ class EditorBase : public nsIEditor,
     bool mRestoreContentEditableCount;
 
     /**
+     * The following methods modifies some data of this struct and
+     * `EditSubActionData` struct.  Currently, these are required only
+     * by `HTMLEditor`.  Therefore, for cutting the runtime cost of
+     * `TextEditor`, these methods should be called only by `HTMLEditor`.
+     * But it's fine to use these methods in `TextEditor` if necessary.
+     * If so, you need to call `DidDeleteText()` and `DidInsertText()`
+     * from `SetTextNodeWithoutTransaction()`.
+     */
+    void DidCreateElement(EditorBase& aEditorBase, Element& aNewElement);
+    void DidInsertContent(EditorBase& aEditorBase, nsIContent& aNewContent);
+    void WillDeleteContent(EditorBase& aEditorBase,
+                           nsIContent& aRemovingContent);
+    void DidSplitContent(EditorBase& aEditorBase,
+                         nsIContent& aExistingRightContent,
+                         nsIContent& aNewLeftContent);
+    void WillJoinContents(EditorBase& aEditorBase, nsIContent& aLeftContent,
+                          nsIContent& aRightContent);
+    void DidJoinContents(EditorBase& aEditorBase, nsIContent& aLeftContent,
+                         nsIContent& aRightContent);
+    void DidInsertText(EditorBase& aEditorBase,
+                       const EditorRawDOMPoint& aInsertionBegin,
+                       const EditorRawDOMPoint& aInsertionEnd);
+    void DidDeleteText(EditorBase& aEditorBase,
+                       const EditorRawDOMPoint& aStartInTextNode);
+    void WillDeleteRange(EditorBase& aEditorBase,
+                         const EditorRawDOMPoint& aStart,
+                         const EditorRawDOMPoint& aEnd);
+
+   private:
+    void Clear() {
+      mDidExplicitlySetInterLine = false;
+      // We don't need to clear other members which are referred only when the
+      // editor is an HTML editor anymore.  Note that if `mSelectedRange` is
+      // non-nullptr, that means that we're in `HTMLEditor`.
+      if (!mSelectedRange) {
+        return;
+      }
+      mNewBlockElement = nullptr;
+      mSelectedRange->Clear();
+      mChangedRange->Reset();
+      if (mCachedInlineStyles.isSome()) {
+        mCachedInlineStyles->Clear();
+      }
+      mDidDeleteSelection = false;
+      mDidDeleteNonCollapsedRange = false;
+      mDidDeleteEmptyParentBlocks = false;
+      mRestoreContentEditableCount = false;
+    }
+
+    /**
      * Extend mChangedRange to include `aNode`.
      */
     nsresult AddNodeToChangedRange(const HTMLEditor& aHTMLEditor,
@@ -674,25 +727,6 @@ class EditorBase : public nsIEditor,
     nsresult AddRangeToChangedRange(const HTMLEditor& aHTMLEditor,
                                     const EditorRawDOMPoint& aStart,
                                     const EditorRawDOMPoint& aEnd);
-
-   private:
-    void Clear() {
-      mDidExplicitlySetInterLine = false;
-      // We don't need to clear other members which are referred only when the
-      // editor is an HTML editor anymore.  Note that if `mSelectedRange` is
-      // non-nullptr, that means that we're in `HTMLEditor`.
-      if (!mSelectedRange) {
-        return;
-      }
-      mNewBlockElement = nullptr;
-      mSelectedRange->Clear();
-      mChangedRange->Reset();
-      mCachedInlineStyles.Clear();
-      mDidDeleteSelection = false;
-      mDidDeleteNonCollapsedRange = false;
-      mDidDeleteEmptyParentBlocks = false;
-      mRestoreContentEditableCount = false;
-    }
 
     TopLevelEditSubActionData() = default;
     TopLevelEditSubActionData(const TopLevelEditSubActionData& aOther) = delete;
@@ -797,6 +831,9 @@ class EditorBase : public nsIEditor,
     void InitializeDataTransferWithClipboard(
         SettingDataTransfer aSettingDataTransfer, int32_t aClipboardType);
     dom::DataTransfer* GetDataTransfer() const { return mDataTransfer; }
+
+    void Abort() { mAborted = true; }
+    bool IsAborted() const { return mAborted; }
 
     void SetTopLevelEditSubAction(EditSubAction aEditSubAction,
                                   EDirection aDirection = eNone) {
@@ -951,6 +988,8 @@ class EditorBase : public nsIEditor,
 
     EDirection mDirectionOfTopLevelEditSubAction;
 
+    bool mAborted;
+
     AutoEditActionDataSetter() = delete;
     AutoEditActionDataSetter(const AutoEditActionDataSetter& aOther) = delete;
   };
@@ -961,12 +1000,10 @@ class EditorBase : public nsIEditor,
 
  protected:  // May be called by friends.
   /****************************************************************************
-   * Some classes like TextEditRules, HTMLEditRules, WSRunObject which are
-   * part of handling edit actions are allowed to call the following protected
-   * methods.  However, those methods won't prepare caches of some objects
-   * which are necessary for them.  So, if you want some following methods
-   * to do that for you, you need to create a wrapper method in public scope
-   * and call it.
+   * Some friend classes are allowed to call the following protected methods.
+   * However, those methods won't prepare caches of some objects which are
+   * necessary for them.  So, if you call them from friend classes, you need
+   * to make sure that AutoEditActionDataSetter is created.
    ****************************************************************************/
 
   bool IsEditActionDataAvailable() const {
@@ -975,6 +1012,11 @@ class EditorBase : public nsIEditor,
 
   bool IsTopLevelEditSubActionDataAvailable() const {
     return mEditActionData && !!GetTopLevelEditSubAction();
+  }
+
+  bool IsEditActionAborted() const {
+    MOZ_ASSERT(mEditActionData);
+    return mEditActionData->IsAborted();
   }
 
   /**
@@ -1148,8 +1190,13 @@ class EditorBase : public nsIEditor,
       const nsAString& aStringToInsert, Text& aTextNode, int32_t aOffset,
       bool aSuppressIME = false);
 
-  MOZ_CAN_RUN_SCRIPT nsresult SetTextImpl(const nsAString& aString,
-                                          Text& aTextNode);
+  /**
+   * SetTextNodeWithoutTransaction() is optimized path to set new value to
+   * the text node directly and without transaction.  This is used when
+   * setting `<input>.value` and `<textarea>.value`.
+   */
+  MOZ_CAN_RUN_SCRIPT MOZ_MUST_USE nsresult
+  SetTextNodeWithoutTransaction(const nsAString& aString, Text& aTextNode);
 
   /**
    * DeleteNodeWithTransaction() removes aNode from the DOM tree.
@@ -1670,15 +1717,6 @@ class EditorBase : public nsIEditor,
                                               nsIContent& aRightNode);
 
   /**
-   * HasPaddingBRElementForEmptyEditor() returns true if there is a padding
-   * <br> element for empty editor.  When this returns true, it means that
-   * we're empty.
-   */
-  bool HasPaddingBRElementForEmptyEditor() const {
-    return !!mPaddingBRElementForEmptyEditor;
-  }
-
-  /**
    * EnsureNoPaddingBRElementForEmptyEditor() removes padding <br> element
    * for empty editor if there is.
    */
@@ -2063,19 +2101,20 @@ class EditorBase : public nsIEditor,
    * GetTopLevelEditSubAction() is EditSubAction::eNone and somebody starts to
    * handle aEditSubAction.
    *
-   * @param aEditSubAction      Top level edit sub action which will be
-   *                            handled soon.
-   * @param aDirection          Direction of aEditSubAction.
+   * @param aTopLevelEditSubAction              Top level edit sub action which
+   *                                            will be handled soon.
+   * @param aDirectionOfTopLevelEditSubAction   Direction of aEditSubAction.
    */
-  virtual void OnStartToHandleTopLevelEditSubAction(
-      EditSubAction aEditSubAction, nsIEditor::EDirection aDirection);
+  MOZ_CAN_RUN_SCRIPT virtual void OnStartToHandleTopLevelEditSubAction(
+      EditSubAction aTopLevelEditSubAction,
+      nsIEditor::EDirection aDirectionOfTopLevelEditSubAction,
+      ErrorResult& aRv);
 
   /**
    * OnEndHandlingTopLevelEditSubAction() is called after
    * SetTopLevelEditSubAction() is handled.
    */
-  MOZ_CAN_RUN_SCRIPT
-  virtual void OnEndHandlingTopLevelEditSubAction();
+  MOZ_CAN_RUN_SCRIPT virtual nsresult OnEndHandlingTopLevelEditSubAction();
 
   /**
    * OnStartToHandleEditSubAction() and OnEndHandlingEditSubAction() are called
@@ -2174,14 +2213,13 @@ class EditorBase : public nsIEditor,
   nsresult DetermineCurrentDirection();
 
   /**
-   * FireInputEvent() dispatches an "input" event synchronously or
+   * DispatchInputEvent() dispatches an "input" event synchronously or
    * asynchronously if it's not safe to dispatch.
    */
-  MOZ_CAN_RUN_SCRIPT
-  void FireInputEvent();
-  MOZ_CAN_RUN_SCRIPT
-  void FireInputEvent(EditAction aEditAction, const nsAString& aData,
-                      dom::DataTransfer* aDataTransfer);
+  MOZ_CAN_RUN_SCRIPT void DispatchInputEvent();
+  MOZ_CAN_RUN_SCRIPT void DispatchInputEvent(EditAction aEditAction,
+                                             const nsAString& aData,
+                                             dom::DataTransfer* aDataTransfer);
 
   /**
    * Called after a transaction is done successfully.
@@ -2218,16 +2256,14 @@ class EditorBase : public nsIEditor,
 
   /**
    * Helper method for scrolling the selection into view after
-   * an edit operation. aScrollToAnchor should be true if you
-   * want to scroll to the point where the selection was started.
-   * If false, it attempts to scroll the end of the selection into view.
+   * an edit operation.
    *
    * Editor methods *should* call this method instead of the versions
-   * in the various selection interfaces, since this version makes sure
-   * that the editor's sync/async settings for reflowing, painting, and
-   * scrolling match.
+   * in the various selection interfaces, since this makes sure that
+   * the editor's sync/async settings for reflowing, painting, and scrolling
+   * match.
    */
-  nsresult ScrollSelectionIntoView(bool aScrollToAnchor);
+  MOZ_CAN_RUN_SCRIPT MOZ_MUST_USE nsresult ScrollSelectionFocusIntoView();
 
   /**
    * Helper for GetPreviousNodeInternal() and GetNextNodeInternal().
@@ -2465,9 +2501,10 @@ class EditorBase : public nsIEditor,
    */
   class MOZ_RAII AutoEditSubActionNotifier final {
    public:
-    AutoEditSubActionNotifier(
+    MOZ_CAN_RUN_SCRIPT AutoEditSubActionNotifier(
         EditorBase& aEditorBase, EditSubAction aEditSubAction,
-        nsIEditor::EDirection aDirection MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
+        nsIEditor::EDirection aDirection,
+        ErrorResult& aRv MOZ_GUARD_OBJECT_NOTIFIER_PARAM)
         : mEditorBase(aEditorBase), mIsTopLevel(true) {
       MOZ_GUARD_OBJECT_NOTIFIER_INIT;
       // The top level edit sub action has already be set if this is nested call
@@ -2475,16 +2512,16 @@ class EditorBase : public nsIEditor,
       //     handling via selectionchange event listener or mutation event
       //     listener.
       if (!mEditorBase.GetTopLevelEditSubAction()) {
-        mEditorBase.OnStartToHandleTopLevelEditSubAction(aEditSubAction,
-                                                         aDirection);
+        MOZ_KnownLive(mEditorBase)
+            .OnStartToHandleTopLevelEditSubAction(aEditSubAction, aDirection,
+                                                  aRv);
       } else {
         mIsTopLevel = false;
       }
       mEditorBase.OnStartToHandleEditSubAction();
     }
 
-    MOZ_CAN_RUN_SCRIPT_BOUNDARY
-    ~AutoEditSubActionNotifier() {
+    MOZ_CAN_RUN_SCRIPT ~AutoEditSubActionNotifier() {
       mEditorBase.OnEndHandlingEditSubAction();
       if (mIsTopLevel) {
         MOZ_KnownLive(mEditorBase).OnEndHandlingTopLevelEditSubAction();
@@ -2575,8 +2612,6 @@ class EditorBase : public nsIEditor,
   // compositionend.
   RefPtr<TextComposition> mComposition;
 
-  RefPtr<TextEditRules> mRules;
-
   RefPtr<TextInputListener> mTextInputListener;
 
   RefPtr<IMEContentObserver> mIMEContentObserver;
@@ -2616,6 +2651,8 @@ class EditorBase : public nsIEditor,
   // A Tristate value.
   uint8_t mSpellcheckCheckboxState;
 
+  // If true, initialization was succeeded.
+  bool mInitSucceeded;
   // If false, transactions should not change Selection even after modifying
   // the DOM tree.
   bool mAllowsTransactionsToChangeSelection;
@@ -2633,19 +2670,21 @@ class EditorBase : public nsIEditor,
   // Whether we are an HTML editor class.
   bool mIsHTMLEditorClass;
 
+  friend class AlignStateAtSelection;
   friend class CompositionTransaction;
   friend class CreateElementTransaction;
   friend class CSSEditUtils;
   friend class DeleteNodeTransaction;
   friend class DeleteRangeTransaction;
   friend class DeleteTextTransaction;
-  friend class HTMLEditRules;
   friend class HTMLEditUtils;
   friend class InsertNodeTransaction;
   friend class InsertTextTransaction;
   friend class JoinNodeTransaction;
+  friend class ListElementSelectionState;
+  friend class ListItemElementSelectionState;
+  friend class ParagraphStateAtSelection;
   friend class SplitNodeTransaction;
-  friend class TextEditRules;
   friend class TypeInState;
   friend class WSRunObject;
   friend class WSRunScanner;

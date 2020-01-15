@@ -105,6 +105,9 @@ void Gecko_DestroyStyleChildrenIterator(mozilla::dom::StyleChildrenIterator*);
 
 const nsINode* Gecko_GetNextStyleChild(mozilla::dom::StyleChildrenIterator*);
 
+nsAtom* Gecko_Element_ImportedPart(const nsAttrValue*, nsAtom*);
+nsAtom* Gecko_Element_ExportedPart(const nsAttrValue*, nsAtom*);
+
 NS_DECL_THREADSAFE_FFI_REFCOUNTING(mozilla::css::SheetLoadDataHolder,
                                    SheetLoadDataHolder);
 
@@ -317,13 +320,10 @@ void Gecko_CopyImageOrientationFrom(nsStyleVisibility* aDst,
                                     const nsStyleVisibility* aSrc);
 
 // Counter style.
-// This function takes an already addrefed nsAtom
-void Gecko_SetCounterStyleToName(mozilla::CounterStylePtr* ptr, nsAtom* name);
+void Gecko_CounterStyle_ToPtr(const mozilla::StyleCounterStyle*,
+                              mozilla::CounterStylePtr*);
 
-void Gecko_SetCounterStyleToSymbols(mozilla::CounterStylePtr* ptr,
-                                    uint8_t symbols_type,
-                                    nsACString const* const* symbols,
-                                    uint32_t symbols_count);
+void Gecko_SetCounterStyleToNone(mozilla::CounterStylePtr*);
 
 void Gecko_SetCounterStyleToString(mozilla::CounterStylePtr* ptr,
                                    const nsACString* symbol);
@@ -368,12 +368,6 @@ void Gecko_SetCursorImageValue(nsCursorImage* aCursor,
 
 void Gecko_CopyCursorArrayFrom(nsStyleUI* dest, const nsStyleUI* src);
 
-void Gecko_SetContentDataImageValue(nsStyleContentData* aList,
-                                    const mozilla::StyleComputedImageUrl* url);
-
-nsStyleContentData::CounterFunction* Gecko_SetCounterFunction(
-    nsStyleContentData* content_data, mozilla::StyleContentType);
-
 // Dirtiness tracking.
 void Gecko_SetNodeFlags(const nsINode* node, uint32_t flags);
 void Gecko_UnsetNodeFlags(const nsINode* node, uint32_t flags);
@@ -417,14 +411,6 @@ void Gecko_ClearPODTArray(void* array, size_t elem_size, size_t elem_align);
 
 void Gecko_ResizeTArrayForStrings(nsTArray<nsString>* array, uint32_t length);
 void Gecko_ResizeAtomArray(nsTArray<RefPtr<nsAtom>>* array, uint32_t length);
-
-// Clear the mContents, mCounterIncrements, mCounterResets, or mCounterSets
-// field in nsStyleContent. This is needed to run the destructors, otherwise
-// we'd leak the images, strings, and whatnot.
-void Gecko_ClearAndResizeStyleContents(nsStyleContent* content,
-                                       uint32_t how_many);
-void Gecko_CopyStyleContentsFrom(nsStyleContent* content,
-                                 const nsStyleContent* other);
 
 void Gecko_EnsureImageLayersLength(nsStyleImageLayers* layers, size_t len,
                                    nsStyleImageLayers::LayerType layer_type);
@@ -558,10 +544,6 @@ mozilla::StyleGenericFontFamily Gecko_nsStyleFont_ComputeDefaultFontType(
     mozilla::StyleGenericFontFamily generic_family, nsAtom* language);
 
 mozilla::FontSizePrefs Gecko_GetBaseSize(nsAtom* lang);
-
-// XBL related functions.
-const mozilla::dom::Element* Gecko_GetBindingParent(
-    const mozilla::dom::Element*);
 
 struct GeckoFontMetrics {
   nscoord mChSize;  // -1.0 indicates not found

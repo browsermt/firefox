@@ -8,45 +8,26 @@
  * Verify that a frame actor is properly expired when the frame goes away.
  */
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-function run_test() {
-  Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-  registerCleanupFunction(() => {
-    Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-  });
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-stack");
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-stack", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet1 = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_pause_frame();
-    });
-  });
-  do_test_pending();
-}
+    );
 
-function test_pause_frame() {
-  gThreadFront.once("paused", function(packet1) {
-    gThreadFront.once("paused", function(packet2) {
-      const poppedFrames = packet2.poppedFrames;
-      Assert.equal(typeof poppedFrames, typeof []);
-      Assert.ok(poppedFrames.includes(packet1.frame.actor));
-      gThreadFront.resume().then(function() {
-        finishClient(gClient);
-      });
-    });
-    gThreadFront.resume();
-  });
+    threadFront.resume();
+    const packet2 = await waitForPause(threadFront);
 
-  gDebuggee.eval(
+    const poppedFrames = packet2.poppedFrames;
+    Assert.equal(typeof poppedFrames, typeof []);
+    Assert.ok(poppedFrames.includes(packet1.frame.actorID));
+
+    threadFront.resume();
+  })
+);
+
+function evalCode(debuggee) {
+  debuggee.eval(
     "(" +
       function() {
         function stopMe() {

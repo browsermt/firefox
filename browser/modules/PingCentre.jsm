@@ -3,10 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
-const { XPCOMUtils } = ChromeUtils.import(
-  "resource://gre/modules/XPCOMUtils.jsm"
-);
-XPCOMUtils.defineLazyGlobalGetters(this, ["fetch"]);
 
 ChromeUtils.defineModuleGetter(
   this,
@@ -20,20 +16,20 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "ClientID",
-  "resource://gre/modules/ClientID.jsm"
+  "TelemetryEnvironment",
+  "resource://gre/modules/TelemetryEnvironment.jsm"
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "TelemetryEnvironment",
-  "resource://gre/modules/TelemetryEnvironment.jsm"
+  "ServiceRequest",
+  "resource://gre/modules/ServiceRequest.jsm"
 );
 
 const PREF_BRANCH = "browser.ping-centre.";
 
 const TELEMETRY_PREF = `${PREF_BRANCH}telemetry`;
 const LOGGING_PREF = `${PREF_BRANCH}log`;
-const PRODUCTION_ENDPOINT_PREF = `${PREF_BRANCH}production.endpoint`;
+const STRUCTURED_INGESTION_SEND_TIMEOUT = 30 * 1000; // 30 seconds
 
 const FHR_UPLOAD_ENABLED_PREF = "datareporting.healthreport.uploadEnabled";
 const BROWSER_SEARCH_REGION_PREF = "browser.search.region";
@@ -184,7 +180,6 @@ const REGION_WHITELIST = new Set([
  * @param {Object} options
  * @param {string} options.topic - a unique ID for users of PingCentre to distinguish
  *                  their data on the server side.
- * @param {string} options.overrideEndpointPref - optional pref for URL where the POST is sent.
  */
 class PingCentre {
   constructor(options) {
@@ -194,8 +189,6 @@ class PingCentre {
 
     this._topic = options.topic;
     this._prefs = Services.prefs.getBranch("");
-
-    this._setPingEndpoint(options.topic, options.overrideEndpointPref);
 
     this._enabled = this._prefs.getBoolPref(TELEMETRY_PREF);
     this._onTelemetryPrefChange = this._onTelemetryPrefChange.bind(this);
@@ -210,28 +203,8 @@ class PingCentre {
     this._prefs.addObserver(LOGGING_PREF, this._onLoggingPrefChange);
   }
 
-  /**
-   * Lazily get the Telemetry id promise
-   */
-  get telemetryClientId() {
-    Object.defineProperty(this, "telemetryClientId", {
-      value: ClientID.getClientID(),
-    });
-    return this.telemetryClientId;
-  }
-
   get enabled() {
     return this._enabled && this._fhrEnabled;
-  }
-
-  _setPingEndpoint(topic, overrideEndpointPref) {
-    const overrideValue =
-      overrideEndpointPref && this._prefs.getStringPref(overrideEndpointPref);
-    if (overrideValue) {
-      this._pingEndpoint = overrideValue;
-    } else {
-      this._pingEndpoint = this._prefs.getStringPref(PRODUCTION_ENDPOINT_PREF);
-    }
   }
 
   _onLoggingPrefChange(aSubject, aTopic, prefKey) {
@@ -278,48 +251,15 @@ class PingCentre {
     return region;
   }
 
-  async _createPing(data, options) {
-    let filter = options && options.filter;
+  _createStructuredIngestionPing(data, options = {}) {
+    let { filter } = options;
     let experiments = TelemetryEnvironment.getActiveExperiments();
     let experimentsString = this._createExperimentsString(experiments, filter);
 
-    let clientID = data.client_id || (await this.telemetryClientId);
-    let locale = data.locale || Services.locale.appLocaleAsLangTag;
-    let profileCreationDate =
-      TelemetryEnvironment.currentEnvironment.profile.resetDate ||
-      TelemetryEnvironment.currentEnvironment.profile.creationDate;
-    const payload = Object.assign(
-      {
-        locale,
-        topic: this._topic,
-        client_id: clientID,
-        version: AppConstants.MOZ_APP_VERSION,
-        release_channel: UpdateUtils.getUpdateChannel(false),
-      },
-      data
-    );
-    if (experimentsString) {
-      payload.shield_id = experimentsString;
-    }
-    if (profileCreationDate) {
-      payload.profile_creation_date = profileCreationDate;
-    }
-    payload.region = this._getRegion();
-
-    return payload;
-  }
-
-  async _createStructuredIngestionPing(data, options) {
-    let filter = options && options.filter;
-    let experiments = TelemetryEnvironment.getActiveExperiments();
-    let experimentsString = this._createExperimentsString(experiments, filter);
-
-    let clientID = data.client_id || (await this.telemetryClientId);
     let locale = data.locale || Services.locale.appLocaleAsLangTag;
     const payload = Object.assign(
       {
         locale,
-        client_id: clientID,
         version: AppConstants.MOZ_APP_VERSION,
         release_channel: UpdateUtils.getUpdateChannel(false),
       },
@@ -332,41 +272,75 @@ class PingCentre {
     return payload;
   }
 
-  async sendPing(data, options) {
-    if (!this.enabled) {
-      return Promise.resolve();
-    }
+  static _gzipCompressString(string) {
+    let observer = {
+      buffer: "",
+      onStreamComplete(loader, context, status, length, result) {
+        this.buffer = String.fromCharCode(...result);
+      },
+    };
 
-    const payload = await this._createPing(data, options);
+    let scs = Cc["@mozilla.org/streamConverters;1"].getService(
+      Ci.nsIStreamConverterService
+    );
+    let listener = Cc["@mozilla.org/network/stream-loader;1"].createInstance(
+      Ci.nsIStreamLoader
+    );
+    listener.init(observer);
+    let converter = scs.asyncConvertData(
+      "uncompressed",
+      "gzip",
+      listener,
+      null
+    );
+    let stringStream = Cc[
+      "@mozilla.org/io/string-input-stream;1"
+    ].createInstance(Ci.nsIStringInputStream);
+    stringStream.data = string;
+    converter.onStartRequest(null, null);
+    converter.onDataAvailable(null, stringStream, 0, string.length);
+    converter.onStopRequest(null, null, null);
+    return observer.buffer;
+  }
 
-    if (this.logging) {
-      // performance related pings cause a lot of logging, so we mute them
-      if (data.action !== "activity_stream_performance") {
-        Services.console.logStringMessage(
-          `TELEMETRY PING: ${JSON.stringify(payload)}\n`
-        );
-      }
-    }
+  static _sendInGzip(endpoint, payload) {
+    return new Promise((resolve, reject) => {
+      let request = new ServiceRequest({ mozAnon: true });
+      request.mozBackgroundRequest = true;
+      request.timeout = STRUCTURED_INGESTION_SEND_TIMEOUT;
 
-    return fetch(this._pingEndpoint, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      credentials: "omit",
-    })
-      .then(response => {
-        if (!response.ok) {
-          Cu.reportError(
-            `Ping failure with HTTP response code: ${response.status}`
-          );
+      request.open("POST", endpoint, true);
+      request.overrideMimeType("text/plain");
+      request.setRequestHeader(
+        "Content-Type",
+        "application/json; charset=UTF-8"
+      );
+      request.setRequestHeader("Content-Encoding", "gzip");
+      request.setRequestHeader("Date", new Date().toUTCString());
+
+      request.onload = event => {
+        if (request.status !== 200) {
+          reject(event);
+        } else {
+          resolve(event);
         }
-      })
-      .catch(e => {
-        Cu.reportError(`Ping failure with error: ${e}`);
-      });
+      };
+      request.onerror = reject;
+      request.onabort = reject;
+      request.ontimeout = reject;
+
+      let payloadStream = Cc[
+        "@mozilla.org/io/string-input-stream;1"
+      ].createInstance(Ci.nsIStringInputStream);
+      payloadStream.data = PingCentre._gzipCompressString(payload);
+      request.sendInputStream(payloadStream);
+    });
   }
 
   /**
    * Sends a ping to the Structured Ingestion telemetry pipeline.
+   *
+   * The payload would be compressed using gzip.
    *
    * @param {Object} data     The payload to be sent.
    * @param {String} endpoint The destination endpoint. Note that Structured Ingestion
@@ -375,36 +349,25 @@ class PingCentre {
    *                          https://github.com/mozilla/gcp-ingestion/blob/master/docs/edge.md#postput-request
    * @param {Object} options  Other options for this ping.
    */
-  async sendStructuredIngestionPing(data, endpoint, options) {
+  sendStructuredIngestionPing(data, endpoint, options) {
     if (!this.enabled) {
       return Promise.resolve();
     }
 
-    const payload = await this._createStructuredIngestionPing(data, options);
+    const ping = this._createStructuredIngestionPing(data, options);
+    const payload = JSON.stringify(ping);
 
     if (this.logging) {
       Services.console.logStringMessage(
-        `TELEMETRY PING (STRUCTURED INGESTION): ${JSON.stringify(payload)}\n`
+        `TELEMETRY PING (STRUCTURED INGESTION): ${payload}\n`
       );
     }
 
-    return fetch(endpoint, {
-      method: "POST",
-      body: JSON.stringify(payload),
-      credentials: "omit",
-    })
-      .then(response => {
-        if (!response.ok) {
-          Cu.reportError(
-            `Structured Ingestion ping failure with HTTP response code: ${
-              response.status
-            }`
-          );
-        }
-      })
-      .catch(e => {
-        Cu.reportError(`Structured Ingestion ping failure with error: ${e}`);
-      });
+    return PingCentre._sendInGzip(endpoint, payload).catch(event => {
+      Cu.reportError(
+        `Structured Ingestion ping failure with error: ${event.type}`
+      );
+    });
   }
 
   uninit() {
@@ -423,7 +386,6 @@ class PingCentre {
 
 this.PingCentre = PingCentre;
 this.PingCentreConstants = {
-  PRODUCTION_ENDPOINT_PREF,
   FHR_UPLOAD_ENABLED_PREF,
   TELEMETRY_PREF,
   LOGGING_PREF,

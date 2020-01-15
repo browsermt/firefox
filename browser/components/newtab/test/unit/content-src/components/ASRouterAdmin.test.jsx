@@ -1,3 +1,4 @@
+import { actionCreators as ac, actionTypes as at } from "common/Actions.jsm";
 import {
   ASRouterAdminInner,
   CollapseToggle,
@@ -195,11 +196,19 @@ describe("ASRouterAdmin", () => {
           messageFilter: "all",
           messageBlockList: [],
           messageImpressions: { foo: 2 },
+          groups: [{ id: "messageProvider", enabled: true }],
+          providers: [{ id: "messageProvider", enabled: true }],
         });
       });
       it("should render a message when no filtering is applied", () => {
         wrapper.setState({
-          messages: [{ id: "foo" }],
+          messages: [
+            {
+              id: "foo",
+              provider: "messageProvider",
+              groups: ["messageProvider"],
+            },
+          ],
         });
 
         assert.lengthOf(wrapper.find(".message-id"), 1);
@@ -218,7 +227,13 @@ describe("ASRouterAdmin", () => {
       });
       it("should render a blocked message", () => {
         wrapper.setState({
-          messages: [{ id: "foo" }],
+          messages: [
+            {
+              id: "foo",
+              groups: ["messageProvider"],
+              provider: "messageProvider",
+            },
+          ],
           messageBlockList: ["foo"],
         });
         assert.lengthOf(wrapper.find(".message-item.blocked"), 1);
@@ -238,7 +253,13 @@ describe("ASRouterAdmin", () => {
       it("should render a message if provider matches filter", () => {
         wrapper.setState({
           messageFilter: "messageProvider",
-          messages: [{ id: "foo", provider: "messageProvider" }],
+          messages: [
+            {
+              id: "foo",
+              provider: "messageProvider",
+              groups: ["messageProvider"],
+            },
+          ],
         });
 
         assert.lengthOf(wrapper.find(".message-id"), 1);
@@ -246,7 +267,13 @@ describe("ASRouterAdmin", () => {
       it("should override with the selected message", () => {
         wrapper.setState({
           messageFilter: "messageProvider",
-          messages: [{ id: "foo", provider: "messageProvider" }],
+          messages: [
+            {
+              id: "foo",
+              provider: "messageProvider",
+              groups: ["messageProvider"],
+            },
+          ],
         });
 
         assert.lengthOf(wrapper.find(".message-id"), 1);
@@ -266,7 +293,13 @@ describe("ASRouterAdmin", () => {
       it("should hide message if provider filter changes", () => {
         wrapper.setState({
           messageFilter: "messageProvider",
-          messages: [{ id: "foo", provider: "messageProvider" }],
+          messages: [
+            {
+              id: "foo",
+              provider: "messageProvider",
+              groups: ["messageProvider"],
+            },
+          ],
         });
 
         assert.lengthOf(wrapper.find(".message-id"), 1);
@@ -278,25 +311,32 @@ describe("ASRouterAdmin", () => {
     });
   });
   describe("#DiscoveryStream", () => {
-    it("should render a DiscoveryStreamAdmin component", () => {
+    let state = {};
+    let dispatch;
+    beforeEach(() => {
+      dispatch = sandbox.stub();
+      state = {
+        config: {
+          enabled: true,
+          layout_endpoint: "",
+        },
+        layout: [],
+        spocs: {
+          frequency_caps: [],
+        },
+        feeds: {
+          data: {},
+        },
+      };
       wrapper = shallow(
         <DiscoveryStreamAdmin
+          dispatch={dispatch}
           otherPrefs={{}}
-          state={{
-            config: {
-              enabled: true,
-              layout_endpint: "",
-            },
-            layout: [],
-            spocs: {
-              frequency_caps: [],
-            },
-            feeds: {
-              data: {},
-            },
-          }}
+          state={state}
         />
       );
+    });
+    it("should render a DiscoveryStreamAdmin component", () => {
       assert.equal(
         wrapper
           .find("h3")
@@ -306,36 +346,107 @@ describe("ASRouterAdmin", () => {
       );
     });
     it("should render a spoc in DiscoveryStreamAdmin component", () => {
-      wrapper = shallow(
-        <DiscoveryStreamAdmin
-          otherPrefs={{}}
-          state={{
-            config: {
-              enabled: true,
-              layout_endpint: "",
+      state.spocs = {
+        frequency_caps: [],
+        data: {
+          spocs: [
+            {
+              id: 12345,
             },
-            layout: [],
-            spocs: {
-              frequency_caps: [],
-              data: {
-                spocs: [
-                  {
-                    id: 12345,
-                  },
-                ],
-              },
-            },
-            feeds: {
-              data: {},
-            },
-          }}
-        />
-      );
+          ],
+        },
+      };
+      wrapper = shallow(<DiscoveryStreamAdmin otherPrefs={{}} state={state} />);
       wrapper.instance().onStoryToggle({ id: 12345 });
       const messageSummary = wrapper.find(".message-summary").at(0);
       const pre = messageSummary.find("pre").at(0);
       const spocText = pre.text();
       assert.equal(spocText, '{\n  "id": 12345\n}');
+    });
+    it("should fire restorePrefDefaults with DISCOVERY_STREAM_CONFIG_RESET_DEFAULTS", () => {
+      wrapper
+        .find("button")
+        .at(0)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_CONFIG_RESET_DEFAULTS,
+        })
+      );
+    });
+    it("should fire config change with DISCOVERY_STREAM_CONFIG_CHANGE", () => {
+      wrapper
+        .find("button")
+        .at(1)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_CONFIG_CHANGE,
+          data: { enabled: true, layout_endpoint: "" },
+        })
+      );
+    });
+    it("should fire expireCache with DISCOVERY_STREAM_DEV_EXPIRE_CACHE", () => {
+      wrapper
+        .find("button")
+        .at(2)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_DEV_EXPIRE_CACHE,
+        })
+      );
+    });
+    it("should fire systemTick with DISCOVERY_STREAM_DEV_SYSTEM_TICK", () => {
+      wrapper
+        .find("button")
+        .at(3)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_DEV_SYSTEM_TICK,
+        })
+      );
+    });
+    it("should fire idleDaily with DISCOVERY_STREAM_DEV_IDLE_DAILY", () => {
+      wrapper
+        .find("button")
+        .at(4)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_DEV_IDLE_DAILY,
+        })
+      );
+    });
+    it("should fire syncRemoteSettings with DISCOVERY_STREAM_DEV_SYNC_RS", () => {
+      wrapper
+        .find("button")
+        .at(5)
+        .simulate("click");
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_DEV_SYNC_RS,
+        })
+      );
+    });
+    it("should fire setConfigValue with DISCOVERY_STREAM_CONFIG_SET_VALUE", () => {
+      const name = "name";
+      const value = "value";
+      wrapper.instance().setConfigValue(name, value);
+      assert.calledWith(
+        dispatch,
+        ac.OnlyToMain({
+          type: at.DISCOVERY_STREAM_CONFIG_SET_VALUE,
+          data: { name, value },
+        })
+      );
     });
   });
   describe("#ToggleStoryButton", () => {

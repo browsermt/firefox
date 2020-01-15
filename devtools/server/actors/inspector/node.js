@@ -6,15 +6,10 @@
 
 const { Cu } = require("chrome");
 const Services = require("Services");
-const ChromeUtils = require("ChromeUtils");
 const InspectorUtils = require("InspectorUtils");
 const protocol = require("devtools/shared/protocol");
 const { PSEUDO_CLASSES } = require("devtools/shared/css/constants");
 const { nodeSpec, nodeListSpec } = require("devtools/shared/specs/node");
-const {
-  connectToFrame,
-} = require("devtools/server/connectors/frame-connector");
-
 loader.lazyRequireGetter(
   this,
   "getCssPath",
@@ -30,6 +25,12 @@ loader.lazyRequireGetter(
 loader.lazyRequireGetter(
   this,
   "findCssSelector",
+  "devtools/shared/inspector/css-logic",
+  true
+);
+loader.lazyRequireGetter(
+  this,
+  "findAllCssSelectors",
   "devtools/shared/inspector/css-logic",
   true
 );
@@ -72,12 +73,6 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
-  "isShadowAnonymous",
-  "devtools/shared/layout/utils",
-  true
-);
-loader.lazyRequireGetter(
-  this,
   "isShadowHost",
   "devtools/shared/layout/utils",
   true
@@ -96,7 +91,7 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
-  "isXBLAnonymous",
+  "isRemoteFrame",
   "devtools/shared/layout/utils",
   true
 );
@@ -140,6 +135,12 @@ loader.lazyRequireGetter(
   this,
   "scrollbarTreeWalkerFilter",
   "devtools/server/actors/inspector/utils",
+  true
+);
+loader.lazyRequireGetter(
+  this,
+  "DOMHelpers",
+  "devtools/shared/dom-helpers",
   true
 );
 
@@ -247,8 +248,6 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
       isAfterPseudoElement: isAfterPseudoElement(this.rawNode),
       isAnonymous: isAnonymous(this.rawNode),
       isNativeAnonymous: isNativeAnonymous(this.rawNode),
-      isXBLAnonymous: isXBLAnonymous(this.rawNode),
-      isShadowAnonymous: isShadowAnonymous(this.rawNode),
       isShadowRoot: shadowRoot,
       shadowRootMode: getShadowRootMode(this.rawNode),
       isShadowHost: isShadowHost(this.rawNode),
@@ -261,6 +260,12 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
         this.rawNode.ownerDocument &&
         this.rawNode.ownerDocument.contentType === "text/html",
       hasEventListeners: this._hasEventListeners,
+      traits: {
+        // Added in FF72
+        supportsGetAllSelectors: true,
+        // Added in FF72
+        supportsWaitForFrameLoad: true,
+      },
     };
 
     if (this.isDocumentElement()) {
@@ -272,6 +277,7 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
     if (this.isRemoteFrame) {
       form.remoteFrame = true;
       form.numChildren = 1;
+      form.browsingContextID = this.rawNode.browsingContext.id;
     }
 
     return form;
@@ -308,14 +314,13 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
 
   /**
    * Check if the current node is representing a remote frame.
-   * EXPERIMENTAL: Only works if fission is enabled in the toolbox.
+   * In the context of the browser toolbox, a remote frame can be the <browser remote>
+   * element found inside each tab.
+   * In the context of the content toolbox, a remote frame can be a <iframe> that contains
+   * a different origin document.
    */
   get isRemoteFrame() {
-    return (
-      this.numChildren == 0 &&
-      ChromeUtils.getClassName(this.rawNode) == "XULFrameElement" &&
-      this.rawNode.getAttribute("remote") == "true"
-    );
+    return isRemoteFrame(this.rawNode);
   },
 
   // Estimate the number of children that the walker will return without making
@@ -333,10 +338,6 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
 
     const rawNode = this.rawNode;
     let numChildren = rawNode.childNodes.length;
-    const hasAnonChildren =
-      rawNode.nodeType === Node.ELEMENT_NODE &&
-      rawNode.ownerDocument.getAnonymousNodes(rawNode);
-
     const hasContentDocument = rawNode.contentDocument;
     const hasSVGDocument = rawNode.getSVGDocument && rawNode.getSVGDocument();
     if (numChildren === 0 && (hasContentDocument || hasSVGDocument)) {
@@ -346,11 +347,13 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
 
     // Normal counting misses ::before/::after.  Also, some anonymous children
     // may ultimately be skipped, so we have to consult with the walker.
+    //
+    // FIXME: We should be able to just check <slot> rather than
+    // containingShadowRoot.
     if (
       numChildren === 0 ||
-      hasAnonChildren ||
       isShadowHost(this.rawNode) ||
-      isShadowAnonymous(this.rawNode)
+      this.rawNode.containingShadowRoot
     ) {
       numChildren = this.walker.countChildren(this);
     }
@@ -392,8 +395,8 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
     if (
       SUBGRID_ENABLED &&
       (display === "grid" || display === "inline-grid") &&
-      (style.gridTemplateRows === "subgrid" ||
-        style.gridTemplateColumns === "subgrid")
+      (style.gridTemplateRows.startsWith("subgrid") ||
+        style.gridTemplateColumns.startsWith("subgrid"))
     ) {
       display = "subgrid";
     }
@@ -515,7 +518,26 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
     }
     // Create debugger object for the customElement function.
     const global = Cu.getGlobalForObject(customElement);
+
     const dbg = this.parent().targetActor.makeDebugger();
+
+    // If we hit a <browser> element of Firefox, its global will be the chrome window
+    // which is system principal and will be in the same compartment as the debuggee.
+    // For some reason, this happens when we run the content toolbox. As for the content
+    // toolboxes, the modules are loaded in the same compartment as the <browser> element,
+    // this throws as the debugger can _not_ be in the same compartment as the debugger.
+    // This happens when we toggle fission for content toolbox because we try to reparent
+    // the Walker of the tab. This happens because we do not detect in Walker.reparentRemoteFrame
+    // that the target of the tab is the top level. That's because the target is a FrameTargetActor
+    // which is retrieved via Node.getEmbedderElement and doesn't return the LocalTabTargetActor.
+    // We should probably work on TabDescriptor so that the LocalTabTargetActor has a descriptor,
+    // and see if we can possibly move the local tab specific out of the TargetActor and have
+    // the TabDescriptor expose a pure FrameTargetActor??
+    if (Cu.getObjectPrincipal(global) == Cu.getObjectPrincipal(dbg)) {
+      dump("Ignored system principal in getEmbedderElement!\n");
+      return undefined;
+    }
+
     const globalDO = dbg.addDebuggee(global);
     const customElementDO = globalDO.makeDebuggeeValue(customElement);
 
@@ -527,6 +549,7 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
     return {
       url: customElementDO.script.url,
       line: customElementDO.script.startLine,
+      column: customElementDO.script.startColumn,
     };
   },
 
@@ -549,9 +572,20 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
    */
   getUniqueSelector: function() {
     if (Cu.isDeadWrapper(this.rawNode)) {
-      return "";
+      return [];
     }
     return findCssSelector(this.rawNode);
+  },
+
+  /**
+   * Get the full array of selectors from the topmost document, going through
+   * iframes.
+   */
+  getAllSelectors: function() {
+    if (Cu.isDeadWrapper(this.rawNode)) {
+      return "";
+    }
+    return findAllCssSelectors(this.rawNode);
   },
 
   /**
@@ -640,13 +674,13 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
           rawNode.removeAttribute(change.attributeName);
         }
       } else if (change.attributeNamespace) {
-        rawNode.setAttributeNS(
+        rawNode.setAttributeDevtoolsNS(
           change.attributeNamespace,
           change.attributeName,
           change.newValue
         );
       } else {
-        rawNode.setAttribute(change.attributeName, change.newValue);
+        rawNode.setAttributeDevtools(change.attributeName, change.newValue);
       }
     }
   },
@@ -709,18 +743,19 @@ const NodeActor = protocol.ActorClassWithSpec(nodeSpec, {
   },
 
   /**
-   * Fetch the target actor's form for the current remote frame.
-   *
-   * (to be called only if form.remoteFrame is true)
+   * If the current node is an iframe, wait for the content window to be loaded.
    */
-  connectToRemoteFrame() {
-    if (!this.isRemoteFrame) {
-      return {
-        error: "ErrorRemoteFrame",
-        message: "Tried to call `connectToRemoteFrame` on a local frame",
-      };
+  async waitForFrameLoad() {
+    if (Cu.isDeadWrapper(this.rawNode)) {
+      return;
     }
-    return connectToFrame(this.conn, this.rawNode);
+
+    const { contentDocument, contentWindow } = this.rawNode;
+    if (contentDocument && contentDocument.readyState !== "complete") {
+      await new Promise(resolve => {
+        DOMHelpers.onceDOMReady(contentWindow, resolve);
+      });
+    }
   },
 });
 

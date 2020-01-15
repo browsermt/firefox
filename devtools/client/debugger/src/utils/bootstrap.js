@@ -11,6 +11,8 @@ const { Provider } = require("react-redux");
 
 import ToolboxProvider from "devtools/client/framework/store-provider";
 import { isFirefoxPanel, isDevelopment, isTesting } from "devtools-environment";
+import { AppConstants } from "devtools-modules";
+
 import SourceMaps, {
   startSourceMapWorker,
   stopSourceMapWorker,
@@ -24,6 +26,7 @@ import reducers from "../reducers";
 import * as selectors from "../selectors";
 import App from "../components/App";
 import { asyncStore, prefs } from "./prefs";
+import { persistTabs } from "../utils/tabs";
 
 import type { Panel } from "../client/firefox/types";
 
@@ -64,9 +67,10 @@ export function bootstrapStore(
   panel: Panel,
   initialState: Object
 ) {
+  const debugJsModules = AppConstants.AppConstants.DEBUG_JS_MODULES == "1";
   const createStore = configureStore({
     log: prefs.logging || isTesting(),
-    timing: isDevelopment(),
+    timing: debugJsModules || isDevelopment(),
     makeThunkArgs: (args, state) => {
       return { ...args, client, ...workers, panel };
     },
@@ -127,13 +131,17 @@ export function bootstrapApp(store: any, panel: Panel) {
 let currentPendingBreakpoints;
 let currentXHRBreakpoints;
 let currentEventBreakpoints;
+let currentTabs;
+
 function updatePrefs(state: any) {
   const previousPendingBreakpoints = currentPendingBreakpoints;
   const previousXHRBreakpoints = currentXHRBreakpoints;
   const previousEventBreakpoints = currentEventBreakpoints;
+  const previousTabs = currentTabs;
   currentPendingBreakpoints = selectors.getPendingBreakpoints(state);
   currentXHRBreakpoints = selectors.getXHRBreakpoints(state);
   currentEventBreakpoints = state.eventListenerBreakpoints;
+  currentTabs = selectors.getTabs(state);
 
   if (
     previousPendingBreakpoints &&
@@ -147,6 +155,10 @@ function updatePrefs(state: any) {
     previousEventBreakpoints !== currentEventBreakpoints
   ) {
     asyncStore.eventListenerBreakpoints = currentEventBreakpoints;
+  }
+
+  if (previousTabs && previousTabs !== currentTabs) {
+    asyncStore.tabs = persistTabs(currentTabs);
   }
 
   if (currentXHRBreakpoints !== previousXHRBreakpoints) {

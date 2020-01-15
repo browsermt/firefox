@@ -16,9 +16,9 @@ add_task(async function setup() {
 add_task(async function test_show_logins() {
   let browser = gBrowser.selectedBrowser;
 
-  await ContentTask.spawn(
+  await SpecialPowers.spawn(
     browser,
-    [TEST_LOGIN1.guid, TEST_LOGIN2.guid],
+    [[TEST_LOGIN1.guid, TEST_LOGIN2.guid]],
     async loginGuids => {
       let loginList = Cu.waiveXrays(
         content.document.querySelector("login-list")
@@ -47,22 +47,56 @@ add_task(async function test_login_item() {
   let browser = gBrowser.selectedBrowser;
 
   function waitForDelete() {
-    return new Promise(resolve => {
-      browser.messageManager.addMessageListener(
-        "AboutLogins:DeleteLogin",
-        function onMsg() {
-          resolve(true);
-          browser.messageManager.removeMessageListener(
-            "AboutLogins:DeleteLogin",
-            onMsg
-          );
-        }
+    let numLogins = Services.logins.countLogins("", "", "");
+    return BrowserTestUtils.waitForCondition(
+      () => Services.logins.countLogins("", "", "") < numLogins,
+      "Error waiting for login deletion"
+    );
+  }
+
+  function deleteFirstLoginAfterEdit() {
+    return SpecialPowers.spawn(browser, [], async () => {
+      let loginList = content.document.querySelector("login-list");
+      let loginListItem = loginList.shadowRoot.querySelector(
+        ".login-list-item[data-guid]:not([hidden])"
       );
+      info("Clicking on the first login");
+      loginListItem.click();
+
+      let loginItem = Cu.waiveXrays(
+        content.document.querySelector("login-item")
+      );
+      let loginItemPopulated = await ContentTaskUtils.waitForCondition(() => {
+        return loginItem._login.guid == loginListItem.dataset.guid;
+      }, "Waiting for login item to get populated");
+      ok(loginItemPopulated, "The login item should get populated");
+
+      let usernameInput = loginItem.shadowRoot.querySelector(
+        "input[name='username']"
+      );
+      let passwordInput = loginItem._passwordInput;
+
+      let editButton = loginItem.shadowRoot.querySelector(".edit-button");
+      editButton.click();
+
+      usernameInput.value += "-undone";
+      passwordInput.value += "-undone";
+
+      let deleteButton = loginItem.shadowRoot.querySelector(".delete-button");
+      deleteButton.click();
+
+      let confirmDeleteDialog = Cu.waiveXrays(
+        content.document.querySelector("confirmation-dialog")
+      );
+      let confirmButton = confirmDeleteDialog.shadowRoot.querySelector(
+        ".confirm-button"
+      );
+      confirmButton.click();
     });
   }
 
   function deleteFirstLogin() {
-    return ContentTask.spawn(browser, null, async () => {
+    return SpecialPowers.spawn(browser, [], async () => {
       let loginList = content.document.querySelector("login-list");
       let loginListItem = loginList.shadowRoot.querySelector(
         ".login-list-item[data-guid]:not([hidden])"
@@ -92,13 +126,10 @@ add_task(async function test_login_item() {
   }
 
   let onDeletePromise = waitForDelete();
-
-  await deleteFirstLogin();
+  await deleteFirstLoginAfterEdit();
   await onDeletePromise;
 
-  onDeletePromise = waitForDelete();
-
-  await ContentTask.spawn(browser, null, async () => {
+  await SpecialPowers.spawn(browser, [], async () => {
     let loginList = content.document.querySelector("login-list");
     ok(
       !content.document.documentElement.classList.contains("no-logins"),
@@ -108,12 +139,21 @@ add_task(async function test_login_item() {
       !loginList.classList.contains("no-logins"),
       "Should not be in no logins view as there is still one login"
     );
+
+    let confirmDiscardDialog = Cu.waiveXrays(
+      content.document.querySelector("confirmation-dialog")
+    );
+    ok(
+      confirmDiscardDialog.hidden,
+      "Discard confirm dialog should not show up after delete an edited login"
+    );
   });
 
+  onDeletePromise = waitForDelete();
   await deleteFirstLogin();
   await onDeletePromise;
 
-  await ContentTask.spawn(browser, null, async () => {
+  await SpecialPowers.spawn(browser, [], async () => {
     let loginList = content.document.querySelector("login-list");
     ok(
       content.document.documentElement.classList.contains("no-logins"),

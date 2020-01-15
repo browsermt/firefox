@@ -4,87 +4,70 @@
 
 "use strict";
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-
-registerCleanupFunction(() => {
-  Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-});
-
 // Test that closures can be inspected.
 
-function run_test() {
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-closures");
-
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-closures", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_object_grip();
-    });
-  });
-  do_test_pending();
-}
+    );
 
-function test_object_grip() {
-  gThreadFront.once("paused", function(packet) {
-    const person = packet.frame.environment.bindings.variables.person;
+    const environment = await packet.frame.getEnvironment();
+    const person = environment.bindings.variables.person;
 
     Assert.equal(person.value.class, "Object");
 
-    const personClient = gThreadFront.pauseGrip(person.value);
-    personClient.getPrototypeAndProperties(response => {
-      Assert.equal(response.ownProperties.getName.value.class, "Function");
+    const personFront = threadFront.pauseGrip(person.value);
+    const { ownProperties } = await personFront.getPrototypeAndProperties();
+    Assert.equal(ownProperties.getName.value.getGrip().class, "Function");
+    Assert.equal(ownProperties.getAge.value.getGrip().class, "Function");
+    Assert.equal(ownProperties.getFoo.value.getGrip().class, "Function");
 
-      Assert.equal(response.ownProperties.getAge.value.class, "Function");
+    const getNameFront = ownProperties.getName.value;
+    const getAgeFront = ownProperties.getAge.value;
+    const getFooFront = ownProperties.getFoo.value;
 
-      Assert.equal(response.ownProperties.getFoo.value.class, "Function");
+    let response = await getNameFront.getScope();
+    let bindings = await response.scope.bindings();
+    Assert.equal(bindings.arguments[0].name.value, "Bob");
 
-      const getNameClient = gThreadFront.pauseGrip(
-        response.ownProperties.getName.value
-      );
-      const getAgeClient = gThreadFront.pauseGrip(
-        response.ownProperties.getAge.value
-      );
-      const getFooClient = gThreadFront.pauseGrip(
-        response.ownProperties.getFoo.value
-      );
-      getNameClient.getScope(response => {
-        Assert.equal(response.scope.bindings.arguments[0].name.value, "Bob");
+    response = await getAgeFront.getScope();
+    bindings = await response.scope.bindings();
+    Assert.equal(bindings.arguments[1].age.value, 58);
 
-        getAgeClient.getScope(response => {
-          Assert.equal(response.scope.bindings.arguments[1].age.value, 58);
+    response = await getFooFront.getScope();
+    bindings = await response.scope.bindings();
+    Assert.equal(bindings.variables.foo.value, 10);
 
-          getFooClient.getScope(response => {
-            Assert.equal(response.scope.bindings.variables.foo.value, 10);
+    await threadFront.resume();
+  })
+);
 
-            gThreadFront.resume().then(() => finishClient(gClient));
-          });
-        });
-      });
-    });
-  });
-
+function evalCode(debuggee) {
   /* eslint-disable */
-  gDebuggee.eval("(" + function () {
-    var PersonFactory = function (name, age) {
-      var foo = 10;
-      return {
-        getName: function () { return name; },
-        getAge: function () { return age; },
-        getFoo: function () { foo = Date.now(); return foo; }
-      };
-    };
-    var person = new PersonFactory("Bob", 58);
-    debugger;
-  } + ")()");
+  debuggee.eval(
+    "(" +
+      function() {
+        var PersonFactory = function(name, age) {
+          var foo = 10;
+          return {
+            getName: function() {
+              return name;
+            },
+            getAge: function() {
+              return age;
+            },
+            getFoo: function() {
+              foo = Date.now();
+              return foo;
+            },
+          };
+        };
+        var person = new PersonFactory("Bob", 58);
+        debugger;
+      } +
+      ")()"
+  );
   /* eslint-enable */
 }

@@ -14,6 +14,7 @@ XPCOMUtils.defineLazyGlobalGetters(this, ["fetch"]);
 
 XPCOMUtils.defineLazyModuleGetters(this, {
   SearchUtils: "resource://gre/modules/SearchUtils.jsm",
+  Services: "resource://gre/modules/Services.jsm",
 });
 
 const EXT_SEARCH_PREFIX = "resource://search-extensions/";
@@ -46,27 +47,39 @@ class SearchEngineSelector {
   }
 
   /**
-   * @param {string} region - Users region.
    * @param {string} locale - Users locale.
-   * @returns {object} result - An object with "engines" field, a sorted
-   *   list of engines and optionally "privateDefault" indicating the
-   *   name of the engine which should be the default in private.
+   * @param {string} region - Users region.
+   * @param {string} channel - The update channel the application is running on.
+   * @returns {object}
+   *   An object with "engines" field, a sorted list of engines and
+   *   optionally "privateDefault" which is an object containing the engine
+   *   details for the engine which should be the default in Private Browsing mode.
    */
-  fetchEngineConfiguration(region, locale) {
-    if (!region || !locale) {
-      throw new Error("region and locale parameters required");
-    }
-    log(`fetchEngineConfiguration ${region}:${locale}`);
+  fetchEngineConfiguration(locale, region, channel) {
+    log(`fetchEngineConfiguration ${region}:${locale}:${channel}`);
+    let cohort = Services.prefs.getCharPref("browser.search.cohort", null);
     let engines = [];
+    const lcLocale = locale.toLowerCase();
+    const lcRegion = region.toLowerCase();
     for (let config of this.configuration) {
       const appliesTo = config.appliesTo || [];
       const applies = appliesTo.filter(section => {
+        if ("cohort" in section && cohort != section.cohort) {
+          return false;
+        }
+        if (
+          "application" in section &&
+          "channel" in section.application &&
+          !section.application.channel.includes(channel)
+        ) {
+          return false;
+        }
         let included =
           "included" in section &&
-          this._isInSection(region, locale, section.included);
+          this._isInSection(lcRegion, lcLocale, section.included);
         let excluded =
           "excluded" in section &&
-          this._isInSection(region, locale, section.excluded);
+          this._isInSection(lcRegion, lcLocale, section.excluded);
         return included && !excluded;
       });
 
@@ -79,27 +92,71 @@ class SearchEngineSelector {
           this._copyObject(baseConfig, section);
         }
 
-        if (baseConfig.webExtensionLocale == USER_LOCALE) {
-          baseConfig.webExtensionLocale = locale;
+        if (
+          "webExtension" in baseConfig &&
+          "locales" in baseConfig.webExtension
+        ) {
+          for (const webExtensionLocale of baseConfig.webExtension.locales) {
+            const engine = { ...baseConfig };
+            engine.webExtension = { ...baseConfig.webExtension };
+            delete engine.webExtension.locales;
+            engine.webExtension.locale =
+              webExtensionLocale == USER_LOCALE ? locale : webExtensionLocale;
+            engines.push(engine);
+          }
+        } else {
+          const engine = { ...baseConfig };
+          (engine.webExtension = engine.webExtension || {}).locale =
+            SearchUtils.DEFAULT_TAG;
+          engines.push(engine);
         }
-
-        engines.push(baseConfig);
       }
     }
 
-    engines.sort(this._sort.bind(this));
+    engines = this._filterEngines(engines);
 
-    let privateEngine = engines.find(engine => {
-      return (
+    let defaultEngine;
+    let privateEngine;
+
+    function shouldPrefer(setting, hasCurrentDefault, currentDefaultSetting) {
+      if (
+        setting == "yes" &&
+        (!hasCurrentDefault || currentDefaultSetting == "yes-if-no-other")
+      ) {
+        return true;
+      }
+      return setting == "yes-if-no-other" && !hasCurrentDefault;
+    }
+
+    for (const engine of engines) {
+      if (
+        "default" in engine &&
+        shouldPrefer(
+          engine.default,
+          !!defaultEngine,
+          defaultEngine && defaultEngine.default
+        )
+      ) {
+        defaultEngine = engine;
+      }
+      if (
         "defaultPrivate" in engine &&
-        ["yes", "yes-if-no-other"].includes(engine.defaultPrivate)
-      );
-    });
+        shouldPrefer(
+          engine.defaultPrivate,
+          !!privateEngine,
+          privateEngine && privateEngine.defaultPrivate
+        )
+      ) {
+        privateEngine = engine;
+      }
+    }
+
+    engines.sort(this._sort.bind(this, defaultEngine, privateEngine));
 
     let result = { engines };
 
     if (privateEngine) {
-      result.privateDefault = privateEngine.engineName;
+      result.privateDefault = privateEngine;
     }
 
     if (SearchUtils.loggingEnabled) {
@@ -108,8 +165,11 @@ class SearchEngineSelector {
     return result;
   }
 
-  _sort(a, b) {
-    return this._sortIndex(b) - this._sortIndex(a);
+  _sort(defaultEngine, privateEngine, a, b) {
+    return (
+      this._sortIndex(b, defaultEngine, privateEngine) -
+      this._sortIndex(a, defaultEngine, privateEngine)
+    );
   }
 
   /**
@@ -117,24 +177,50 @@ class SearchEngineSelector {
    * engines are ordered correctly.
    * @param {object} obj
    *   Object representing the engine configation.
+   * @param {object} defaultEngine
+   *   The default engine, for comparison to obj.
+   * @param {object} privateEngine
+   *   The private engine, for comparison to obj.
    * @returns {integer}
    *  Number indicating how this engine should be sorted.
    */
-  _sortIndex(obj) {
-    let orderHint = obj.orderHint || 0;
-    if (this._isDefault(obj)) {
-      orderHint += 50000;
+  _sortIndex(obj, defaultEngine, privateEngine) {
+    if (obj == defaultEngine) {
+      return Number.MAX_SAFE_INTEGER;
     }
-    if ("privateDefault" in obj && obj.default === "yes") {
-      orderHint += 40000;
+    if (obj == privateEngine) {
+      return Number.MAX_SAFE_INTEGER - 1;
     }
-    if ("default" in obj && obj.default === "yes-if-no-other") {
-      orderHint += 20000;
+    return obj.orderHint || 0;
+  }
+
+  /**
+   * Filter any search engines that are preffed to be ignored,
+   * the pref is only allowed in partner distributions.
+   * @param {Array} engines - The list of engines to be filtered.
+   * @returns {Array} - The engine list with filtered removed.
+   */
+  _filterEngines(engines) {
+    let branch = Services.prefs.getDefaultBranch(
+      SearchUtils.BROWSER_SEARCH_PREF
+    );
+    if (
+      SearchUtils.isPartnerBuild() &&
+      branch.getPrefType("ignoredJAREngines") == branch.PREF_STRING
+    ) {
+      let ignoredJAREngines = branch
+        .getCharPref("ignoredJAREngines")
+        .split(",");
+      let filteredEngines = engines.filter(engine => {
+        let name = engine.webExtension.id.split("@")[0];
+        return !ignoredJAREngines.includes(name);
+      });
+      // Don't allow all engines to be hidden
+      if (filteredEngines.length) {
+        engines = filteredEngines;
+      }
     }
-    if ("privateDefault" in obj && obj.default === "yes-if-no-other") {
-      orderHint += 10000;
-    }
-    return orderHint;
+    return engines;
   }
 
   /**
@@ -157,7 +243,15 @@ class SearchEngineSelector {
       if (["included", "excluded", "appliesTo"].includes(key)) {
         continue;
       }
-      target[key] = source[key];
+      if (key == "webExtension") {
+        if (key in target) {
+          this._copyObject(target[key], source[key]);
+        } else {
+          target[key] = { ...source[key] };
+        }
+      } else {
+        target[key] = source[key];
+      }
     }
     return target;
   }
@@ -178,8 +272,12 @@ class SearchEngineSelector {
       return true;
     }
     let locales = config.locales || {};
-    let inLocales = locales.matches && locales.matches.includes(locale);
-    let inRegions = config.regions && config.regions.includes(region);
+    let inLocales =
+      "matches" in locales &&
+      !!locales.matches.find(e => e.toLowerCase() == locale);
+    let inRegions =
+      "regions" in config &&
+      !!config.regions.find(e => e.toLowerCase() == region);
     if (
       locales.startsWith &&
       locales.startsWith.some(key => locale.startsWith(key))

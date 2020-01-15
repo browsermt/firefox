@@ -50,6 +50,9 @@
 #define IMPORT_FUNC(x) static decltype(x) * api_##x;
 JACK_API_VISIT(IMPORT_FUNC);
 
+#define JACK_DEFAULT_IN "JACK capture"
+#define JACK_DEFAULT_OUT "JACK playback"
+
 static const int MAX_STREAMS = 16;
 static const int MAX_CHANNELS  = 8;
 static const int FIFO_SIZE = 4096 * sizeof(float);
@@ -130,7 +133,6 @@ static struct cubeb_ops const cbjack_ops = {
   .stream_get_position = cbjack_stream_get_position,
   .stream_get_latency = cbjack_get_latency,
   .stream_set_volume = cbjack_stream_set_volume,
-  .stream_set_panning = NULL,
   .stream_get_current_device = cbjack_stream_get_current_device,
   .stream_device_destroy = cbjack_stream_device_destroy,
   .stream_register_device_changed_callback = NULL,
@@ -212,6 +214,9 @@ load_jack_lib(cubeb * context)
 # endif
 #else
   context->libjack = dlopen("libjack.so.0", RTLD_LAZY);
+  if (!context->libjack) {
+    context->libjack = dlopen("libjack.so", RTLD_LAZY);
+  }
 #endif
   if (!context->libjack) {
     return CUBEB_ERROR;
@@ -741,8 +746,10 @@ cbjack_stream_init(cubeb * context, cubeb_stream ** stream, char const * stream_
     return CUBEB_ERROR_INVALID_FORMAT;
   }
 
-  if (input_device || output_device)
+  if ((input_device && input_device != JACK_DEFAULT_IN) ||
+      (output_device && output_device != JACK_DEFAULT_OUT)) {
     return CUBEB_ERROR_NOT_SUPPORTED;
+  }
 
   // Loopback is unsupported
   if ((input_stream_params && (input_stream_params->prefs & CUBEB_STREAM_PREF_LOOPBACK)) ||
@@ -965,8 +972,8 @@ cbjack_stream_get_current_device(cubeb_stream * stm, cubeb_device ** const devic
   if (*device == NULL)
     return CUBEB_ERROR;
 
-  const char * j_in = "JACK capture";
-  const char * j_out = "JACK playback";
+  const char * j_in = JACK_DEFAULT_IN;
+  const char * j_out = JACK_DEFAULT_OUT;
   const char * empty = "";
 
   if (stm->devs == DUPLEX) {
@@ -994,9 +1001,6 @@ cbjack_stream_device_destroy(cubeb_stream * /*stream*/,
   free(device);
   return CUBEB_OK;
 }
-
-#define JACK_DEFAULT_IN "JACK capture"
-#define JACK_DEFAULT_OUT "JACK playback"
 
 static int
 cbjack_enumerate_devices(cubeb * context, cubeb_device_type type,

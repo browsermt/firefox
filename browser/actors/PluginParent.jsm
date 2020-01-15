@@ -131,7 +131,6 @@ const PluginManager = {
     let uglyPluginName = propertyBag.getPropertyAsAString("pluginName");
     let pluginName = BrowserUtils.makeNicePluginName(uglyPluginName);
     let pluginDumpID = propertyBag.getPropertyAsAString("pluginDumpID");
-    let browserDumpID = propertyBag.getPropertyAsAString("browserDumpID");
 
     let state;
     let crashReporter = Services.appinfo.QueryInterface(Ci.nsICrashReporter);
@@ -149,7 +148,7 @@ const PluginManager = {
       state = "please";
     }
 
-    let crashInfo = { runID, state, pluginName, pluginDumpID, browserDumpID };
+    let crashInfo = { runID, state, pluginName, pluginDumpID };
     this.crashReports.set(runID, crashInfo);
     let listeners = this._pendingCrashQueries.get(runID) || [];
     for (let listener of listeners) {
@@ -216,15 +215,11 @@ const PluginManager = {
       return;
     }
 
-    let { pluginDumpID, browserDumpID } = report;
+    let { pluginDumpID } = report;
     let submissionPromise = CrashSubmit.submit(pluginDumpID, {
       recordSubmission: true,
       extraExtraKeyVals: keyVals,
     });
-
-    if (browserDumpID) {
-      CrashSubmit.submit(browserDumpID).catch(Cu.reportError);
-    }
 
     this.broadcastState(pluginCrashID, "submitting");
 
@@ -299,9 +294,6 @@ const PluginManager = {
     currentWindowGlobal.getActor("Plugin")._mockedResponder = handler;
   },
 };
-
-const PREF_SESSION_PERSIST_MINUTES =
-  "plugin.sessionPermissionNow.intervalInMinutes";
 
 class PluginParent extends JSWindowActorParent {
   constructor() {
@@ -427,8 +419,6 @@ class PluginParent extends JSWindowActorParent {
    */
   _updatePluginPermission(aBrowser, aActivationInfo, aNewState) {
     let permission;
-    let expireType;
-    let expireTime;
     let histogram = Services.telemetry.getHistogramById(
       "PLUGINS_NOTIFICATION_USER_ACTION_2"
     );
@@ -445,10 +435,6 @@ class PluginParent extends JSWindowActorParent {
     switch (aNewState) {
       case "allownow":
         permission = Ci.nsIPermissionManager.ALLOW_ACTION;
-        expireType = Ci.nsIPermissionManager.EXPIRE_SESSION;
-        expireTime =
-          Date.now() +
-          Services.prefs.getIntPref(PREF_SESSION_PERSIST_MINUTES) * 60 * 1000;
         histogram.add(0);
         aActivationInfo.fallbackType = PLUGIN_ACTIVE;
         notification.options.extraAttr = "active";
@@ -456,8 +442,6 @@ class PluginParent extends JSWindowActorParent {
 
       case "block":
         permission = Ci.nsIPermissionManager.PROMPT_ACTION;
-        expireType = Ci.nsIPermissionManager.EXPIRE_SESSION;
-        expireTime = 0;
         histogram.add(2);
         let pluginTag = PluginManager.getPluginTagById(aActivationInfo.id);
         switch (pluginTag.blocklistState) {
@@ -499,8 +483,8 @@ class PluginParent extends JSWindowActorParent {
         principal,
         aActivationInfo.permissionString,
         permission,
-        expireType,
-        expireTime
+        Ci.nsIPermissionManager.EXPIRE_SESSION,
+        0 // do not expire (only expire at the end of the session)
       );
     }
 
@@ -512,6 +496,9 @@ class PluginParent extends JSWindowActorParent {
 
   showClickToPlayNotification(browser, plugin, showNow) {
     let window = browser.ownerGlobal;
+    if (!window.PopupNotifications) {
+      return;
+    }
     let notification = window.PopupNotifications.getNotification(
       kNotificationId,
       browser
@@ -540,6 +527,12 @@ class PluginParent extends JSWindowActorParent {
     let permissionString = gPluginHost.getPermissionStringForTag(pluginTag);
     let active = fallbackType == PLUGIN_ACTIVE;
 
+    let { top } = this.browsingContext;
+    if (!top.currentWindowGlobal) {
+      return;
+    }
+    let principal = top.currentWindowGlobal.documentPrincipal;
+
     let options = {
       dismissed: !showNow,
       hideClose: true,
@@ -548,7 +541,7 @@ class PluginParent extends JSWindowActorParent {
       showNow,
       popupIconClass: "plugin-icon",
       extraAttr: active ? "active" : "inactive",
-      principal: this.browsingContext.currentWindowGlobal.documentPrincipal,
+      principal,
     };
 
     let description;

@@ -4,7 +4,6 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include "jsutil.h"
 #include "threading/Thread.h"
 #include "threading/windows/ThreadPlatformData.h"
 
@@ -33,6 +32,10 @@ bool ThreadId::operator==(const ThreadId& aOther) const {
 
 bool Thread::create(unsigned int(__stdcall* aMain)(void*), void* aArg) {
   MOZ_RELEASE_ASSERT(!joinable());
+
+  if (oom::ShouldFailWithOOM()) {
+    return false;
+  }
 
   // Use _beginthreadex and not CreateThread, because threads that are
   // created with the latter leak a small amount of memory when they use

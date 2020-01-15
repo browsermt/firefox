@@ -44,6 +44,7 @@ import bisection
 from ctypes.util import find_library
 from datetime import datetime, timedelta
 from manifestparser import TestManifest
+from manifestparser.util import normsep
 from manifestparser.filters import (
     chunk_by_dir,
     chunk_by_runtime,
@@ -56,10 +57,10 @@ from manifestparser.filters import (
 try:
     from marionette_driver.addons import Addons
     from marionette_harness import Marionette
-except ImportError as e:
+except ImportError as e:  # noqa
     # Defer ImportError until attempt to use Marionette
     def reraise(*args, **kwargs):
-        raise(e)
+        raise(e)  # noqa
     Marionette = reraise
 
 from leaks import ShutdownLeaks, LSANLeaks
@@ -1437,17 +1438,7 @@ toolbar#nav-bar {
 
             info = mozinfo.info
 
-            # Bug 1089034 - imptest failure expectations are encoded as
-            # test manifests, even though they aren't tests. This gross
-            # hack causes several problems in automation including
-            # throwing off the chunking numbers. Remove them manually
-            # until bug 1089034 is fixed.
-            def remove_imptest_failure_expectations(tests, values):
-                return (t for t in tests
-                        if 'imptests/failures' not in t['path'])
-
             filters = [
-                remove_imptest_failure_expectations,
                 subsuite(options.subsuite),
             ]
 
@@ -1460,32 +1451,30 @@ toolbar#nav-bar {
 
             # Add chunking filters if specified
             if options.totalChunks:
-                if options.chunkByRuntime:
-                    runtime_file = self.resolve_runtime_file(options)
-                    if not os.path.exists(runtime_file):
-                        self.log.warning("runtime file %s not found; defaulting to chunk-by-dir" %
-                                         runtime_file)
-                        options.chunkByRuntime = None
-                        if options.flavor == 'browser':
-                            # these values match current mozharness configs
-                            options.chunkbyDir = 5
-                        else:
-                            options.chunkByDir = 4
-
                 if options.chunkByDir:
                     filters.append(chunk_by_dir(options.thisChunk,
                                                 options.totalChunks,
                                                 options.chunkByDir))
                 elif options.chunkByRuntime:
+                    if mozinfo.info['os'] == 'android':
+                        platkey = 'android'
+                    elif mozinfo.isWin:
+                        platkey = 'windows'
+                    else:
+                        platkey = 'unix'
+
+                    runtime_file = os.path.join(SCRIPT_DIR, 'runtimes',
+                                                'manifest-runtimes-{}.json'.format(platkey))
+                    if not os.path.exists(runtime_file):
+                        self.log.error("runtime file %s not found!" % runtime_file)
+                        sys.exit(1)
+
                     with open(runtime_file, 'r') as f:
-                        runtime_data = json.loads(f.read())
-                    runtimes = runtime_data['runtimes']
-                    default = runtime_data['excluded_test_average']
+                        runtimes = json.loads(f.read())
                     filters.append(
                         chunk_by_runtime(options.thisChunk,
                                          options.totalChunks,
-                                         runtimes,
-                                         default_runtime=default))
+                                         runtimes))
                 else:
                     filters.append(chunk_by_slice(options.thisChunk,
                                                   options.totalChunks))
@@ -1497,10 +1486,6 @@ toolbar#nav-bar {
                 self.log.error(NO_TESTS_FOUND.format(options.flavor, manifest.fmt_filters()))
 
         paths = []
-
-        # When running mochitest locally the manifest is based on topsrcdir,
-        # but when running in automation it is based on the test root.
-        manifest_root = build_obj.topsrcdir if build_obj else self.testRootAbs
         for test in tests:
             if len(tests) == 1 and 'disabled' in test:
                 del test['disabled']
@@ -1515,18 +1500,23 @@ toolbar#nav-bar {
                     (test['name'], test['manifest']))
                 continue
 
-            manifest_relpath = os.path.relpath(test['manifest'], manifest_root)
-            self.tests_by_manifest[manifest_relpath].append(tp)
-            self.prefs_by_manifest[manifest_relpath].add(test.get('prefs'))
-            self.env_vars_by_manifest[manifest_relpath].add(test.get('environment'))
+            manifest_key = test['manifest_relpath']
+            # Ignore ancestor_manifests that live at the root (e.g, don't have a
+            # path separator).
+            if 'ancestor_manifest' in test and '/' in normsep(test['ancestor_manifest']):
+                manifest_key = '{}:{}'.format(test['ancestor_manifest'], manifest_key)
+
+            self.tests_by_manifest[manifest_key].append(tp)
+            self.prefs_by_manifest[manifest_key].add(test.get('prefs'))
+            self.env_vars_by_manifest[manifest_key].add(test.get('environment'))
 
             for key in ['prefs', 'environment']:
                 if key in test and not options.runByManifest and 'disabled' not in test:
                     self.log.error("parsing {}: runByManifest mode must be enabled to "
-                                   "set the `{}` key".format(manifest_relpath, key))
+                                   "set the `{}` key".format(test['manifest_relpath'], key))
                     sys.exit(1)
 
-            testob = {'path': tp, 'manifest': manifest_relpath}
+            testob = {'path': tp, 'manifest': manifest_key}
             if 'disabled' in test:
                 testob['disabled'] = test['disabled']
             if 'expected' in test:
@@ -1638,21 +1628,15 @@ toolbar#nav-bar {
     def buildBrowserEnv(self, options, debugger=False, env=None):
         """build the environment variables for the specific test and operating system"""
         if mozinfo.info["asan"] and mozinfo.isLinux and mozinfo.bits == 64:
-            lsanPath = SCRIPT_DIR
+            useLSan = True
         else:
-            lsanPath = None
-
-        if mozinfo.info["ubsan"]:
-            ubsanPath = SCRIPT_DIR
-        else:
-            ubsanPath = None
+            useLSan = False
 
         browserEnv = self.environment(
             xrePath=options.xrePath,
             env=env,
             debugger=debugger,
-            lsanPath=lsanPath,
-            ubsanPath=ubsanPath)
+            useLSan=useLSan)
 
         if hasattr(options, "topsrcdir"):
             browserEnv["MOZ_DEVELOPER_REPO_DIR"] = options.topsrcdir
@@ -1865,7 +1849,7 @@ toolbar#nav-bar {
             'ws': options.sslPort,
         }
 
-    def merge_base_profiles(self, options):
+    def merge_base_profiles(self, options, category):
         """Merge extra profile data from testing/profiles."""
         profile_data_dir = os.path.join(SCRIPT_DIR, 'profile_data')
 
@@ -1878,7 +1862,7 @@ toolbar#nav-bar {
                 profile_data_dir = path
 
         with open(os.path.join(profile_data_dir, 'profiles.json'), 'r') as fh:
-            base_profiles = json.load(fh)['mochitest']
+            base_profiles = json.load(fh)[category]
 
         # values to use when interpolating preferences
         interpolation = {
@@ -1931,7 +1915,7 @@ toolbar#nav-bar {
         # 3) Prefs from --setpref
 
         # Prefs from base profiles
-        self.merge_base_profiles(options)
+        self.merge_base_profiles(options, 'mochitest')
 
         # Hardcoded prefs (TODO move these into a base profile)
         prefs = {
@@ -2232,6 +2216,8 @@ toolbar#nav-bar {
             self.start_script_kwargs['testUrl'] = testUrl or 'about:blank'
 
             if detectShutdownLeaks:
+                env['MOZ_LOG'] = (env['MOZ_LOG'] + "," if env['MOZ_LOG'] else "") + \
+                    "DocShellAndDOMWindowLeak:3"
                 shutdownLeaks = ShutdownLeaks(self.log)
             else:
                 shutdownLeaks = None
@@ -2395,30 +2381,6 @@ toolbar#nav-bar {
         self.result.clear()
         options.manifestFile = None
         options.profilePath = None
-
-    def resolve_runtime_file(self, options):
-        """
-        Return a path to the runtimes file for a given flavor and
-        subsuite.
-        """
-        template = "mochitest-{suite_slug}{e10s}.runtimes.json"
-        data_dir = os.path.join(SCRIPT_DIR, 'runtimes')
-
-        # Determine the suite slug in the runtimes file name
-        slug = self.normflavor(options.flavor)
-        if slug == 'browser-chrome' and options.subsuite == 'devtools':
-            slug = 'devtools-chrome'
-        elif slug == 'mochitest':
-            slug = 'plain'
-            if options.subsuite:
-                slug = options.subsuite
-
-        e10s = ''
-        if options.e10s:
-            e10s = '-e10s'
-
-        return os.path.join(data_dir, template.format(
-            e10s=e10s, suite_slug=slug))
 
     def normalize_paths(self, paths):
         # Normalize test paths so they are relative to test root
@@ -2606,8 +2568,17 @@ toolbar#nav-bar {
             "e10s": options.e10s,
             "fission": self.extraPrefs.get('fission.autostart', False),
             "headless": options.headless,
+
+            # Until the test harness can understand default pref values,
+            # (https://bugzilla.mozilla.org/show_bug.cgi?id=1577912) this value
+            # should by synchronized with the default pref value indicated in
+            # StaticPrefList.yaml.
+            #
+            # Currently for automation, the pref defaults to true (but can be
+            # overridden with --setpref).
             "serviceworker_e10s": self.extraPrefs.get(
-                'dom.serviceWorkers.parent_intercept', False),
+                'dom.serviceWorkers.parent_intercept', True),
+
             "socketprocess_e10s": self.extraPrefs.get(
                 'network.process.enabled', False),
             "verify": options.verify,
@@ -2819,8 +2790,11 @@ toolbar#nav-bar {
             # code coverage is not enabled.
             detectShutdownLeaks = False
             if options.jscov_dir_prefix is None:
-                detectShutdownLeaks = mozinfo.info[
-                    "debug"] and options.flavor == 'browser'
+                detectShutdownLeaks = (
+                    mozinfo.info['debug'] and
+                    options.flavor == 'browser' and
+                    options.subsuite != 'thunderbird'
+                )
 
             self.start_script_kwargs['flavor'] = self.normflavor(options.flavor)
             marionette_args = {
@@ -2851,6 +2825,8 @@ toolbar#nav-bar {
 
                 self.log.info("runtests.py | Running with scheme: {}".format(scheme))
                 self.log.info("runtests.py | Running with e10s: {}".format(options.e10s))
+                self.log.info("runtests.py | Running with fission: {}".format(
+                    mozinfo.info.get('fission', False)))
                 self.log.info("runtests.py | Running with serviceworker_e10s: {}".format(
                     mozinfo.info.get('serviceworker_e10s', False)))
                 self.log.info("runtests.py | Running with socketprocess_e10s: {}".format(

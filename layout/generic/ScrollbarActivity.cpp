@@ -22,6 +22,8 @@
 namespace mozilla {
 namespace layout {
 
+using mozilla::dom::Element;
+
 NS_IMPL_ISUPPORTS(ScrollbarActivity, nsIDOMEventListener)
 
 static bool GetForceAlwaysVisiblePref() {
@@ -308,9 +310,9 @@ static void SetOpacityOnElement(nsIContent* aContent, double aOpacity) {
   nsCOMPtr<nsStyledElement> inlineStyleContent = do_QueryInterface(aContent);
   if (inlineStyleContent) {
     nsICSSDeclaration* decl = inlineStyleContent->Style();
-    nsAutoString str;
+    nsAutoCString str;
     str.AppendFloat(aOpacity);
-    decl->SetProperty(NS_LITERAL_STRING("opacity"), str, EmptyString());
+    decl->SetProperty(NS_LITERAL_CSTRING("opacity"), str, EmptyString());
   }
 }
 
@@ -340,7 +342,7 @@ static void UnsetOpacityOnElement(nsIContent* aContent) {
   if (inlineStyleContent) {
     nsICSSDeclaration* decl = inlineStyleContent->Style();
     nsAutoString dummy;
-    decl->RemoveProperty(NS_LITERAL_STRING("opacity"), dummy);
+    decl->RemoveProperty(NS_LITERAL_CSTRING("opacity"), dummy);
   }
 }
 
@@ -382,9 +384,29 @@ void ScrollbarActivity::CancelFadeBeginTimer() {
   }
 }
 
+static void MaybeInvalidateScrollbarForHover(
+    Element* aScrollbarToInvalidate, Element* aScrollbarAboutToGetHover) {
+  if (aScrollbarToInvalidate) {
+    bool hasHover =
+        aScrollbarToInvalidate->HasAttr(kNameSpaceID_None, nsGkAtoms::hover);
+    bool willHaveHover = (aScrollbarAboutToGetHover == aScrollbarToInvalidate);
+
+    if (hasHover != willHaveHover) {
+      if (nsIFrame* f = aScrollbarToInvalidate->GetPrimaryFrame()) {
+        f->SchedulePaint();
+      }
+    }
+  }
+}
+
 void ScrollbarActivity::HoveredScrollbar(Element* aScrollbar) {
-  SetBooleanAttribute(GetHorizontalScrollbar(), nsGkAtoms::hover, false);
-  SetBooleanAttribute(GetVerticalScrollbar(), nsGkAtoms::hover, false);
+  Element* vertScrollbar = GetVerticalScrollbar();
+  Element* horzScrollbar = GetHorizontalScrollbar();
+  MaybeInvalidateScrollbarForHover(vertScrollbar, aScrollbar);
+  MaybeInvalidateScrollbarForHover(horzScrollbar, aScrollbar);
+
+  SetBooleanAttribute(horzScrollbar, nsGkAtoms::hover, false);
+  SetBooleanAttribute(vertScrollbar, nsGkAtoms::hover, false);
   SetBooleanAttribute(aScrollbar, nsGkAtoms::hover, true);
 }
 

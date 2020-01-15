@@ -12,8 +12,8 @@
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/net/StunAddrsRequestChild.h"
-#include "nsIProtocolProxyCallback.h"
 #include "MediaTransportHandler.h"
+#include "nsIHttpChannelInternal.h"
 
 #include "TransceiverImpl.h"
 
@@ -36,6 +36,8 @@ class PeerConnectionImpl;
 class PeerConnectionMedia;
 class PCUuidGenerator;
 class MediaPipeline;
+class MediaPipelineReceive;
+class MediaPipelineTransmit;
 class MediaPipelineFilter;
 class JsepSession;
 
@@ -60,6 +62,8 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
   nsresult UpdateTransports(const JsepSession& aSession,
                             const bool forceIceTcp);
 
+  void ResetStunAddrsForIceRestart() { mStunAddrs.Clear(); }
+
   // Start ICE checks.
   void StartIceChecks(const JsepSession& session);
 
@@ -82,14 +86,16 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
   nsresult AddTransceiver(JsepTransceiver* aJsepTransceiver,
                           dom::MediaStreamTrack& aReceiveTrack,
                           dom::MediaStreamTrack* aSendTrack,
+                          const PrincipalHandle& aPrincipalHandle,
                           RefPtr<TransceiverImpl>* aTransceiverImpl);
 
   void GetTransmitPipelinesMatching(
       const dom::MediaStreamTrack* aTrack,
-      nsTArray<RefPtr<MediaPipeline>>* aPipelines);
+      nsTArray<RefPtr<MediaPipelineTransmit>>* aPipelines);
 
-  void GetReceivePipelinesMatching(const dom::MediaStreamTrack* aTrack,
-                                   nsTArray<RefPtr<MediaPipeline>>* aPipelines);
+  void GetReceivePipelinesMatching(
+      const dom::MediaStreamTrack* aTrack,
+      nsTArray<RefPtr<MediaPipelineReceive>>* aPipelines);
 
   std::string GetTransportIdMatching(const dom::MediaStreamTrack& aTrack) const;
 
@@ -109,14 +115,13 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
                             const PeerIdentity* aSinkIdentity);
   // this determines if any track is peerIdentity constrained
   bool AnyLocalTrackHasPeerIdentity() const;
-  // When we finally learn who is on the other end, we need to change the
-  // ownership on streams
-  void UpdateRemoteStreamPrincipals_m(nsIPrincipal* aPrincipal);
 
   bool AnyCodecHasPluginID(uint64_t aPluginID);
 
   const nsCOMPtr<nsIThread>& GetMainThread() const { return mMainThread; }
-  const nsCOMPtr<nsIEventTarget>& GetSTSThread() const { return mSTSThread; }
+  const nsCOMPtr<nsISerialEventTarget>& GetSTSThread() const {
+    return mSTSThread;
+  }
 
   // Used by PCImpl in a couple of places. Might be good to move that code in
   // here.
@@ -125,11 +130,10 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
   }
 
   nsPIDOMWindowInner* GetWindow() const;
+  already_AddRefed<nsIHttpChannelInternal> GetChannel() const;
 
-  void AlpnNegotiated_s(const std::string& aAlpn);
-  void AlpnNegotiated_m(const std::string& aAlpn);
-
-  void ProxySettingReceived(bool aProxied);
+  void AlpnNegotiated_s(const std::string& aAlpn, bool aPrivacyRequested);
+  void AlpnNegotiated_m(bool aPrivacyRequested);
 
   // TODO: Move to PeerConnectionImpl
   RefPtr<WebRtcCallWrapper> mCall;
@@ -139,12 +143,16 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
 
  private:
   void InitLocalAddrs();  // for stun local address IPC request
-  nsresult InitProxy();
-  void SetProxy();
+  bool ShouldForceProxy() const;
+  std::unique_ptr<NrSocketProxyConfig> GetProxyConfig() const;
 
   class StunAddrsHandler : public net::StunAddrsListener {
    public:
     explicit StunAddrsHandler(PeerConnectionMedia* pcm) : pcm_(pcm) {}
+
+    void OnMDNSQueryComplete(const nsCString& hostname,
+                             const Maybe<nsCString>& address) override;
+
     void OnStunAddrsAvailable(
         const mozilla::net::NrIceStunAddrArray& addrs) override;
 
@@ -186,7 +194,7 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
                           const CandidateInfo& aCandidateInfo);
 
   bool IsIceCtxReady() const {
-    return mProxyResolveCompleted && mLocalAddrsCompleted;
+    return mLocalAddrsRequestState == STUN_ADDR_REQUEST_COMPLETE;
   }
 
   // The parent PC
@@ -201,7 +209,7 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
   nsCOMPtr<nsIThread> mMainThread;
 
   // The STS thread.
-  nsCOMPtr<nsIEventTarget> mSTSThread;
+  nsCOMPtr<nsISerialEventTarget> mSTSThread;
 
   // Used whenever we need to dispatch a runnable to STS to tweak something
   // on our ICE ctx, but are not ready to do so at the moment (eg; we are
@@ -209,17 +217,19 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
   // gathering or start checking)
   std::vector<nsCOMPtr<nsIRunnable>> mQueuedIceCtxOperations;
 
-  // Used to track the state of the request.
-  bool mProxyResolveCompleted;
-
-  // Used to track proxy existence and socket proxy configuration.
-  std::unique_ptr<NrSocketProxyConfig> mProxyConfig;
+  // Set if prefs dictate that we should force the use of a web proxy.
+  bool mForceProxy;
 
   // Used to cancel incoming stun addrs response
   RefPtr<net::StunAddrsRequestChild> mStunAddrsRequest;
 
+  enum StunAddrRequestState {
+    STUN_ADDR_REQUEST_NONE,
+    STUN_ADDR_REQUEST_PENDING,
+    STUN_ADDR_REQUEST_COMPLETE
+  };
   // Used to track the state of the stun addr IPC request
-  bool mLocalAddrsCompleted;
+  StunAddrRequestState mLocalAddrsRequestState;
 
   // Used to store the result of the stun addr IPC request
   nsTArray<NrIceStunAddr> mStunAddrs;
@@ -233,6 +243,14 @@ class PeerConnectionMedia : public sigslot::has_slots<> {
 
   // Used to store the mDNS hostnames that we have registered
   std::set<std::string> mRegisteredMDNSHostnames;
+
+  // Used to store the mDNS hostnames that we have queried
+  struct PendingIceCandidate {
+    std::vector<std::string> mTokenizedCandidate;
+    std::string mTransportId;
+    std::string mUfrag;
+  };
+  std::map<std::string, std::list<PendingIceCandidate>> mQueriedMDNSHostnames;
 
   NS_INLINE_DECL_THREADSAFE_REFCOUNTING(PeerConnectionMedia)
 };

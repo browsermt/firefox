@@ -6,6 +6,14 @@
 
 var EXPORTED_SYMBOLS = ["Network"];
 
+const { XPCOMUtils } = ChromeUtils.import(
+  "resource://gre/modules/XPCOMUtils.jsm"
+);
+
+XPCOMUtils.defineLazyGlobalGetters(this, ["URL"]);
+
+const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+
 const { Domain } = ChromeUtils.import(
   "chrome://remote/content/domains/Domain.jsm"
 );
@@ -75,6 +83,156 @@ class Network extends Domain {
     this.enabled = false;
   }
 
+  /**
+   * Deletes browser cookies with matching name and url or domain/path pair.
+   *
+   * @param {Object} options
+   * @param {string} name
+   *     Name of the cookies to remove.
+   * @param {string=} url
+   *     If specified, deletes all the cookies with the given name
+   *     where domain and path match provided URL.
+   * @param {string=} domain
+   *     If specified, deletes only cookies with the exact domain.
+   * @param {string=} path
+   *     If specified, deletes only cookies with the exact path.
+   */
+  async deleteCookies(options = {}) {
+    const { domain, name, path = "/", url } = options;
+
+    if (typeof name != "string") {
+      throw new TypeError("name: string value expected");
+    }
+
+    if (!url && !domain) {
+      throw new TypeError(
+        "At least one of the url and domain needs to be specified"
+      );
+    }
+
+    // Retrieve host. Check domain first because it has precedence.
+    let hostname = domain || "";
+    if (hostname.length == 0) {
+      const cookieURL = new URL(url);
+      if (!["http:", "https:"].includes(cookieURL.protocol)) {
+        throw new TypeError("An http or https url must be specified");
+      }
+      hostname = cookieURL.hostname;
+    }
+
+    const cookiesFound = Services.cookies.getCookiesWithOriginAttributes(
+      JSON.stringify({}),
+      hostname
+    );
+
+    for (const cookie of cookiesFound) {
+      if (cookie.name == name && cookie.path.startsWith(path)) {
+        Services.cookies.remove(
+          cookie.host,
+          cookie.name,
+          cookie.path,
+          cookie.originAttributes
+        );
+      }
+    }
+  }
+
+  /**
+   * Returns all browser cookies for the current URL.
+   *
+   * @param {Object} options
+   * @param {Array<string>=} urls
+   *     The list of URLs for which applicable cookies will be fetched.
+   *     Defaults to the currently open URL.
+   *
+   * @return {Array<Cookie>}
+   *     Array of cookie objects.
+   */
+  async getCookies(options = {}) {
+    // Bug 1605354 - Add support for options.urls
+    const urls = [this.session.target.url];
+
+    const cookies = [];
+    for (let url of urls) {
+      url = new URL(url);
+
+      const secureProtocol = ["https:", "wss:"].includes(url.protocol);
+
+      const cookiesFound = Services.cookies.getCookiesWithOriginAttributes(
+        JSON.stringify({}),
+        url.hostname
+      );
+
+      for (const cookie of cookiesFound) {
+        // Ignore secure cookies for non-secure protocols
+        if (cookie.isSecure && !secureProtocol) {
+          continue;
+        }
+
+        // Ignore cookies which do not match the given path
+        if (!url.pathname.startsWith(cookie.path)) {
+          continue;
+        }
+
+        const data = {
+          name: cookie.name,
+          value: cookie.value,
+          domain: cookie.host,
+          path: cookie.path,
+          expires: cookie.isSession ? -1 : cookie.expiry,
+          // The size is the combined length of both the cookie name and value
+          size: cookie.name.length + cookie.value.length,
+          httpOnly: cookie.isHttpOnly,
+          secure: cookie.isSecure,
+          session: cookie.isSession,
+        };
+
+        if (cookie.sameSite) {
+          const sameSiteMap = new Map([
+            [Ci.nsICookie.SAMESITE_LAX, "Lax"],
+            [Ci.nsICookie.SAMESITE_STRICT, "Strict"],
+          ]);
+
+          data.sameSite = sameSiteMap.get(cookie.sameSite);
+        }
+
+        cookies.push(data);
+      }
+    }
+
+    return { cookies };
+  }
+
+  /**
+   * Toggles ignoring cache for each request. If true, cache will not be used.
+   *
+   * @param {Object} options
+   * @param {boolean} options.cacheDisabled
+   *     Cache disabled state.
+   */
+  async setCacheDisabled(options = {}) {
+    const { cacheDisabled = false } = options;
+
+    const { INHIBIT_CACHING, LOAD_BYPASS_CACHE, LOAD_NORMAL } = Ci.nsIRequest;
+
+    let loadFlags = LOAD_NORMAL;
+    if (cacheDisabled) {
+      loadFlags = LOAD_BYPASS_CACHE | INHIBIT_CACHING;
+    }
+
+    await this.executeInChild("_updateLoadFlags", loadFlags);
+  }
+
+  /**
+   * Allows overriding user agent with the given string.
+   *
+   * Redirected to Emulation.setUserAgentOverride.
+   */
+  setUserAgentOverride(options = {}) {
+    const { id } = this.session;
+    this.session.execute(id, "Emulation", "setUserAgentOverride", options);
+  }
+
   _onRequest(eventName, httpChannel, data) {
     const topFrame = getLoadContext(httpChannel).topFrameElement;
     const request = {
@@ -114,7 +272,7 @@ class Network extends Domain {
       initiator: undefined,
       redirectResponse: undefined,
       type: LOAD_CAUSE_STRINGS[causeType] || "unknown",
-      frameId: topFrame.outerWindowID,
+      frameId: topFrame.browsingContext.id.toString(),
       hasUserGesture: undefined,
     });
   }

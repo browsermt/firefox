@@ -20,6 +20,8 @@
 
 #include "mozilla/MathAlgorithms.h"
 
+#include <algorithm>
+
 #include "jit/CodeGenerator.h"
 
 #include "wasm/WasmBaselineCompile.h"
@@ -43,10 +45,12 @@ using mozilla::Some;
 namespace {
 
 typedef Vector<MBasicBlock*, 8, SystemAllocPolicy> BlockVector;
+typedef Vector<MDefinition*, 8, SystemAllocPolicy> DefVector;
 
 struct IonCompilePolicy {
   // We store SSA definitions in the value stack.
   typedef MDefinition* Value;
+  typedef DefVector ValueVector;
 
   // We store loop headers and then/else blocks in the control flow stack.
   typedef MBasicBlock* ControlItem;
@@ -130,6 +134,8 @@ class FunctionCompiler {
   const ModuleEnvironment& env() const { return env_; }
   IonOpIter& iter() { return iter_; }
   TempAllocator& alloc() const { return alloc_; }
+  // FIXME(1401675): Replace with BlockType.
+  uint32_t funcIndex() const { return func_.index; }
   const FuncType& funcType() const { return *env_.funcTypes[func_.index]; }
 
   BytecodeOffset bytecodeOffset() const { return iter_.bytecodeOffset(); }
@@ -140,7 +146,7 @@ class FunctionCompiler {
   bool init() {
     // Prepare the entry block for MIR generation:
 
-    const ValTypeVector& args = funcType().args();
+    const ArgTypeVector args(funcType());
 
     if (!mirGen_.ensureBallast()) {
       return false;
@@ -149,11 +155,13 @@ class FunctionCompiler {
       return false;
     }
 
-    for (ABIArgIter<ValTypeVector> i(args); !i.done(); i++) {
+    for (ABIArgIter i(args); !i.done(); i++) {
+      MOZ_ASSERT(!args.isSyntheticStackResultPointerArg(i.index()),
+                 "multiple results for wasm functions unimplemented");
       MOZ_ASSERT(i.mirType() != MIRType::Pointer);
       MWasmParameter* ins = MWasmParameter::New(alloc(), *i, i.mirType());
       curBlock_->add(ins);
-      curBlock_->initSlot(info().localSlot(i.index()), ins);
+      curBlock_->initSlot(info().localSlot(args.naturalIndex(i.index())), ins);
       if (!mirGen_.ensureBallast()) {
         return false;
       }
@@ -169,7 +177,7 @@ class FunctionCompiler {
 
     for (size_t i = args.length(); i < locals_.length(); i++) {
       MInstruction* ins = nullptr;
-      switch (locals_[i].code()) {
+      switch (locals_[i].kind()) {
         case ValType::I32:
           ins = MConstant::New(alloc(), Int32Value(0), MIRType::Int32);
           break;
@@ -183,12 +191,8 @@ class FunctionCompiler {
           ins = MConstant::New(alloc(), DoubleValue(0.0), MIRType::Double);
           break;
         case ValType::Ref:
-        case ValType::FuncRef:
-        case ValType::AnyRef:
           ins = MWasmNullConstant::New(alloc());
           break;
-        case ValType::NullRef:
-          MOZ_CRASH("NullRef not expressible");
       }
 
       curBlock_->add(ins);
@@ -588,6 +592,18 @@ class FunctionCompiler {
     return load;
   }
 
+ public:
+  MWasmHeapBase* memoryBase() {
+    MWasmHeapBase* base = nullptr;
+    AliasSet aliases = env_.maxMemoryLength.isSome()
+                           ? AliasSet::None()
+                           : AliasSet::Load(AliasSet::WasmHeapMeta);
+    base = MWasmHeapBase::New(alloc(), tlsPointer_, aliases);
+    curBlock_->add(base);
+    return base;
+  }
+
+ private:
   // Only sets *mustAdd if it also returns true.
   bool needAlignmentCheck(MemoryAccessDesc* access, MDefinition* base,
                           bool* mustAdd) {
@@ -999,7 +1015,7 @@ class FunctionCompiler {
 
     uint32_t stackBytes = call->abi_.stackBytesConsumedSoFar();
 
-    maxStackArgBytes_ = Max(maxStackArgBytes_, stackBytes);
+    maxStackArgBytes_ = std::max(maxStackArgBytes_, stackBytes);
     return true;
   }
 
@@ -1016,8 +1032,9 @@ class FunctionCompiler {
     CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Func);
     MIRType ret = ToMIRType(funcType.ret());
     auto callee = CalleeDesc::function(funcIndex);
+    ArgTypeVector args(funcType);
     auto* ins = MWasmCall::New(alloc(), desc, callee, call.regArgs_, ret,
-                               StackArgAreaSizeUnaligned(funcType.args()));
+                               StackArgAreaSizeUnaligned(args));
     if (!ins) {
       return false;
     }
@@ -1060,9 +1077,10 @@ class FunctionCompiler {
     }
 
     CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Dynamic);
-    auto* ins = MWasmCall::New(
-        alloc(), desc, callee, call.regArgs_, ToMIRType(funcType.ret()),
-        StackArgAreaSizeUnaligned(funcType.args()), index);
+    ArgTypeVector args(funcType);
+    auto* ins = MWasmCall::New(alloc(), desc, callee, call.regArgs_,
+                               ToMIRType(funcType.ret()),
+                               StackArgAreaSizeUnaligned(args), index);
     if (!ins) {
       return false;
     }
@@ -1082,9 +1100,10 @@ class FunctionCompiler {
 
     CallSiteDesc desc(lineOrBytecode, CallSiteDesc::Dynamic);
     auto callee = CalleeDesc::import(globalDataOffset);
+    ArgTypeVector args(funcType);
     auto* ins = MWasmCall::New(alloc(), desc, callee, call.regArgs_,
                                ToMIRType(funcType.ret()),
-                               StackArgAreaSizeUnaligned(funcType.args()));
+                               StackArgAreaSizeUnaligned(args));
     if (!ins) {
       return false;
     }
@@ -1149,23 +1168,18 @@ class FunctionCompiler {
 
   inline bool inDeadCode() const { return curBlock_ == nullptr; }
 
-  void returnExpr(MDefinition* operand) {
+  void returnValues(const DefVector& values) {
     if (inDeadCode()) {
       return;
     }
 
-    MWasmReturn* ins = MWasmReturn::New(alloc(), operand);
-    curBlock_->end(ins);
-    curBlock_ = nullptr;
-  }
+    MOZ_ASSERT(values.length() <= 1, "until multi-return");
 
-  void returnVoid() {
-    if (inDeadCode()) {
-      return;
+    if (values.empty()) {
+      curBlock_->end(MWasmReturnVoid::New(alloc()));
+    } else {
+      curBlock_->end(MWasmReturn::New(alloc(), values[0]));
     }
-
-    MWasmReturnVoid* ins = MWasmReturnVoid::New(alloc());
-    curBlock_->end(ins);
     curBlock_ = nullptr;
   }
 
@@ -1181,39 +1195,46 @@ class FunctionCompiler {
   }
 
  private:
-  static bool hasPushed(MBasicBlock* block) {
-    uint32_t numPushed = block->stackDepth() - block->info().firstStackSlot();
-    MOZ_ASSERT(numPushed == 0 || numPushed == 1);
-    return numPushed;
+  static uint32_t numPushed(MBasicBlock* block) {
+    return block->stackDepth() - block->info().firstStackSlot();
   }
 
  public:
-  void pushDef(MDefinition* def) {
+  MOZ_MUST_USE bool pushDefs(const DefVector& defs) {
     if (inDeadCode()) {
-      return;
+      return true;
     }
-    MOZ_ASSERT(!hasPushed(curBlock_));
-    if (def && def->type() != MIRType::None) {
+    MOZ_ASSERT(numPushed(curBlock_) == 0);
+    if (!curBlock_->ensureHasSlots(defs.length())) {
+      return false;
+    }
+    for (MDefinition* def : defs) {
+      MOZ_ASSERT(def->type() != MIRType::None);
       curBlock_->push(def);
     }
+    return true;
   }
 
-  MDefinition* popDefIfPushed() {
-    if (!hasPushed(curBlock_)) {
-      return nullptr;
+  bool popPushedDefs(DefVector* defs) {
+    size_t n = numPushed(curBlock_);
+    if (!defs->resizeUninitialized(n)) {
+      return false;
     }
-    MDefinition* def = curBlock_->pop();
-    MOZ_ASSERT(def->type() != MIRType::Value);
-    return def;
+    for (; n > 0; n--) {
+      MDefinition* def = curBlock_->pop();
+      MOZ_ASSERT(def->type() != MIRType::Value);
+      (*defs)[n - 1] = def;
+    }
+    return true;
   }
 
  private:
-  void addJoinPredecessor(MDefinition* def, MBasicBlock** joinPred) {
+  bool addJoinPredecessor(const DefVector& defs, MBasicBlock** joinPred) {
     *joinPred = curBlock_;
     if (inDeadCode()) {
-      return;
+      return true;
     }
-    pushDef(def);
+    return pushDefs(defs);
   }
 
  public:
@@ -1239,15 +1260,17 @@ class FunctionCompiler {
   }
 
   bool switchToElse(MBasicBlock* elseBlock, MBasicBlock** thenJoinPred) {
-    MDefinition* ifDef;
-    if (!finishBlock(&ifDef)) {
+    DefVector values;
+    if (!finishBlock(&values)) {
       return false;
     }
 
     if (!elseBlock) {
       *thenJoinPred = nullptr;
     } else {
-      addJoinPredecessor(ifDef, thenJoinPred);
+      if (!addJoinPredecessor(values, thenJoinPred)) {
+        return false;
+      }
 
       curBlock_ = elseBlock;
       mirGraph().moveBlockToEnd(curBlock_);
@@ -1256,47 +1279,46 @@ class FunctionCompiler {
     return startBlock();
   }
 
-  bool joinIfElse(MBasicBlock* thenJoinPred, MDefinition** def) {
-    MDefinition* elseDef;
-    if (!finishBlock(&elseDef)) {
+  bool joinIfElse(MBasicBlock* thenJoinPred, DefVector* defs) {
+    DefVector values;
+    if (!finishBlock(&values)) {
       return false;
     }
 
     if (!thenJoinPred && inDeadCode()) {
-      *def = nullptr;
-    } else {
-      MBasicBlock* elseJoinPred;
-      addJoinPredecessor(elseDef, &elseJoinPred);
-
-      mozilla::Array<MBasicBlock*, 2> blocks;
-      size_t numJoinPreds = 0;
-      if (thenJoinPred) {
-        blocks[numJoinPreds++] = thenJoinPred;
-      }
-      if (elseJoinPred) {
-        blocks[numJoinPreds++] = elseJoinPred;
-      }
-
-      if (numJoinPreds == 0) {
-        *def = nullptr;
-        return true;
-      }
-
-      MBasicBlock* join;
-      if (!goToNewBlock(blocks[0], &join)) {
-        return false;
-      }
-      for (size_t i = 1; i < numJoinPreds; ++i) {
-        if (!goToExistingBlock(blocks[i], join)) {
-          return false;
-        }
-      }
-
-      curBlock_ = join;
-      *def = popDefIfPushed();
+      return true;
     }
 
-    return true;
+    MBasicBlock* elseJoinPred;
+    if (!addJoinPredecessor(values, &elseJoinPred)) {
+      return false;
+    }
+
+    mozilla::Array<MBasicBlock*, 2> blocks;
+    size_t numJoinPreds = 0;
+    if (thenJoinPred) {
+      blocks[numJoinPreds++] = thenJoinPred;
+    }
+    if (elseJoinPred) {
+      blocks[numJoinPreds++] = elseJoinPred;
+    }
+
+    if (numJoinPreds == 0) {
+      return true;
+    }
+
+    MBasicBlock* join;
+    if (!goToNewBlock(blocks[0], &join)) {
+      return false;
+    }
+    for (size_t i = 1; i < numJoinPreds; ++i) {
+      if (!goToExistingBlock(blocks[i], join)) {
+        return false;
+      }
+    }
+
+    curBlock_ = join;
+    return popPushedDefs(defs);
   }
 
   bool startBlock() {
@@ -1306,13 +1328,13 @@ class FunctionCompiler {
     return true;
   }
 
-  bool finishBlock(MDefinition** def) {
+  bool finishBlock(DefVector* defs) {
     MOZ_ASSERT(blockDepth_);
     uint32_t topLabel = --blockDepth_;
-    return bindBranches(topLabel, def);
+    return bindBranches(topLabel, defs);
   }
 
-  bool startLoop(MBasicBlock** loopHeader) {
+  bool startLoop(MBasicBlock** loopHeader, size_t paramCount) {
     *loopHeader = nullptr;
 
     blockDepth_++;
@@ -1334,6 +1356,24 @@ class FunctionCompiler {
     mirGraph().addBlock(*loopHeader);
     curBlock_->end(MGoto::New(alloc(), *loopHeader));
 
+    DefVector loopParams;
+    if (!iter().getResults(paramCount, &loopParams)) {
+      return false;
+    }
+    for (size_t i = 0; i < paramCount; i++) {
+      MPhi* phi = MPhi::New(alloc(), loopParams[i]->type());
+      if (!phi) {
+        return false;
+      }
+      if (!phi->reserveLength(2)) {
+        return false;
+      }
+      (*loopHeader)->addPhi(phi);
+      phi->addInput(loopParams[i]);
+      loopParams[i] = phi;
+    }
+    iter().setResults(paramCount, loopParams);
+
     MBasicBlock* body;
     if (!goToNewBlock(*loopHeader, &body)) {
       return false;
@@ -1353,8 +1393,8 @@ class FunctionCompiler {
   }
 
   bool setLoopBackedge(MBasicBlock* loopEntry, MBasicBlock* loopBody,
-                       MBasicBlock* backedge) {
-    if (!loopEntry->setBackedgeWasm(backedge)) {
+                       MBasicBlock* backedge, size_t paramCount) {
+    if (!loopEntry->setBackedgeWasm(backedge, paramCount)) {
       return false;
     }
 
@@ -1399,7 +1439,7 @@ class FunctionCompiler {
   }
 
  public:
-  bool closeLoop(MBasicBlock* loopHeader, MDefinition** loopResult) {
+  bool closeLoop(MBasicBlock* loopHeader, DefVector* loopResults) {
     MOZ_ASSERT(blockDepth_ >= 1);
     MOZ_ASSERT(loopDepth_);
 
@@ -1411,7 +1451,6 @@ class FunctionCompiler {
                  blockPatches_[headerLabel].empty());
       blockDepth_--;
       loopDepth_--;
-      *loopResult = nullptr;
       return true;
     }
 
@@ -1426,8 +1465,8 @@ class FunctionCompiler {
     // branches as forward jumps to a single backward jump. This is
     // unfortunate but the optimizer is able to fold these into single jumps
     // to backedges.
-    MDefinition* _;
-    if (!bindBranches(headerLabel, &_)) {
+    DefVector backedgeValues;
+    if (!bindBranches(headerLabel, &backedgeValues)) {
       return false;
     }
 
@@ -1435,13 +1474,18 @@ class FunctionCompiler {
 
     if (curBlock_) {
       // We're on the loop backedge block, created by bindBranches.
-      if (hasPushed(curBlock_)) {
+      for (size_t i = 0, n = numPushed(curBlock_); i != n; i++) {
         curBlock_->pop();
+      }
+
+      if (!pushDefs(backedgeValues)) {
+        return false;
       }
 
       MOZ_ASSERT(curBlock_->loopDepth() == loopDepth_);
       curBlock_->end(MGoto::New(alloc(), loopHeader));
-      if (!setLoopBackedge(loopHeader, loopBody, curBlock_)) {
+      if (!setLoopBackedge(loopHeader, loopBody, curBlock_,
+                           backedgeValues.length())) {
         return false;
       }
     }
@@ -1460,8 +1504,7 @@ class FunctionCompiler {
     }
 
     blockDepth_ -= 1;
-    *loopResult = inDeadCode() ? nullptr : popDefIfPushed();
-    return true;
+    return inDeadCode() || popPushedDefs(loopResults);
   }
 
   bool addControlFlowPatch(MControlInstruction* ins, uint32_t relative,
@@ -1477,7 +1520,7 @@ class FunctionCompiler {
     return blockPatches_[absolute].append(ControlFlowPatch(ins, index));
   }
 
-  bool br(uint32_t relativeDepth, MDefinition* maybeValue) {
+  bool br(uint32_t relativeDepth, const DefVector& values) {
     if (inDeadCode()) {
       return true;
     }
@@ -1487,14 +1530,16 @@ class FunctionCompiler {
       return false;
     }
 
-    pushDef(maybeValue);
+    if (!pushDefs(values)) {
+      return false;
+    }
 
     curBlock_->end(jump);
     curBlock_ = nullptr;
     return true;
   }
 
-  bool brIf(uint32_t relativeDepth, MDefinition* maybeValue,
+  bool brIf(uint32_t relativeDepth, const DefVector& values,
             MDefinition* condition) {
     if (inDeadCode()) {
       return true;
@@ -1510,7 +1555,9 @@ class FunctionCompiler {
       return false;
     }
 
-    pushDef(maybeValue);
+    if (!pushDefs(values)) {
+      return false;
+    }
 
     curBlock_->end(test);
     curBlock_ = joinBlock;
@@ -1518,7 +1565,7 @@ class FunctionCompiler {
   }
 
   bool brTable(MDefinition* operand, uint32_t defaultDepth,
-               const Uint32Vector& depths, MDefinition* maybeValue) {
+               const Uint32Vector& depths, const DefVector& values) {
     if (inDeadCode()) {
       return true;
     }
@@ -1571,7 +1618,9 @@ class FunctionCompiler {
       }
     }
 
-    pushDef(maybeValue);
+    if (!pushDefs(values)) {
+      return false;
+    }
 
     curBlock_->end(table);
     curBlock_ = nullptr;
@@ -1619,10 +1668,9 @@ class FunctionCompiler {
     return next->addPredecessor(alloc(), prev);
   }
 
-  bool bindBranches(uint32_t absolute, MDefinition** def) {
+  bool bindBranches(uint32_t absolute, DefVector* defs) {
     if (absolute >= blockPatches_.length() || blockPatches_[absolute].empty()) {
-      *def = inDeadCode() ? nullptr : popDefIfPushed();
-      return true;
+      return inDeadCode() || popPushedDefs(defs);
     }
 
     ControlFlowPatchVector& patches = blockPatches_[absolute];
@@ -1662,7 +1710,9 @@ class FunctionCompiler {
 
     curBlock_ = join;
 
-    *def = popDefIfPushed();
+    if (!popPushedDefs(defs)) {
+      return false;
+    }
 
     patches.clear();
     return true;
@@ -1752,16 +1802,18 @@ static bool EmitF64Const(FunctionCompiler& f) {
 }
 
 static bool EmitBlock(FunctionCompiler& f) {
-  return f.iter().readBlock() && f.startBlock();
+  ResultType params;
+  return f.iter().readBlock(&params) && f.startBlock();
 }
 
 static bool EmitLoop(FunctionCompiler& f) {
-  if (!f.iter().readLoop()) {
+  ResultType params;
+  if (!f.iter().readLoop(&params)) {
     return false;
   }
 
   MBasicBlock* loopHeader;
-  if (!f.startLoop(&loopHeader)) {
+  if (!f.startLoop(&loopHeader, params.length())) {
     return false;
   }
 
@@ -1772,8 +1824,9 @@ static bool EmitLoop(FunctionCompiler& f) {
 }
 
 static bool EmitIf(FunctionCompiler& f) {
+  ResultType params;
   MDefinition* condition = nullptr;
-  if (!f.iter().readIf(&condition)) {
+  if (!f.iter().readIf(&params, &condition)) {
     return false;
   }
 
@@ -1787,14 +1840,15 @@ static bool EmitIf(FunctionCompiler& f) {
 }
 
 static bool EmitElse(FunctionCompiler& f) {
-  ExprType thenType;
-  MDefinition* thenValue;
-  if (!f.iter().readElse(&thenType, &thenValue)) {
+  ResultType paramType;
+  ResultType resultType;
+  DefVector thenValues;
+  if (!f.iter().readElse(&paramType, &resultType, &thenValues)) {
     return false;
   }
 
-  if (!IsVoid(thenType)) {
-    f.pushDef(thenValue);
+  if (!f.pushDefs(thenValues)) {
+    return false;
   }
 
   if (!f.switchToElse(f.iter().controlItem(), &f.iter().controlItem())) {
@@ -1806,120 +1860,99 @@ static bool EmitElse(FunctionCompiler& f) {
 
 static bool EmitEnd(FunctionCompiler& f) {
   LabelKind kind;
-  ExprType type;
-  MDefinition* value;
-  if (!f.iter().readEnd(&kind, &type, &value)) {
+  ResultType type;
+  DefVector preJoinDefs;
+  DefVector resultsForEmptyElse;
+  if (!f.iter().readEnd(&kind, &type, &preJoinDefs, &resultsForEmptyElse)) {
     return false;
   }
 
   MBasicBlock* block = f.iter().controlItem();
-
   f.iter().popEnd();
 
-  if (!IsVoid(type)) {
-    f.pushDef(value);
+  if (!f.pushDefs(preJoinDefs)) {
+    return false;
   }
 
-  MDefinition* def = nullptr;
+  DefVector postJoinDefs;
   switch (kind) {
     case LabelKind::Body:
       MOZ_ASSERT(f.iter().controlStackEmpty());
-      if (!f.finishBlock(&def)) {
+      if (!f.finishBlock(&postJoinDefs)) {
         return false;
       }
-      if (f.inDeadCode() || IsVoid(type)) {
-        f.returnVoid();
-      } else {
-        f.returnExpr(def);
-      }
+      f.returnValues(postJoinDefs);
       return f.iter().readFunctionEnd(f.iter().end());
     case LabelKind::Block:
-      if (!f.finishBlock(&def)) {
+      if (!f.finishBlock(&postJoinDefs)) {
         return false;
       }
       break;
     case LabelKind::Loop:
-      if (!f.closeLoop(block, &def)) {
+      if (!f.closeLoop(block, &postJoinDefs)) {
         return false;
       }
       break;
-    case LabelKind::Then:
+    case LabelKind::Then: {
       // If we didn't see an Else, create a trivial else block so that we create
       // a diamond anyway, to preserve Ion invariants.
       if (!f.switchToElse(block, &block)) {
         return false;
       }
 
-      if (!f.joinIfElse(block, &def)) {
+      if (!f.pushDefs(resultsForEmptyElse)) {
+        return false;
+      }
+
+      if (!f.joinIfElse(block, &postJoinDefs)) {
         return false;
       }
       break;
+    }
     case LabelKind::Else:
-      if (!f.joinIfElse(block, &def)) {
+      if (!f.joinIfElse(block, &postJoinDefs)) {
         return false;
       }
       break;
   }
 
-  if (!IsVoid(type)) {
-    MOZ_ASSERT_IF(!f.inDeadCode(), def);
-    f.iter().setResult(def);
-  }
+  MOZ_ASSERT_IF(!f.inDeadCode(), postJoinDefs.length() == type.length());
+  f.iter().setResults(postJoinDefs.length(), postJoinDefs);
 
   return true;
 }
 
 static bool EmitBr(FunctionCompiler& f) {
   uint32_t relativeDepth;
-  ExprType type;
-  MDefinition* value;
-  if (!f.iter().readBr(&relativeDepth, &type, &value)) {
+  ResultType type;
+  DefVector values;
+  if (!f.iter().readBr(&relativeDepth, &type, &values)) {
     return false;
   }
 
-  if (IsVoid(type)) {
-    if (!f.br(relativeDepth, nullptr)) {
-      return false;
-    }
-  } else {
-    if (!f.br(relativeDepth, value)) {
-      return false;
-    }
-  }
-
-  return true;
+  return f.br(relativeDepth, values);
 }
 
 static bool EmitBrIf(FunctionCompiler& f) {
   uint32_t relativeDepth;
-  ExprType type;
-  MDefinition* value;
+  ResultType type;
+  DefVector values;
   MDefinition* condition;
-  if (!f.iter().readBrIf(&relativeDepth, &type, &value, &condition)) {
+  if (!f.iter().readBrIf(&relativeDepth, &type, &values, &condition)) {
     return false;
   }
 
-  if (IsVoid(type)) {
-    if (!f.brIf(relativeDepth, nullptr, condition)) {
-      return false;
-    }
-  } else {
-    if (!f.brIf(relativeDepth, value, condition)) {
-      return false;
-    }
-  }
-
-  return true;
+  return f.brIf(relativeDepth, values, condition);
 }
 
 static bool EmitBrTable(FunctionCompiler& f) {
   Uint32Vector depths;
   uint32_t defaultDepth;
-  ExprType branchValueType;
-  MDefinition* branchValue;
+  ResultType branchValueType;
+  DefVector branchValues;
   MDefinition* index;
   if (!f.iter().readBrTable(&depths, &defaultDepth, &branchValueType,
-                            &branchValue, &index)) {
+                            &branchValues, &index)) {
     return false;
   }
 
@@ -1935,24 +1968,19 @@ static bool EmitBrTable(FunctionCompiler& f) {
   }
 
   if (allSameDepth) {
-    return f.br(defaultDepth, branchValue);
+    return f.br(defaultDepth, branchValues);
   }
 
-  return f.brTable(index, defaultDepth, depths, branchValue);
+  return f.brTable(index, defaultDepth, depths, branchValues);
 }
 
 static bool EmitReturn(FunctionCompiler& f) {
-  MDefinition* value;
-  if (!f.iter().readReturn(&value)) {
+  DefVector values;
+  if (!f.iter().readReturn(&values)) {
     return false;
   }
 
-  if (IsVoid(f.funcType().ret())) {
-    f.returnVoid();
-    return true;
-  }
-
-  f.returnExpr(value);
+  f.returnValues(values);
   return true;
 }
 
@@ -1964,8 +1992,6 @@ static bool EmitUnreachable(FunctionCompiler& f) {
   f.unreachableTrap();
   return true;
 }
-
-typedef IonOpIter::ValueVector DefVector;
 
 static bool EmitCallArgs(FunctionCompiler& f, const FuncType& funcType,
                          const DefVector& args, CallCompileState* call) {
@@ -2020,7 +2046,7 @@ static bool EmitCall(FunctionCompiler& f, bool asmJSFuncDef) {
     }
   }
 
-  if (IsVoid(funcType.ret())) {
+  if (funcType.results().length() == 0) {
     return true;
   }
 
@@ -2064,7 +2090,7 @@ static bool EmitCallIndirect(FunctionCompiler& f, bool oldStyle) {
     return false;
   }
 
-  if (IsVoid(funcType.ret())) {
+  if (funcType.results().length() == 0) {
     return true;
   }
 
@@ -2122,7 +2148,7 @@ static bool EmitGetGlobal(FunctionCompiler& f) {
   MIRType mirType = ToMIRType(value.type());
 
   MDefinition* result;
-  switch (value.type().code()) {
+  switch (value.type().kind()) {
     case ValType::I32:
       result = f.constant(Int32Value(value.i32()), mirType);
       break;
@@ -2135,10 +2161,17 @@ static bool EmitGetGlobal(FunctionCompiler& f) {
     case ValType::F64:
       result = f.constant(value.f64());
       break;
-    case ValType::FuncRef:
-    case ValType::AnyRef:
-      MOZ_ASSERT(value.ref().isNull());
-      result = f.nullRefConstant();
+    case ValType::Ref:
+      switch (value.type().refTypeKind()) {
+        case RefType::Func:
+        case RefType::Any:
+        case RefType::Null:
+          MOZ_ASSERT(value.ref().isNull());
+          result = f.nullRefConstant();
+          break;
+        case RefType::TypeIndex:
+          MOZ_CRASH("unexpected reference type in EmitGetGlobal");
+      }
       break;
     default:
       MOZ_CRASH("unexpected type in EmitGetGlobal");
@@ -2448,12 +2481,12 @@ static bool EmitComparison(FunctionCompiler& f, ValType operandType,
   return true;
 }
 
-static bool EmitSelect(FunctionCompiler& f) {
+static bool EmitSelect(FunctionCompiler& f, bool typed) {
   StackType type;
   MDefinition* trueValue;
   MDefinition* falseValue;
   MDefinition* condition;
-  if (!f.iter().readSelect(&type, &trueValue, &falseValue, &condition)) {
+  if (!f.iter().readSelect(typed, &type, &trueValue, &falseValue, &condition)) {
     return false;
   }
 
@@ -2875,30 +2908,12 @@ static bool EmitAtomicXchg(FunctionCompiler& f, ValType type,
   return true;
 }
 
-static bool EmitMemOrTableCopy(FunctionCompiler& f, bool isMem) {
-  // Bulk memory must be available if shared memory is enabled.
-#ifndef ENABLE_WASM_BULKMEM_OPS
-  if (f.env().sharedMemoryEnabled == Shareable::False) {
-    return f.iter().fail("bulk memory ops disabled");
-  }
-#endif
-
-  MDefinition *dst, *src, *len;
-  uint32_t dstTableIndex;
-  uint32_t srcTableIndex;
-  if (!f.iter().readMemOrTableCopy(isMem, &dstTableIndex, &dst, &srcTableIndex,
-                                   &src, &len)) {
-    return false;
-  }
-
-  if (f.inDeadCode()) {
-    return true;
-  }
-
+static bool EmitMemCopyCall(FunctionCompiler& f, MDefinition* dst,
+                            MDefinition* src, MDefinition* len) {
   uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
 
   const SymbolicAddressSignature& callee =
-      isMem ? SASigMemCopy : SASigTableCopy;
+      (f.env().usesSharedMemory() ? SASigMemCopyShared : SASigMemCopy);
   CallCompileState args;
   if (!f.passInstance(callee.argTypes[0], &args)) {
     return false;
@@ -2913,21 +2928,203 @@ static bool EmitMemOrTableCopy(FunctionCompiler& f, bool isMem) {
   if (!f.passArg(len, callee.argTypes[3], &args)) {
     return false;
   }
-  if (!isMem) {
-    MDefinition* dti = f.constant(Int32Value(dstTableIndex), MIRType::Int32);
-    if (!dti) {
+  MDefinition* memoryBase = f.memoryBase();
+  if (!f.passArg(memoryBase, callee.argTypes[4], &args)) {
+    return false;
+  }
+  if (!f.finishCall(&args)) {
+    return false;
+  }
+
+  return f.builtinInstanceMethodCall(callee, lineOrBytecode, args);
+}
+
+static bool EmitMemCopyInline(FunctionCompiler& f, MDefinition* dst,
+                              MDefinition* src, MDefinition* len) {
+  MOZ_ASSERT(MaxInlineMemoryCopyLength != 0);
+
+  MOZ_ASSERT(len->isConstant() && len->type() == MIRType::Int32);
+  uint32_t length = len->toConstant()->toInt32();
+  MOZ_ASSERT(length != 0 && length <= MaxInlineMemoryCopyLength);
+
+  // Compute the number of copies of each width we will need to do
+  size_t remainder = length;
+#ifdef JS_64BIT
+  size_t numCopies8 = remainder / sizeof(uint64_t);
+  remainder %= sizeof(uint64_t);
+#endif
+  size_t numCopies4 = remainder / sizeof(uint32_t);
+  remainder %= sizeof(uint32_t);
+  size_t numCopies2 = remainder / sizeof(uint16_t);
+  remainder %= sizeof(uint16_t);
+  size_t numCopies1 = remainder;
+
+  // Load all source bytes from low to high using the widest transfer width we
+  // can for the system. We will trap without writing anything if any source
+  // byte is out-of-bounds.
+  size_t offset = 0;
+  DefVector loadedValues;
+
+#ifdef JS_64BIT
+  for (uint32_t i = 0; i < numCopies8; i++) {
+    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    auto* load = f.load(src, &access, ValType::I64);
+    if (!load || !loadedValues.append(load)) {
       return false;
     }
-    if (!f.passArg(dti, callee.argTypes[4], &args)) {
+
+    offset += sizeof(uint64_t);
+  }
+#endif
+
+  for (uint32_t i = 0; i < numCopies4; i++) {
+    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    auto* load = f.load(src, &access, ValType::I32);
+    if (!load || !loadedValues.append(load)) {
       return false;
     }
-    MDefinition* sti = f.constant(Int32Value(srcTableIndex), MIRType::Int32);
-    if (!sti) {
+
+    offset += sizeof(uint32_t);
+  }
+
+  if (numCopies2) {
+    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    auto* load = f.load(src, &access, ValType::I32);
+    if (!load || !loadedValues.append(load)) {
       return false;
     }
-    if (!f.passArg(sti, callee.argTypes[5], &args)) {
+
+    offset += sizeof(uint16_t);
+  }
+
+  if (numCopies1) {
+    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    auto* load = f.load(src, &access, ValType::I32);
+    if (!load || !loadedValues.append(load)) {
       return false;
     }
+  }
+
+  // Store all source bytes to the destination from high to low. We will trap
+  // without writing anything on the first store if any dest byte is
+  // out-of-bounds.
+  offset = length;
+
+  if (numCopies1) {
+    offset -= sizeof(uint8_t);
+
+    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    auto* value = loadedValues.popCopy();
+    f.store(dst, &access, value);
+  }
+
+  if (numCopies2) {
+    offset -= sizeof(uint16_t);
+
+    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    auto* value = loadedValues.popCopy();
+    f.store(dst, &access, value);
+  }
+
+  for (uint32_t i = 0; i < numCopies4; i++) {
+    offset -= sizeof(uint32_t);
+
+    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    auto* value = loadedValues.popCopy();
+    f.store(dst, &access, value);
+  }
+
+#ifdef JS_64BIT
+  for (uint32_t i = 0; i < numCopies8; i++) {
+    offset -= sizeof(uint64_t);
+
+    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    auto* value = loadedValues.popCopy();
+    f.store(dst, &access, value);
+  }
+#endif
+
+  return true;
+}
+
+static bool EmitMemCopy(FunctionCompiler& f) {
+  // Bulk memory must be available if shared memory is enabled.
+#ifndef ENABLE_WASM_BULKMEM_OPS
+  if (f.env().sharedMemoryEnabled == Shareable::False) {
+    return f.iter().fail("bulk memory ops disabled");
+  }
+#endif
+
+  MDefinition *dst, *src, *len;
+  uint32_t dstMemIndex;
+  uint32_t srcMemIndex;
+  if (!f.iter().readMemOrTableCopy(true, &dstMemIndex, &dst, &srcMemIndex, &src,
+                                   &len)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  if (MacroAssembler::SupportsFastUnalignedAccesses() && len->isConstant() &&
+      len->type() == MIRType::Int32 && len->toConstant()->toInt32() != 0 &&
+      uint32_t(len->toConstant()->toInt32()) <= MaxInlineMemoryCopyLength) {
+    return EmitMemCopyInline(f, dst, src, len);
+  }
+  return EmitMemCopyCall(f, dst, src, len);
+}
+
+static bool EmitTableCopy(FunctionCompiler& f) {
+  // Bulk memory must be available if shared memory is enabled.
+#ifndef ENABLE_WASM_BULKMEM_OPS
+  if (f.env().sharedMemoryEnabled == Shareable::False) {
+    return f.iter().fail("bulk memory ops disabled");
+  }
+#endif
+
+  MDefinition *dst, *src, *len;
+  uint32_t dstTableIndex;
+  uint32_t srcTableIndex;
+  if (!f.iter().readMemOrTableCopy(false, &dstTableIndex, &dst, &srcTableIndex,
+                                   &src, &len)) {
+    return false;
+  }
+
+  if (f.inDeadCode()) {
+    return true;
+  }
+
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  const SymbolicAddressSignature& callee = SASigTableCopy;
+  CallCompileState args;
+  if (!f.passInstance(callee.argTypes[0], &args)) {
+    return false;
+  }
+
+  if (!f.passArg(dst, callee.argTypes[1], &args)) {
+    return false;
+  }
+  if (!f.passArg(src, callee.argTypes[2], &args)) {
+    return false;
+  }
+  if (!f.passArg(len, callee.argTypes[3], &args)) {
+    return false;
+  }
+  MDefinition* dti = f.constant(Int32Value(dstTableIndex), MIRType::Int32);
+  if (!dti) {
+    return false;
+  }
+  if (!f.passArg(dti, callee.argTypes[4], &args)) {
+    return false;
+  }
+  MDefinition* sti = f.constant(Int32Value(srcTableIndex), MIRType::Int32);
+  if (!sti) {
+    return false;
+  }
+  if (!f.passArg(sti, callee.argTypes[5], &args)) {
+    return false;
   }
   if (!f.finishCall(&args)) {
     return false;
@@ -2975,6 +3172,114 @@ static bool EmitDataOrElemDrop(FunctionCompiler& f, bool isData) {
   return f.builtinInstanceMethodCall(callee, lineOrBytecode, args);
 }
 
+static bool EmitMemFillCall(FunctionCompiler& f, MDefinition* start,
+                            MDefinition* val, MDefinition* len) {
+  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
+
+  const SymbolicAddressSignature& callee =
+      f.env().usesSharedMemory() ? SASigMemFillShared : SASigMemFill;
+  CallCompileState args;
+  if (!f.passInstance(callee.argTypes[0], &args)) {
+    return false;
+  }
+
+  if (!f.passArg(start, callee.argTypes[1], &args)) {
+    return false;
+  }
+  if (!f.passArg(val, callee.argTypes[2], &args)) {
+    return false;
+  }
+  if (!f.passArg(len, callee.argTypes[3], &args)) {
+    return false;
+  }
+  MDefinition* memoryBase = f.memoryBase();
+  if (!f.passArg(memoryBase, callee.argTypes[4], &args)) {
+    return false;
+  }
+
+  if (!f.finishCall(&args)) {
+    return false;
+  }
+
+  return f.builtinInstanceMethodCall(callee, lineOrBytecode, args);
+}
+
+static bool EmitMemFillInline(FunctionCompiler& f, MDefinition* start,
+                              MDefinition* val, MDefinition* len) {
+  MOZ_ASSERT(MaxInlineMemoryFillLength != 0);
+
+  MOZ_ASSERT(len->isConstant() && len->type() == MIRType::Int32 &&
+             val->isConstant() && val->type() == MIRType::Int32);
+
+  uint32_t length = len->toConstant()->toInt32();
+  uint32_t value = val->toConstant()->toInt32();
+  MOZ_ASSERT(length != 0 && length <= MaxInlineMemoryFillLength);
+
+  // Compute the number of copies of each width we will need to do
+  size_t remainder = length;
+#ifdef JS_64BIT
+  size_t numCopies8 = remainder / sizeof(uint64_t);
+  remainder %= sizeof(uint64_t);
+#endif
+  size_t numCopies4 = remainder / sizeof(uint32_t);
+  remainder %= sizeof(uint32_t);
+  size_t numCopies2 = remainder / sizeof(uint16_t);
+  remainder %= sizeof(uint16_t);
+  size_t numCopies1 = remainder;
+
+  // Generate splatted definitions for wider fills as needed
+#ifdef JS_64BIT
+  MDefinition* val8 =
+      numCopies8 ? f.constant(int64_t(SplatByteToUInt<uint64_t>(value, 8)))
+                 : nullptr;
+#endif
+  MDefinition* val4 =
+      numCopies4 ? f.constant(Int32Value(SplatByteToUInt<uint32_t>(value, 4)),
+                              MIRType::Int32)
+                 : nullptr;
+  MDefinition* val2 =
+      numCopies2 ? f.constant(Int32Value(SplatByteToUInt<uint32_t>(value, 2)),
+                              MIRType::Int32)
+                 : nullptr;
+
+  // Store the fill value to the destination from high to low. We will trap
+  // without writing anything on the first store if any dest byte is
+  // out-of-bounds.
+  size_t offset = length;
+
+  if (numCopies1) {
+    offset -= sizeof(uint8_t);
+
+    MemoryAccessDesc access(Scalar::Uint8, 1, offset, f.bytecodeOffset());
+    f.store(start, &access, val);
+  }
+
+  if (numCopies2) {
+    offset -= sizeof(uint16_t);
+
+    MemoryAccessDesc access(Scalar::Uint16, 1, offset, f.bytecodeOffset());
+    f.store(start, &access, val2);
+  }
+
+  for (uint32_t i = 0; i < numCopies4; i++) {
+    offset -= sizeof(uint32_t);
+
+    MemoryAccessDesc access(Scalar::Uint32, 1, offset, f.bytecodeOffset());
+    f.store(start, &access, val4);
+  }
+
+#ifdef JS_64BIT
+  for (uint32_t i = 0; i < numCopies8; i++) {
+    offset -= sizeof(uint64_t);
+
+    MemoryAccessDesc access(Scalar::Int64, 1, offset, f.bytecodeOffset());
+    f.store(start, &access, val8);
+  }
+#endif
+
+  return true;
+}
+
 static bool EmitMemFill(FunctionCompiler& f) {
   // Bulk memory must be available if shared memory is enabled.
 #ifndef ENABLE_WASM_BULKMEM_OPS
@@ -2992,29 +3297,13 @@ static bool EmitMemFill(FunctionCompiler& f) {
     return true;
   }
 
-  uint32_t lineOrBytecode = f.readCallSiteLineOrBytecode();
-
-  const SymbolicAddressSignature& callee = SASigMemFill;
-  CallCompileState args;
-  if (!f.passInstance(callee.argTypes[0], &args)) {
-    return false;
+  if (MacroAssembler::SupportsFastUnalignedAccesses() && len->isConstant() &&
+      len->type() == MIRType::Int32 && len->toConstant()->toInt32() != 0 &&
+      uint32_t(len->toConstant()->toInt32()) <= MaxInlineMemoryFillLength &&
+      val->isConstant() && val->type() == MIRType::Int32) {
+    return EmitMemFillInline(f, start, val, len);
   }
-
-  if (!f.passArg(start, callee.argTypes[1], &args)) {
-    return false;
-  }
-  if (!f.passArg(val, callee.argTypes[2], &args)) {
-    return false;
-  }
-  if (!f.passArg(len, callee.argTypes[3], &args)) {
-    return false;
-  }
-
-  if (!f.finishCall(&args)) {
-    return false;
-  }
-
-  return f.builtinInstanceMethodCall(callee, lineOrBytecode, args);
+  return EmitMemFillCall(f, start, val, len);
 }
 
 static bool EmitMemOrTableInit(FunctionCompiler& f, bool isMem) {
@@ -3305,9 +3594,7 @@ static bool EmitTableSize(FunctionCompiler& f) {
   f.iter().setResult(ret);
   return true;
 }
-#endif  // ENABLE_WASM_REFTYPES
 
-#ifdef ENABLE_WASM_REFTYPES
 static bool EmitRefFunc(FunctionCompiler& f) {
   uint32_t funcIndex;
   if (!f.iter().readRefFunc(&funcIndex)) {
@@ -3368,7 +3655,7 @@ static bool EmitRefNull(FunctionCompiler& f) {
 
 static bool EmitRefIsNull(FunctionCompiler& f) {
   MDefinition* input;
-  if (!f.iter().readConversion(ValType::AnyRef, ValType::I32, &input)) {
+  if (!f.iter().readConversion(RefType::any(), ValType::I32, &input)) {
     return false;
   }
 
@@ -3384,10 +3671,10 @@ static bool EmitRefIsNull(FunctionCompiler& f) {
       f.compare(input, nullVal, JSOP_EQ, MCompare::Compare_RefOrNull));
   return true;
 }
-#endif
+#endif  // ENABLE_WASM_REFTYPES
 
 static bool EmitBodyExprs(FunctionCompiler& f) {
-  if (!f.iter().readFunctionStart(f.funcType().ret())) {
+  if (!f.iter().readFunctionStart(f.funcIndex())) {
     return false;
   }
 
@@ -3446,8 +3733,13 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
       // Parametric operators
       case uint16_t(Op::Drop):
         CHECK(f.iter().readDrop());
-      case uint16_t(Op::Select):
-        CHECK(EmitSelect(f));
+      case uint16_t(Op::SelectNumeric):
+        CHECK(EmitSelect(f, /*typed*/ false));
+      case uint16_t(Op::SelectTyped):
+        if (!f.env().refTypesEnabled()) {
+          return f.iter().unrecognizedOpcode(&op);
+        }
+        CHECK(EmitSelect(f, /*typed*/ true));
 
       // Locals and globals
       case uint16_t(Op::GetLocal):
@@ -3821,7 +4113,7 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
         if (!f.env().gcTypesEnabled()) {
           return f.iter().unrecognizedOpcode(&op);
         }
-        CHECK(EmitComparison(f, ValType::AnyRef, JSOP_EQ,
+        CHECK(EmitComparison(f, RefType::any(), JSOP_EQ,
                              MCompare::Compare_RefOrNull));
 #endif
 #ifdef ENABLE_WASM_REFTYPES
@@ -3865,7 +4157,7 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
             CHECK(EmitTruncate(f, ValType::F64, ValType::I64,
                                MiscOp(op.b1) == MiscOp::I64TruncUSatF64, true));
           case uint32_t(MiscOp::MemCopy):
-            CHECK(EmitMemOrTableCopy(f, /*isMem=*/true));
+            CHECK(EmitMemCopy(f));
           case uint32_t(MiscOp::DataDrop):
             CHECK(EmitDataOrElemDrop(f, /*isData=*/true));
           case uint32_t(MiscOp::MemFill):
@@ -3873,7 +4165,7 @@ static bool EmitBodyExprs(FunctionCompiler& f) {
           case uint32_t(MiscOp::MemInit):
             CHECK(EmitMemOrTableInit(f, /*isMem=*/true));
           case uint32_t(MiscOp::TableCopy):
-            CHECK(EmitMemOrTableCopy(f, /*isMem=*/false));
+            CHECK(EmitTableCopy(f));
           case uint32_t(MiscOp::ElemDrop):
             CHECK(EmitDataOrElemDrop(f, /*isData=*/false));
           case uint32_t(MiscOp::TableInit):
@@ -4206,9 +4498,9 @@ bool wasm::IonCompileFunctions(const ModuleEnvironment& env, LifoAlloc& lifo,
 
     // Build the local types vector.
 
-    const ValTypeVector& argTys = env.funcTypes[func.index]->args();
+    const FuncTypeWithId& funcType = *env.funcTypes[func.index];
     ValTypeVector locals;
-    if (!locals.appendAll(argTys)) {
+    if (!locals.appendAll(funcType.args())) {
       return false;
     }
     if (!DecodeLocalEntries(d, env.types, env.refTypesEnabled(),
@@ -4257,13 +4549,12 @@ bool wasm::IonCompileFunctions(const ModuleEnvironment& env, LifoAlloc& lifo,
         return false;
       }
 
-      FuncTypeIdDesc funcTypeId = env.funcTypes[func.index]->id;
-
       CodeGenerator codegen(&mir, lir, &masm);
 
       BytecodeOffset prologueTrapOffset(func.lineOrBytecode);
       FuncOffsets offsets;
-      if (!codegen.generateWasm(funcTypeId, prologueTrapOffset, argTys,
+      ArgTypeVector args(funcType);
+      if (!codegen.generateWasm(funcType.id, prologueTrapOffset, args,
                                 trapExitLayout, trapExitLayoutNumWords,
                                 &offsets, &code->stackMaps)) {
         return false;

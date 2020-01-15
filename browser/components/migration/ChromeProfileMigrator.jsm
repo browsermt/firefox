@@ -30,11 +30,6 @@ ChromeUtils.defineModuleGetter(
   "PlacesUtils",
   "resource://gre/modules/PlacesUtils.jsm"
 );
-ChromeUtils.defineModuleGetter(
-  this,
-  "OSCrypto",
-  "resource://gre/modules/OSCrypto.jsm"
-);
 
 /**
  * Converts an array of chrome bookmark objects into one our own places code
@@ -51,8 +46,13 @@ function convertBookmarks(items, errorAccumulator) {
     try {
       if (item.type == "url") {
         if (item.url.trim().startsWith("chrome:")) {
-          // Skip invalid chrome URIs. Creating an actual URI always reports
-          // messages to the console, so we avoid doing that.
+          // Skip invalid internal URIs. Creating an actual URI always reports
+          // messages to the console because Gecko has its own concept of how
+          // chrome:// URIs should be formed, so we avoid doing that.
+          continue;
+        }
+        if (item.url.trim().startsWith("edge:")) {
+          // Don't import internal Microsoft Edge URIs as they won't resolve within Firefox.
           continue;
         }
         itemsToInsert.push({ url: item.url, title: item.name });
@@ -77,6 +77,9 @@ function ChromeProfileMigrator() {
 }
 
 ChromeProfileMigrator.prototype = Object.create(MigratorPrototype);
+
+ChromeProfileMigrator.prototype._keychainServiceName = "Chrome Safe Storage";
+ChromeProfileMigrator.prototype._keychainAccountName = "Chrome";
 
 ChromeProfileMigrator.prototype._getChromeUserDataPathIfExists = async function() {
   if (this._chromeUserDataPath) {
@@ -104,9 +107,9 @@ ChromeProfileMigrator.prototype.getResources = async function Chrome_getResource
         GetHistoryResource(profileFolder),
         GetCookiesResource(profileFolder),
       ];
-      if (AppConstants.platform == "win") {
+      if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
         possibleResourcePromises.push(
-          GetWindowsPasswordsResource(profileFolder)
+          this._GetPasswordsResource(profileFolder)
         );
       }
       let possibleResources = await Promise.all(possibleResourcePromises);
@@ -185,7 +188,7 @@ ChromeProfileMigrator.prototype.getSourceProfiles = async function Chrome_getSou
   // Only list profiles from which any data can be imported
   this.__sourceProfiles = profileResources
     .filter(({ resources }) => {
-      return resources && resources.length > 0;
+      return resources && !!resources.length;
     }, this)
     .map(({ profile }) => profile);
   return this.__sourceProfiles;
@@ -220,10 +223,7 @@ async function GetBookmarksResource(aProfileFolder) {
         let roots = JSON.parse(bookmarkJSON).roots;
 
         // Importing bookmark bar items
-        if (
-          roots.bookmark_bar.children &&
-          roots.bookmark_bar.children.length > 0
-        ) {
+        if (roots.bookmark_bar.children && roots.bookmark_bar.children.length) {
           // Toolbar
           let parentGuid = PlacesUtils.bookmarks.toolbarGuid;
           let bookmarks = convertBookmarks(
@@ -232,7 +232,7 @@ async function GetBookmarksResource(aProfileFolder) {
           );
           if (!MigrationUtils.isStartupMigration) {
             parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              "Chrome",
+              "Chrome", // TODO: Bug 1216186
               parentGuid
             );
           }
@@ -243,13 +243,13 @@ async function GetBookmarksResource(aProfileFolder) {
         }
 
         // Importing bookmark menu items
-        if (roots.other.children && roots.other.children.length > 0) {
+        if (roots.other.children && roots.other.children.length) {
           // Bookmark menu
           let parentGuid = PlacesUtils.bookmarks.menuGuid;
           let bookmarks = convertBookmarks(roots.other.children, errorGatherer);
           if (!MigrationUtils.isStartupMigration) {
             parentGuid = await MigrationUtils.createImportedBookmarksFolder(
-              "Chrome",
+              "Chrome", // TODO: Bug 1216186
               parentGuid
             );
           }
@@ -329,7 +329,7 @@ async function GetHistoryResource(aProfileFolder) {
           }
         }
 
-        if (pageInfos.length > 0) {
+        if (pageInfos.length) {
           await MigrationUtils.insertVisitsWrapper(pageInfos);
         }
       })().then(
@@ -431,11 +431,19 @@ async function GetCookiesResource(aProfileFolder) {
   };
 }
 
-async function GetWindowsPasswordsResource(aProfileFolder) {
+ChromeProfileMigrator.prototype._GetPasswordsResource = async function(
+  aProfileFolder
+) {
   let loginPath = OS.Path.join(aProfileFolder, "Login Data");
   if (!(await OS.File.exists(loginPath))) {
     return null;
   }
+
+  let {
+    _keychainServiceName,
+    _keychainAccountName,
+    _keychainMockPassphrase = null,
+  } = this;
 
   return {
     type: MigrationUtils.resourceTypes.PASSWORDS,
@@ -456,7 +464,34 @@ async function GetWindowsPasswordsResource(aProfileFolder) {
       if (!rows) {
         return;
       }
-      let crypto = new OSCrypto();
+
+      let crypto;
+      try {
+        if (AppConstants.platform == "win") {
+          let { OSCrypto } = ChromeUtils.import(
+            "resource://gre/modules/OSCrypto.jsm"
+          );
+          crypto = new OSCrypto();
+        } else if (AppConstants.platform == "macosx") {
+          let { ChromeMacOSLoginCrypto } = ChromeUtils.import(
+            "resource:///modules/ChromeMacOSLoginCrypto.jsm"
+          );
+          crypto = new ChromeMacOSLoginCrypto(
+            _keychainServiceName,
+            _keychainAccountName,
+            _keychainMockPassphrase
+          );
+        } else {
+          aCallback(false);
+          return;
+        }
+      } catch (ex) {
+        // Handle the user canceling Keychain access or other OSCrypto errors.
+        Cu.reportError(ex);
+        aCallback(false);
+        return;
+      }
+
       let logins = [];
       let fallbackCreationDate = new Date();
       for (let row of rows) {
@@ -470,7 +505,7 @@ async function GetWindowsPasswordsResource(aProfileFolder) {
           }
           let loginInfo = {
             username: row.getResultByName("username_value"),
-            password: crypto.decryptData(
+            password: await crypto.decryptData(
               crypto.arrayToString(row.getResultByName("password_value")),
               null
             ),
@@ -520,17 +555,19 @@ async function GetWindowsPasswordsResource(aProfileFolder) {
         }
       }
       try {
-        if (logins.length > 0) {
+        if (logins.length) {
           await MigrationUtils.insertLoginsWrapper(logins);
         }
       } catch (e) {
         Cu.reportError(e);
       }
-      crypto.finalize();
+      if (crypto.finalize) {
+        crypto.finalize();
+      }
       aCallback(true);
     },
   };
-}
+};
 
 ChromeProfileMigrator.prototype.classDescription = "Chrome Profile Migrator";
 ChromeProfileMigrator.prototype.contractID =
@@ -544,6 +581,8 @@ ChromeProfileMigrator.prototype.classID = Components.ID(
  **/
 function ChromiumProfileMigrator() {
   this._chromeUserDataPathSuffix = "Chromium";
+  this._keychainServiceName = "Chromium Safe Storage";
+  this._keychainAccountName = "Chromium";
 }
 
 ChromiumProfileMigrator.prototype = Object.create(
@@ -582,31 +621,54 @@ if (AppConstants.platform == "win" || AppConstants.platform == "macosx") {
 }
 
 /**
- * Chrome Dev / Unstable and Beta. Only separate from `regular` chrome on Linux
+ * Chrome Dev - Linux only (not available in Mac and Windows)
  */
+function ChromeDevMigrator() {
+  this._chromeUserDataPathSuffix = "Chrome Dev";
+}
+ChromeDevMigrator.prototype = Object.create(ChromeProfileMigrator.prototype);
+ChromeDevMigrator.prototype.classDescription = "Chrome Dev Profile Migrator";
+ChromeDevMigrator.prototype.contractID =
+  "@mozilla.org/profile/migrator;1?app=browser&type=chrome-dev";
+ChromeDevMigrator.prototype.classID = Components.ID(
+  "{7370a02a-4886-42c3-a4ec-d48c726ec30a}"
+);
+
 if (AppConstants.platform != "win" && AppConstants.platform != "macosx") {
-  function ChromeDevMigrator() {
-    this._chromeUserDataPathSuffix = "Chrome Dev";
-  }
-  ChromeDevMigrator.prototype = Object.create(ChromeProfileMigrator.prototype);
-  ChromeDevMigrator.prototype.classDescription = "Chrome Dev Profile Migrator";
-  ChromeDevMigrator.prototype.contractID =
-    "@mozilla.org/profile/migrator;1?app=browser&type=chrome-dev";
-  ChromeDevMigrator.prototype.classID = Components.ID(
-    "{7370a02a-4886-42c3-a4ec-d48c726ec30a}"
-  );
+  EXPORTED_SYMBOLS.push("ChromeDevMigrator");
+}
 
-  function ChromeBetaMigrator() {
-    this._chromeUserDataPathSuffix = "Chrome Beta";
-  }
-  ChromeBetaMigrator.prototype = Object.create(ChromeProfileMigrator.prototype);
-  ChromeBetaMigrator.prototype.classDescription =
-    "Chrome Beta Profile Migrator";
-  ChromeBetaMigrator.prototype.contractID =
-    "@mozilla.org/profile/migrator;1?app=browser&type=chrome-beta";
-  ChromeBetaMigrator.prototype.classID = Components.ID(
-    "{47f75963-840b-4950-a1f0-d9c1864f8b8e}"
-  );
+function ChromeBetaMigrator() {
+  this._chromeUserDataPathSuffix = "Chrome Beta";
+}
+ChromeBetaMigrator.prototype = Object.create(ChromeProfileMigrator.prototype);
+ChromeBetaMigrator.prototype.classDescription = "Chrome Beta Profile Migrator";
+ChromeBetaMigrator.prototype.contractID =
+  "@mozilla.org/profile/migrator;1?app=browser&type=chrome-beta";
+ChromeBetaMigrator.prototype.classID = Components.ID(
+  "{47f75963-840b-4950-a1f0-d9c1864f8b8e}"
+);
 
-  EXPORTED_SYMBOLS.push("ChromeDevMigrator", "ChromeBetaMigrator");
+if (AppConstants.platform != "macosx") {
+  EXPORTED_SYMBOLS.push("ChromeBetaMigrator");
+}
+
+function ChromiumEdgeBetaMigrator() {
+  this._chromeUserDataPathSuffix = "Edge Beta";
+  this._keychainServiceName = "Microsoft Edge Safe Storage";
+  this._keychainAccountName = "Microsoft Edge";
+}
+ChromiumEdgeBetaMigrator.prototype = Object.create(
+  ChromeProfileMigrator.prototype
+);
+ChromiumEdgeBetaMigrator.prototype.classDescription =
+  "Chromium Edge Beta Profile Migrator";
+ChromiumEdgeBetaMigrator.prototype.contractID =
+  "@mozilla.org/profile/migrator;1?app=browser&type=chromium-edge-beta";
+ChromiumEdgeBetaMigrator.prototype.classID = Components.ID(
+  "{0fc3d48a-c1c3-4871-b58f-a8b47d1555fb}"
+);
+
+if (AppConstants.platform == "macosx" || AppConstants.platform == "win") {
+  EXPORTED_SYMBOLS.push("ChromiumEdgeBetaMigrator");
 }

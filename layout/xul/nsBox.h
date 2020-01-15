@@ -11,9 +11,13 @@
 #include "mozilla/StaticPtr.h"
 #include "nsIFrame.h"
 
+class nsITheme;
+
 class nsBox : public nsIFrame {
  public:
   friend class nsIFrame;
+
+  static void Shutdown();
 
   virtual nsSize GetXULPrefSize(nsBoxLayoutState& aBoxLayoutState) override;
   virtual nsSize GetXULMinSize(nsBoxLayoutState& aBoxLayoutState) override;
@@ -78,7 +82,8 @@ class nsBox : public nsIFrame {
   NS_IMETHOD DoXULLayout(nsBoxLayoutState& aBoxLayoutState);
   nsresult EndXULLayout(nsBoxLayoutState& aState);
 
-  enum eMouseThrough { unset, never, always };
+  static bool gGotTheme;
+  static mozilla::StaticRefPtr<nsITheme> gTheme;
 };
 
 #endif

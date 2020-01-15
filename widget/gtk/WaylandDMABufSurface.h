@@ -8,6 +8,7 @@
 #define WaylandDMABufSurface_h__
 
 #include <stdint.h>
+#include "GLContextTypes.h"
 #include "mozilla/widget/nsWaylandDisplay.h"
 
 typedef void* EGLImageKHR;
@@ -30,16 +31,21 @@ typedef enum {
   DMABUF_CREATE_WL_BUFFER = 1 << 2,
 } WaylandDMABufSurfaceFlags;
 
-// TODO - create as ref-counted?
 class WaylandDMABufSurface {
  public:
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(WaylandDMABufSurface)
+
+  static already_AddRefed<WaylandDMABufSurface> CreateDMABufSurface(
+      int aWidth, int aHeight, int aWaylandDMABufSurfaceFlags);
+  static already_AddRefed<WaylandDMABufSurface> CreateDMABufSurface(
+      const mozilla::layers::SurfaceDescriptor& aDesc);
+
   bool Create(int aWidth, int aHeight, int aWaylandDMABufSurfaceFlags);
   bool Create(const mozilla::layers::SurfaceDescriptor& aDesc);
 
   bool Serialize(mozilla::layers::SurfaceDescriptor& aOutDescriptor);
 
   bool Resize(int aWidth, int aHeight);
-  void Release();
   void Clear();
 
   bool CopyFrom(class WaylandDMABufSurface* aSourceSurface);
@@ -62,7 +68,7 @@ class WaylandDMABufSurface {
 
   bool IsEGLSupported(mozilla::gl::GLContext* aGLContext);
   bool CreateEGLImage(mozilla::gl::GLContext* aGLContext);
-  void ReleaseEGLImage(mozilla::gl::GLContext* aGLContext);
+  void ReleaseEGLImage();
   EGLImageKHR GetEGLImage() { return mEGLImage; };
 
   void SetWLBuffer(struct wl_buffer* aWLBuffer);
@@ -73,9 +79,12 @@ class WaylandDMABufSurface {
   void WLBufferSetAttached() { mWLBufferAttached = true; };
 
   WaylandDMABufSurface();
-  ~WaylandDMABufSurface();
 
  private:
+  ~WaylandDMABufSurface();
+
+  void ReleaseDMABufSurface();
+
   bool CreateWLBuffer();
 
   void FillFdData(struct gbm_import_fd_data& aData);
@@ -100,8 +109,10 @@ class WaylandDMABufSurface {
   uint32_t mOffsets[DMABUF_BUFFER_PLANES];
   uint32_t mGbmBufferFlags;
 
+  RefPtr<mozilla::gl::GLContext> mGL;
   EGLImageKHR mEGLImage;
   GLuint mGLFbo;
+  GLuint mTexture;
 
   bool mWLBufferAttached;
   bool mFastWLBufferCreation;

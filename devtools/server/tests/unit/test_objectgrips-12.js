@@ -11,39 +11,17 @@ const { PromiseTestUtils } = ChromeUtils.import(
 );
 
 var gDebuggee;
-var gClient;
 var gThreadFront;
 
-Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    gThreadFront = threadFront;
+    gDebuggee = debuggee;
+    await test_display_string();
+  })
+);
 
-registerCleanupFunction(() => {
-  Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-});
-
-function run_test() {
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-grips");
-  gDebuggee.eval(
-    function stopMe(arg1) {
-      debugger;
-    }.toString()
-  );
-
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-grips", function(
-      response,
-      targetFront,
-      threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_display_string();
-    });
-  });
-  do_test_pending();
-}
-
-function test_display_string() {
+async function test_display_string() {
   const testCases = [
     {
       input: "new Boolean(true)",
@@ -160,24 +138,30 @@ function test_display_string() {
 
   PromiseTestUtils.expectUncaughtRejection(/Error/);
 
-  gThreadFront.once("paused", function(packet) {
-    const args = packet.frame.arguments;
-
-    (function loop() {
-      const objClient = gThreadFront.pauseGrip(args.pop());
-      objClient.getDisplayString(function({ displayString }) {
-        Assert.equal(displayString, testCases.pop().output);
-        if (args.length) {
-          loop();
-        } else {
-          gThreadFront.resume().then(function() {
-            finishClient(gClient);
-          });
-        }
-      });
-    })();
-  });
-
   const inputs = testCases.map(({ input }) => input).join(",");
+
+  const packet = await executeOnNextTickAndWaitForPause(
+    () => evalCode(inputs),
+    gThreadFront
+  );
+
+  const args = packet.frame.arguments;
+
+  while (args.length) {
+    const objClient = gThreadFront.pauseGrip(args.pop());
+    const response = await objClient.getDisplayString();
+    Assert.equal(response.displayString, testCases.pop().output);
+  }
+
+  await gThreadFront.resume();
+}
+
+function evalCode(inputs) {
+  gDebuggee.eval(
+    function stopMe(arg1) {
+      debugger;
+    }.toString()
+  );
+
   gDebuggee.eval("stopMe(" + inputs + ")");
 }

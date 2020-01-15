@@ -25,7 +25,12 @@ use core::u32;
 #[cfg(feature = "enable-serde")]
 use serde::{Deserialize, Serialize};
 
-/// An opaque reference to an extended basic block in a function.
+/// An opaque reference to an [extended basic
+/// block](https://en.wikipedia.org/wiki/Extended_basic_block) in a
+/// [`Function`](super::function::Function).
+///
+/// You can get an `Ebb` using
+/// [`FunctionBuilder::create_ebb`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.create_ebb)
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ebb(u32);
 entity_impl!(Ebb, "ebb");
@@ -36,7 +41,7 @@ impl Ebb {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(Ebb(n))
+            Some(Self(n))
         } else {
             None
         }
@@ -44,6 +49,18 @@ impl Ebb {
 }
 
 /// An opaque reference to an SSA value.
+///
+/// You can get a constant `Value` from the following
+/// [`InstBuilder`](super::InstBuilder) instructions:
+///
+/// - [`iconst`](super::InstBuilder::iconst) for integer constants
+/// - [`f32const`](super::InstBuilder::f32const) for 32-bit float constants
+/// - [`f64const`](super::InstBuilder::f64const) for 64-bit float constants
+/// - [`bconst`](super::InstBuilder::bconst) for boolean constants
+/// - [`vconst`](super::InstBuilder::vconst) for vector constants
+/// - [`null`](super::InstBuilder::null) for null reference constants
+///
+/// Any `InstBuilder` instruction that has an output will also return a `Value`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Value(u32);
 entity_impl!(Value, "v");
@@ -55,19 +72,41 @@ impl Value {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX / 2 {
-            Some(Value(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// An opaque reference to an instruction in a function.
+/// An opaque reference to an instruction in a [`Function`](super::Function).
+///
+/// Most usage of `Inst` is internal. `Inst`ructions are returned by
+/// [`InstBuilder`](super::InstBuilder) instructions that do not return a
+/// [`Value`], such as control flow and trap instructions.
+///
+/// If you look around the API, you can find many inventive uses for `Inst`,
+/// such as [annotating specific instructions with a comment][inst_comment]
+/// or [performing reflection at compile time](super::DataFlowGraph::analyze_branch)
+/// on the type of instruction.
+///
+/// [inst_comment]: https://github.com/bjorn3/rustc_codegen_cranelift/blob/0f8814fd6da3d436a90549d4bb19b94034f2b19c/src/pretty_clif.rs
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Inst(u32);
 entity_impl!(Inst, "inst");
 
 /// An opaque reference to a stack slot.
+///
+/// Stack slots represent an address on the
+/// [call stack](https://en.wikipedia.org/wiki/Call_stack).
+///
+/// `StackSlot`s can be created with
+/// [`FunctionBuilder::create_stackslot`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.create_stack_slot).
+///
+/// `StackSlot`s are most often used with
+/// [`stack_addr`](super::InstBuilder::stack_addr),
+/// [`stack_load`](super::InstBuilder::stack_load), and
+/// [`stack_store`](super::InstBuilder::stack_store).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct StackSlot(u32);
@@ -79,7 +118,7 @@ impl StackSlot {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(StackSlot(n))
+            Some(Self(n))
         } else {
             None
         }
@@ -87,6 +126,22 @@ impl StackSlot {
 }
 
 /// An opaque reference to a global value.
+///
+/// A `GlobalValue` is a [`Value`](Value) that will be live across the entire
+/// function lifetime. It can be preloaded from other global values.
+///
+/// You can create a `GlobalValue` in the following ways:
+///
+/// - When compiling to WASM, you can use it to load values from a
+/// [`VmContext`](super::GlobalValueData::VMContext) using
+/// [`FuncEnvironment::make_global`](https://docs.rs/cranelift-wasm/*/cranelift_wasm/trait.FuncEnvironment.html#tymethod.make_global).
+/// - When compiling to native code, you can use it for objects in static memory with
+/// [`Module::declare_data_in_func`](https://docs.rs/cranelift-module/*/cranelift_module/struct.Module.html#method.declare_data_in_func).
+/// - For any compilation target, it can be registered with
+/// [`FunctionBuilder::create_global_value`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.create_global_value).
+///
+/// `GlobalValue`s can be retrieved with
+/// [`InstBuilder:global_value`](super::InstBuilder::global_value).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct GlobalValue(u32);
 entity_impl!(GlobalValue, "gv");
@@ -97,14 +152,18 @@ impl GlobalValue {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(GlobalValue(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// An opaque reference to a constant
+/// An opaque reference to a constant.
+///
+/// You can store [`ConstantData`](super::ConstantData) in a
+/// [`ConstantPool`](super::ConstantPool) for efficient storage and retrieval.
+/// See [`ConstantPool::insert`](super::ConstantPool::insert).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct Constant(u32);
 entity_impl!(Constant, "const");
@@ -115,14 +174,46 @@ impl Constant {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(Constant(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// An opaque reference to a jump table.
+/// An opaque reference to an immediate.
+///
+/// Some immediates (e.g. SIMD shuffle masks) are too large to store in the
+/// [`InstructionData`](super::instructions::InstructionData) struct and therefore must be
+/// tracked separately in [`DataFlowGraph::immediates`](super::dfg::DataFlowGraph). `Immediate`
+/// provides a way to reference values stored there.
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+pub struct Immediate(u32);
+entity_impl!(Immediate, "imm");
+
+impl Immediate {
+    /// Create an immediate reference from its number.
+    ///
+    /// This method is for use by the parser.
+    pub fn with_number(n: u32) -> Option<Self> {
+        if n < u32::MAX {
+            Some(Self(n))
+        } else {
+            None
+        }
+    }
+}
+
+/// An opaque reference to a [jump table](https://en.wikipedia.org/wiki/Branch_table).
+///
+/// `JumpTable`s are used for indirect branching and are specialized for dense,
+/// 0-based jump offsets. If you want a jump table which doesn't start at 0,
+/// or is not contiguous, consider using a [`Switch`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.Switch.html) instead.
+///
+/// `JumpTable` are used with [`br_table`](super::InstBuilder::br_table).
+///
+/// `JumpTable`s can be created with
+/// [`create_jump_table`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.create_jump_table).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "enable-serde", derive(Serialize, Deserialize))]
 pub struct JumpTable(u32);
@@ -134,14 +225,29 @@ impl JumpTable {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(JumpTable(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// A reference to an external function.
+/// An opaque reference to another [`Function`](super::Function).
+///
+/// `FuncRef`s are used for [direct](super::InstBuilder::call) function calls
+/// and by [`func_addr`](super::InstBuilder::func_addr) for use in
+/// [indirect](super::InstBuilder::call_indirect) function calls.
+///
+/// `FuncRef`s can be created with
+///
+/// - [`FunctionBuilder::import_function`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.import_function)
+/// for external functions
+/// - [`Module::declare_func_in_func`](https://docs.rs/cranelift-module/*/cranelift_module/struct.Module.html#method.declare_func_in_func)
+/// for functions declared elsewhere in the same native
+/// [`Module`](https://docs.rs/cranelift-module/*/cranelift_module/struct.Module.html)
+/// - [`FuncEnvironment::make_direct_func`](https://docs.rs/cranelift-wasm/*/cranelift_wasm/trait.FuncEnvironment.html#tymethod.make_direct_func)
+/// for functions declared in the same WebAssembly
+/// [`FuncEnvironment`](https://docs.rs/cranelift-wasm/*/cranelift_wasm/trait.FuncEnvironment.html#tymethod.make_direct_func)
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct FuncRef(u32);
 entity_impl!(FuncRef, "fn");
@@ -152,14 +258,25 @@ impl FuncRef {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(FuncRef(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// A reference to a function signature.
+/// An opaque reference to a function [`Signature`](super::Signature).
+///
+/// `SigRef`s are used to declare a function with
+/// [`FunctionBuiler::import_function`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.import_function)
+/// as well as to make an [indirect function call](super::InstBuilder::call_indirect).
+///
+/// `SigRef`s can be created with
+/// [`FunctionBuilder::import_signature`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.import_signature).
+///
+/// You can retrieve the [`Signature`](super::Signature) that was used to create a `SigRef` with
+/// [`FunctionBuilder::signature`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.signature) or
+/// [`func.dfg.signatures`](super::dfg::DataFlowGraph::signatures).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct SigRef(u32);
 entity_impl!(SigRef, "sig");
@@ -170,14 +287,19 @@ impl SigRef {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(SigRef(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// A reference to a heap.
+/// An opaque reference to a [heap](https://en.wikipedia.org/wiki/Memory_management#DYNAMIC).
+///
+/// Heaps are used to access dynamically allocated memory through
+/// [`heap_addr`](super::InstBuilder::heap_addr).
+///
+/// To create a heap, use [`FunctionBuilder::create_heap`](https://docs.rs/cranelift-frontend/*/cranelift_frontend/struct.FunctionBuilder.html#method.create_heap).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Heap(u32);
 entity_impl!(Heap, "heap");
@@ -188,14 +310,20 @@ impl Heap {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(Heap(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// A reference to a table.
+/// An opaque reference to a [WebAssembly
+/// table](https://developer.mozilla.org/en-US/docs/WebAssembly/Understanding_the_text_format#WebAssembly_tables).
+///
+/// `Table`s are used to store a list of function references.
+/// They can be created with [`FuncEnvironment::make_table`](https://docs.rs/cranelift-wasm/*/cranelift_wasm/trait.FuncEnvironment.html#tymethod.make_table).
+/// They can be used with
+/// [`FuncEnvironment::translate_call_indirect`](https://docs.rs/cranelift-wasm/*/cranelift_wasm/trait.FuncEnvironment.html#tymethod.translate_call_indirect).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Table(u32);
 entity_impl!(Table, "table");
@@ -206,14 +334,14 @@ impl Table {
     /// This method is for use by the parser.
     pub fn with_number(n: u32) -> Option<Self> {
         if n < u32::MAX {
-            Some(Table(n))
+            Some(Self(n))
         } else {
             None
         }
     }
 }
 
-/// A reference to any of the entities defined in this module that can appear in CLIF IR.
+/// An opaque reference to any of the entities defined in this module that can appear in CLIF IR.
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum AnyEntity {
     /// The whole function.
@@ -243,17 +371,17 @@ pub enum AnyEntity {
 impl fmt::Display for AnyEntity {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            AnyEntity::Function => write!(f, "function"),
-            AnyEntity::Ebb(r) => r.fmt(f),
-            AnyEntity::Inst(r) => r.fmt(f),
-            AnyEntity::Value(r) => r.fmt(f),
-            AnyEntity::StackSlot(r) => r.fmt(f),
-            AnyEntity::GlobalValue(r) => r.fmt(f),
-            AnyEntity::JumpTable(r) => r.fmt(f),
-            AnyEntity::FuncRef(r) => r.fmt(f),
-            AnyEntity::SigRef(r) => r.fmt(f),
-            AnyEntity::Heap(r) => r.fmt(f),
-            AnyEntity::Table(r) => r.fmt(f),
+            Self::Function => write!(f, "function"),
+            Self::Ebb(r) => r.fmt(f),
+            Self::Inst(r) => r.fmt(f),
+            Self::Value(r) => r.fmt(f),
+            Self::StackSlot(r) => r.fmt(f),
+            Self::GlobalValue(r) => r.fmt(f),
+            Self::JumpTable(r) => r.fmt(f),
+            Self::FuncRef(r) => r.fmt(f),
+            Self::SigRef(r) => r.fmt(f),
+            Self::Heap(r) => r.fmt(f),
+            Self::Table(r) => r.fmt(f),
         }
     }
 }
@@ -266,69 +394,69 @@ impl fmt::Debug for AnyEntity {
 
 impl From<Ebb> for AnyEntity {
     fn from(r: Ebb) -> Self {
-        AnyEntity::Ebb(r)
+        Self::Ebb(r)
     }
 }
 
 impl From<Inst> for AnyEntity {
     fn from(r: Inst) -> Self {
-        AnyEntity::Inst(r)
+        Self::Inst(r)
     }
 }
 
 impl From<Value> for AnyEntity {
     fn from(r: Value) -> Self {
-        AnyEntity::Value(r)
+        Self::Value(r)
     }
 }
 
 impl From<StackSlot> for AnyEntity {
     fn from(r: StackSlot) -> Self {
-        AnyEntity::StackSlot(r)
+        Self::StackSlot(r)
     }
 }
 
 impl From<GlobalValue> for AnyEntity {
     fn from(r: GlobalValue) -> Self {
-        AnyEntity::GlobalValue(r)
+        Self::GlobalValue(r)
     }
 }
 
 impl From<JumpTable> for AnyEntity {
     fn from(r: JumpTable) -> Self {
-        AnyEntity::JumpTable(r)
+        Self::JumpTable(r)
     }
 }
 
 impl From<FuncRef> for AnyEntity {
     fn from(r: FuncRef) -> Self {
-        AnyEntity::FuncRef(r)
+        Self::FuncRef(r)
     }
 }
 
 impl From<SigRef> for AnyEntity {
     fn from(r: SigRef) -> Self {
-        AnyEntity::SigRef(r)
+        Self::SigRef(r)
     }
 }
 
 impl From<Heap> for AnyEntity {
     fn from(r: Heap) -> Self {
-        AnyEntity::Heap(r)
+        Self::Heap(r)
     }
 }
 
 impl From<Table> for AnyEntity {
     fn from(r: Table) -> Self {
-        AnyEntity::Table(r)
+        Self::Table(r)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
     use core::u32;
-    use std::string::ToString;
 
     #[test]
     fn value_with_number() {

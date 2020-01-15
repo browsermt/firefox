@@ -30,11 +30,6 @@ import type { Source, OriginalSourceData, GeneratedSourceData } from "../types";
  * @static
  */
 function createStore(client: any, initialState: any = {}, sourceMapsMock: any) {
-  client = {
-    hasWasmSupport: () => true,
-    ...client,
-  };
-
   const store = configureStore({
     log: false,
     history: getHistory(),
@@ -76,12 +71,12 @@ function commonLog(msg: string, data: any = {}) {
   console.log(`[INFO] ${msg} ${JSON.stringify(data)}`);
 }
 
-function makeFrame({ id, sourceId }: Object, opts: Object = {}) {
+function makeFrame({ id, sourceId, thread }: Object, opts: Object = {}) {
   return {
     id,
     scope: { bindings: { variables: {}, arguments: [] } },
     location: { sourceId, line: 4 },
-    thread: "FakeThread",
+    thread: thread || "FakeThread",
     ...opts,
   };
 }
@@ -102,6 +97,7 @@ function createSourceObject(
     introductionUrl: props.introductionUrl || null,
     introductionType: props.introductionType || null,
     isExtension: false,
+    isOriginal: filename.includes("originalSource"),
   }: any);
 }
 
@@ -147,6 +143,7 @@ function createMakeSource(): (
         isBlackBoxed: !!props.isBlackBoxed,
         extensionName: null,
       },
+      isServiceWorker: false,
     };
   };
 }
@@ -220,7 +217,8 @@ function waitForState(store: any, predicate: any): Promise<void> {
       ret = predicate(store.getState());
       if (ret) {
         unsubscribe();
-        resolve(ret);
+        // NOTE: memoizableAction adds an additional tick for validating context
+        setTimeout(() => resolve(ret));
       }
     });
   });

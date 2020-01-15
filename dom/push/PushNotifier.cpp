@@ -13,7 +13,7 @@
 #include "nsNetUtil.h"
 #include "nsXPCOM.h"
 #include "mozilla/dom/ServiceWorkerManager.h"
-
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/Services.h"
 #include "mozilla/Unused.h"
 
@@ -100,7 +100,9 @@ nsresult PushNotifier::Dispatch(PushDispatcher& aDispatcher) {
       // Broadcast a message to notify observers and service workers.
       for (uint32_t i = 0; i < contentActors.Length(); ++i) {
         // We need to filter based on process type, only "web" AKA the default
-        // remote type is acceptable.
+        // remote type is acceptable. This should not run when Fission is
+        // enabled, and we specifically don't want this for
+        // LARGE_ALLOCATION_REMOTE_TYPE, so don't use IsWebRemoteType().
         if (!contentActors[i]->GetRemoteType().EqualsLiteral(
                 DEFAULT_REMOTE_TYPE)) {
           continue;
@@ -254,7 +256,7 @@ bool PushDispatcher::ShouldNotifyWorkers() {
   // System subscriptions use observer notifications instead of service worker
   // events. The `testing.notifyWorkers` pref disables worker events for
   // non-system subscriptions.
-  if (nsContentUtils::IsSystemPrincipal(mPrincipal) ||
+  if (mPrincipal->IsSystemPrincipal() ||
       !Preferences::GetBool("dom.push.testing.notifyWorkers", true)) {
     return false;
   }
@@ -427,7 +429,7 @@ nsresult PushErrorDispatcher::NotifyObservers() { return NS_OK; }
 
 nsresult PushErrorDispatcher::NotifyWorkers() {
   if (!ShouldNotifyWorkers() &&
-      (!mPrincipal || nsContentUtils::IsSystemPrincipal(mPrincipal))) {
+      (!mPrincipal || mPrincipal->IsSystemPrincipal())) {
     // For system subscriptions, log the error directly to the browser console.
     return nsContentUtils::ReportToConsoleNonLocalized(
         mMessage, mFlags, NS_LITERAL_CSTRING("Push"), nullptr, /* aDocument */

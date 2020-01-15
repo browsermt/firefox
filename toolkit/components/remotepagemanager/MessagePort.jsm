@@ -41,17 +41,33 @@ let RPMAccessManager = {
       getFormatURLPref: ["app.support.baseURL"],
       getBoolPref: [
         "security.certerrors.mitm.priming.enabled",
+        "security.certerrors.permanentOverride",
         "security.enterprise_roots.auto-enabled",
         "security.certerror.hideAddException",
         "security.ssl.errorReporting.automatic",
         "security.ssl.errorReporting.enabled",
       ],
+      setBoolPref: ["security.ssl.errorReporting.automatic"],
       getIntPref: [
         "services.settings.clock_skew_seconds",
         "services.settings.last_update_seconds",
       ],
       getAppBuildID: ["yes"],
+      isWindowPrivate: ["yes"],
       recordTelemetryEvent: ["yes"],
+      addToHistogram: ["yes"],
+    },
+    "about:neterror": {
+      getFormatURLPref: ["app.support.baseURL"],
+      getBoolPref: [
+        "security.certerror.hideAddException",
+        "security.ssl.errorReporting.automatic",
+        "security.ssl.errorReporting.enabled",
+        "security.tls.version.enable-deprecated",
+        "security.certerrors.tls.version.show-override",
+      ],
+      setBoolPref: ["security.ssl.errorReporting.automatic"],
+      addToHistogram: ["yes"],
     },
     "about:privatebrowsing": {
       // "sendAsyncMessage": handled within AboutPrivateBrowsingHandler.jsm
@@ -63,6 +79,11 @@ let RPMAccessManager = {
         "browser.contentblocking.report.lockwise.enabled",
         "browser.contentblocking.report.monitor.enabled",
         "privacy.socialtracking.block_cookies.enabled",
+        "browser.contentblocking.report.proxy.enabled",
+        "privacy.trackingprotection.cryptomining.enabled",
+        "privacy.trackingprotection.fingerprinting.enabled",
+        "privacy.trackingprotection.enabled",
+        "privacy.trackingprotection.socialtracking.enabled",
       ],
       getStringPref: [
         "browser.contentblocking.category",
@@ -70,7 +91,9 @@ let RPMAccessManager = {
         "browser.contentblocking.report.monitor.url",
         "browser.contentblocking.report.monitor.sign_in_url",
         "browser.contentblocking.report.manage_devices.url",
+        "browser.contentblocking.report.proxy_extension.url",
       ],
+      getIntPref: ["network.cookie.cookieBehavior"],
       getFormatURLPref: [
         "browser.contentblocking.report.monitor.how_it_works.url",
         "browser.contentblocking.report.lockwise.how_it_works.url",
@@ -88,26 +111,45 @@ let RPMAccessManager = {
     },
   },
 
-  checkAllowAccess(aPrincipal, aFeature, aValue) {
+  checkAllowAccess(aDocument, aFeature, aValue) {
+    let principal = aDocument.nodePrincipal;
     // if there is no content principal; deny access
-    if (!aPrincipal || !aPrincipal.URI) {
+    if (!principal) {
       return false;
     }
 
-    let uri = aPrincipal.URI.asciiSpec;
-    if (uri.startsWith("about:certerror")) {
-      uri = "about:certerror";
+    let uri;
+    if (principal.isNullPrincipal || !principal.URI) {
+      // null principals have a null-principal URI, but for the sake of RPM we
+      // want to access the "real" document URI directly, e.g. if the about:
+      // page is sandboxed.
+      uri = aDocument.documentURIObject;
+    } else {
+      uri = principal.URI;
+    }
+
+    // Cut query params
+    let spec = uri.prePath + uri.filePath;
+
+    if (!uri.schemeIs("about")) {
+      Cu.reportError(
+        "RPMAccessManager does not allow access to Feature: " +
+          aFeature +
+          " for: " +
+          spec
+      );
+      return false;
     }
 
     // check if there is an entry for that requestying URI in the accessMap;
     // if not, deny access.
-    let accessMapForURI = this.accessMap[uri];
+    let accessMapForURI = this.accessMap[spec];
     if (!accessMapForURI) {
       Cu.reportError(
         "RPMAccessManager does not allow access to Feature: " +
           aFeature +
           " for: " +
-          uri
+          spec
       );
       return false;
     }
@@ -120,7 +162,7 @@ let RPMAccessManager = {
         "RPMAccessManager does not allow access to Feature: " +
           aFeature +
           " for: " +
-          uri
+          spec
       );
       return false;
     }
@@ -136,7 +178,7 @@ let RPMAccessManager = {
       "RPMAccessManager does not allow access to Feature: " +
         aFeature +
         " for: " +
-        uri
+        spec
     );
     return false;
   },
@@ -196,8 +238,8 @@ class MessageListener {
  * nsIMessageListenerManager
  */
 class MessagePort {
-  constructor(messageManager, portID) {
-    this.messageManager = messageManager;
+  constructor(messageManagerOrActor, portID) {
+    this.messageManager = messageManagerOrActor;
     this.portID = portID;
     this.destroyed = false;
     this.listener = new MessageListener();
@@ -214,6 +256,10 @@ class MessagePort {
   }
 
   addMessageListeners() {
+    if (!(this.messageManager instanceof Ci.nsIMessageSender)) {
+      return;
+    }
+
     this.messageManager.addMessageListener("RemotePage:Message", this.message);
     this.messageManager.addMessageListener(
       "RemotePage:Request",
@@ -226,6 +272,10 @@ class MessagePort {
   }
 
   removeMessageListeners() {
+    if (!(this.messageManager instanceof Ci.nsIMessageSender)) {
+      return;
+    }
+
     this.messageManager.removeMessageListener(
       "RemotePage:Message",
       this.message
@@ -358,11 +408,20 @@ class MessagePort {
       throw new Error("Message port has been destroyed");
     }
 
-    this.messageManager.sendAsyncMessage("RemotePage:Message", {
-      portID: this.portID,
-      name,
-      data,
-    });
+    let id;
+    if (this.window) {
+      id = this.window.docShell.browsingContext.id;
+    }
+    if (this.messageManager instanceof Ci.nsIMessageSender) {
+      this.messageManager.sendAsyncMessage("RemotePage:Message", {
+        portID: this.portID,
+        browsingContextID: id,
+        name,
+        data,
+      });
+    } else {
+      this.messageManager.sendAsyncMessage(name, data);
+    }
   }
 
   // Called to destroy this port
@@ -392,8 +451,8 @@ class MessagePort {
   }
 
   getAppBuildID() {
-    let principal = this.window.document.nodePrincipal;
-    if (!RPMAccessManager.checkAllowAccess(principal, "getAppBuildID", "yes")) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "getAppBuildID", "yes")) {
       throw new Error(
         "RPMAccessManager does not allow access to getAppBuildID"
       );
@@ -402,8 +461,8 @@ class MessagePort {
   }
 
   getIntPref(aPref, defaultValue) {
-    let principal = this.window.document.nodePrincipal;
-    if (!RPMAccessManager.checkAllowAccess(principal, "getIntPref", aPref)) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "getIntPref", aPref)) {
       throw new Error("RPMAccessManager does not allow access to getIntPref");
     }
     // Only call with a default value if it's defined, to be able to throw
@@ -415,8 +474,8 @@ class MessagePort {
   }
 
   getStringPref(aPref) {
-    let principal = this.window.document.nodePrincipal;
-    if (!RPMAccessManager.checkAllowAccess(principal, "getStringPref", aPref)) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "getStringPref", aPref)) {
       throw new Error(
         "RPMAccessManager does not allow access to getStringPref"
       );
@@ -425,8 +484,8 @@ class MessagePort {
   }
 
   getBoolPref(aPref, defaultValue) {
-    let principal = this.window.document.nodePrincipal;
-    if (!RPMAccessManager.checkAllowAccess(principal, "getBoolPref", aPref)) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "getBoolPref", aPref)) {
       throw new Error("RPMAccessManager does not allow access to getBoolPref");
     }
     // Only call with a default value if it's defined, to be able to throw
@@ -442,13 +501,9 @@ class MessagePort {
   }
 
   getFormatURLPref(aFormatURL) {
-    let principal = this.window.document.nodePrincipal;
+    let doc = this.window.document;
     if (
-      !RPMAccessManager.checkAllowAccess(
-        principal,
-        "getFormatURLPref",
-        aFormatURL
-      )
+      !RPMAccessManager.checkAllowAccess(doc, "getFormatURLPref", aFormatURL)
     ) {
       throw new Error(
         "RPMAccessManager does not allow access to getFormatURLPref"
@@ -458,10 +513,8 @@ class MessagePort {
   }
 
   isWindowPrivate() {
-    let principal = this.window.document.nodePrincipal;
-    if (
-      !RPMAccessManager.checkAllowAccess(principal, "isWindowPrivate", "yes")
-    ) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "isWindowPrivate", "yes")) {
       throw new Error(
         "RPMAccessManager does not allow access to isWindowPrivate"
       );
@@ -470,10 +523,8 @@ class MessagePort {
   }
 
   getUpdateChannel() {
-    let principal = this.window.document.nodePrincipal;
-    if (
-      !RPMAccessManager.checkAllowAccess(principal, "getUpdateChannel", "yes")
-    ) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "getUpdateChannel", "yes")) {
       throw new Error(
         "RPMAccessManager does not allow access to getUpdateChannel"
       );
@@ -482,13 +533,9 @@ class MessagePort {
   }
 
   getFxAccountsEndpoint(aEntrypoint) {
-    let principal = this.window.document.nodePrincipal;
+    let doc = this.window.document;
     if (
-      !RPMAccessManager.checkAllowAccess(
-        principal,
-        "getFxAccountsEndpoint",
-        "yes"
-      )
+      !RPMAccessManager.checkAllowAccess(doc, "getFxAccountsEndpoint", "yes")
     ) {
       throw new Error(
         "RPMAccessManager does not allow access to getFxAccountsEndpoint"
@@ -499,13 +546,9 @@ class MessagePort {
   }
 
   recordTelemetryEvent(category, event, object, value, extra) {
-    let principal = this.window.document.nodePrincipal;
+    let doc = this.window.document;
     if (
-      !RPMAccessManager.checkAllowAccess(
-        principal,
-        "recordTelemetryEvent",
-        "yes"
-      )
+      !RPMAccessManager.checkAllowAccess(doc, "recordTelemetryEvent", "yes")
     ) {
       throw new Error(
         "RPMAccessManager does not allow access to recordTelemetryEvent"
@@ -518,5 +561,16 @@ class MessagePort {
       value,
       extra
     );
+  }
+
+  addToHistogram(histID, bin) {
+    let doc = this.window.document;
+    if (!RPMAccessManager.checkAllowAccess(doc, "addToHistogram", "yes")) {
+      throw new Error(
+        "RPMAccessManager does not allow access to addToHistogram"
+      );
+    }
+
+    Services.telemetry.getHistogramById(histID).add(bin);
   }
 }

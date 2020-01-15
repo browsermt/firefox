@@ -7,9 +7,7 @@
 #include "mozilla/Mutex.h"
 #include "mozilla/Attributes.h"
 #include "nsStreamUtils.h"
-#include "nsAutoPtr.h"
 #include "nsCOMPtr.h"
-#include "nsIPipe.h"
 #include "nsICloneableInputStream.h"
 #include "nsIEventTarget.h"
 #include "nsICancelableRunnable.h"
@@ -704,7 +702,7 @@ bool NS_InputStreamIsBuffered(nsIInputStream* aStream) {
   bool result = false;
   uint32_t n;
   nsresult rv = aStream->ReadSegments(TestInputStream, &result, 1, &n);
-  return result || NS_SUCCEEDED(rv);
+  return result || rv != NS_ERROR_NOT_IMPLEMENTED;
 }
 
 static nsresult TestOutputStream(nsIOutputStream* aOutStr, void* aClosure,

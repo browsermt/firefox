@@ -4,9 +4,10 @@
 
 package org.mozilla.geckoview.test
 
-import android.support.test.filters.MediumTest
-import android.support.test.runner.AndroidJUnit4
+import androidx.test.filters.MediumTest
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.hamcrest.Matchers
+import org.hamcrest.Matchers.equalTo
 import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,14 +15,18 @@ import org.mozilla.geckoview.ContentBlocking
 import org.mozilla.geckoview.ContentBlockingController
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.test.rule.GeckoSessionTestRule
+import org.mozilla.geckoview.test.rule.GeckoSessionTestRule.AssertCalled
 import org.mozilla.geckoview.test.util.Callbacks
+import org.junit.Assume.assumeThat
 
 @RunWith(AndroidJUnit4::class)
 @MediumTest
 class ContentBlockingControllerTest : BaseSessionTest() {
     @GeckoSessionTestRule.Setting(key = GeckoSessionTestRule.Setting.Key.USE_TRACKING_PROTECTION, value = "true")
+// disable test on debug for frequently failing #Bug 1580223
     @Test
     fun trackingProtectionException() {
+        assumeThat(sessionRule.env.isDebugBuild, equalTo(false))
         val category = ContentBlocking.AntiTracking.TEST
         sessionRule.runtime.settings.contentBlocking.setAntiTracking(category)
         sessionRule.session.loadTestPath(TRACKERS_PATH)
@@ -84,6 +89,9 @@ class ContentBlockingControllerTest : BaseSessionTest() {
 
     @Test
     fun importExportExceptions() {
+        // May provide useful info for 1580375.
+        sessionRule.setPrefsUntilTestEnd(mapOf("browser.safebrowsing.debug" to true))
+
         val category = ContentBlocking.AntiTracking.TEST
         sessionRule.runtime.settings.contentBlocking.setAntiTracking(category)
         sessionRule.session.loadTestPath(TRACKERS_PATH)
@@ -137,5 +145,37 @@ class ContentBlockingControllerTest : BaseSessionTest() {
 
         // Wipe so as not to break other tests.
         sessionRule.runtime.contentBlockingController.clearExceptionList()
+    }
+
+    @Test
+    fun getLog() {
+        val category = ContentBlocking.AntiTracking.TEST
+        sessionRule.runtime.settings.contentBlocking.setAntiTracking(category)
+        sessionRule.session.settings.useTrackingProtection = true
+        sessionRule.session.loadTestPath(TRACKERS_PATH)
+        
+        sessionRule.waitUntilCalled(object : Callbacks.ContentBlockingDelegate {
+            @AssertCalled(count = 1)
+            override fun onContentBlocked(session: GeckoSession,
+                                          event: ContentBlocking.BlockEvent) {
+                // A workaround for waiting until the log is actually recorded
+                // in the content process.
+                // TODO: This should be removed after Bug 1599046.
+                Thread.sleep(500);
+            }
+        })
+
+        sessionRule.waitForResult(sessionRule.runtime.contentBlockingController.getLog(sessionRule.session).accept {
+            assertThat("Log must not be null", it, Matchers.notNullValue())
+            assertThat("Log must have at least one entry", it?.size, Matchers.not(0))
+            it?.forEach {
+                it.blockingData.forEach {
+                    assertThat("Category must match", it.category,
+                            Matchers.equalTo(ContentBlockingController.Event.BLOCKED_TRACKING_CONTENT))
+                    assertThat("Blocked must be true", it.blocked, Matchers.equalTo(true))
+                    assertThat("Count must be at least 1", it.count, Matchers.not(0))
+                }
+            }
+        })
     }
 }

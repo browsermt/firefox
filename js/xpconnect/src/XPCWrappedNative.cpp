@@ -10,6 +10,7 @@
 #include "mozilla/jsipc/CrossProcessObjectWrappers.h"
 #include "nsWrapperCacheInlines.h"
 #include "XPCLog.h"
+#include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject
 #include "js/MemoryFunctions.h"
 #include "js/Printf.h"
 #include "jsfriendapi.h"
@@ -1149,10 +1150,6 @@ bool XPCWrappedNative::CallMethod(XPCCallContext& ccx,
   return helper.get().Call();
 }
 
-#if (__GNUC__ && __linux__ && __PPC64__ && defined(_LITTLE_ENDIAN))
-// Work around a compiler bug on ppc64le (bug 1512162).
-__attribute__ ((noinline,noclone))
-#endif
 bool CallMethodHelper::Call() {
   mCallContext.SetRetVal(JS::UndefinedValue());
 
@@ -1235,8 +1232,8 @@ bool CallMethodHelper::GetArraySizeFromParam(const nsXPTType& type,
 
     bool isArray;
     bool ok = false;
-    if (JS_IsArrayObject(mCallContext, maybeArray, &isArray) && isArray) {
-      ok = JS_GetArrayLength(mCallContext, arrayOrNull, lengthp);
+    if (JS::IsArrayObject(mCallContext, maybeArray, &isArray) && isArray) {
+      ok = JS::GetArrayLength(mCallContext, arrayOrNull, lengthp);
     } else if (JS_IsTypedArrayObject(&maybeArray.toObject())) {
       *lengthp = JS_GetTypedArrayLength(&maybeArray.toObject());
       ok = true;
@@ -1311,10 +1308,6 @@ bool CallMethodHelper::GetOutParamSource(uint8_t paramIndex,
   return true;
 }
 
-#if (__GNUC__ && __linux__ && __PPC64__ && defined(_LITTLE_ENDIAN))
-// Work around a compiler bug on ppc64le (bug 1512162).
-__attribute__ ((noinline,noclone))
-#endif
 bool CallMethodHelper::GatherAndConvertResults() {
   // now we iterate through the native params to gather and convert results
   uint8_t paramCount = mMethodInfo->GetParamCount();

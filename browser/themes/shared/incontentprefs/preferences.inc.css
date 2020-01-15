@@ -7,6 +7,7 @@
 
 :root {
   --in-content-warning-container: var(--grey-20);
+  text-rendering: optimizeLegibility;
 }
 
 @supports -moz-bool-pref("browser.in-content.dark-mode") {
@@ -17,8 +18,33 @@
 }
 }
 
+:root,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+#preferences-body {
+  vertical-align: top; /* See bug 1606130 */
+  display: -moz-box;
+  -moz-box-orient: vertical;
+}
+
 * {
   -moz-user-select: text;
+}
+
+/*
+  The stack has some very tall content but it shouldn't be taller than the
+  viewport (and we know the tall content will still be accessible via scrollbars
+  regardless if the stack has a shorter height). So we use min-height: 0 to allow
+  the stack to be smaller than its content height so it can fit the viewport size.
+*/
+#preferences-stack {
+  min-height: 0;
 }
 
 .main-content {
@@ -54,7 +80,7 @@ html|h2 {
 }
 
 description.indent,
-.indent > description {
+.indent:not(#browserPrivateEngineSelection) > description {
   color: var(--in-content-deemphasized-text);
 }
 
@@ -98,8 +124,7 @@ button > hbox > label {
 }
 
 .tail-with-learn-more {
-  margin-inline-start: 0px;
-  margin-inline-end: 10px;
+  margin-inline: 0 10px;
 }
 
 /* Add a bit of space to the end of descriptions to
@@ -109,7 +134,7 @@ button > hbox > label {
 }
 
 .learnMore {
-  margin-inline-start: 0px;
+  margin-inline-start: 0;
   font-weight: normal;
   white-space: nowrap;
 }
@@ -138,10 +163,8 @@ button > hbox > label {
 }
 
 [data-subcategory] {
-  margin-left: -4px;
-  margin-right: -4px;
-  padding-left: 4px;
-  padding-right: 4px;
+  margin-inline: -4px;
+  padding-inline: 4px;
 }
 
 .ac-site-icon {
@@ -218,8 +241,7 @@ button > hbox > label {
 
 .info-panel,
 .extension-controlled {
-  margin-top: 18px !important;
-  margin-bottom: 18px !important;
+  margin-block: 18px !important;
   background: var(--in-content-warning-container);
   border-radius: 5px;
   padding-inline-end: 10px;
@@ -275,16 +297,13 @@ button > hbox > label {
   margin: 0;
 }
 
-#activeLanguages {
-  height: 16em;
-}
-
 #activeLanguages > richlistitem {
   padding: 0.3em;
 }
 
 #downloadFolder {
   -moz-box-flex: 1;
+  margin-block: 4px;
   margin-inline-start: 0;
   padding-inline-start: 30px;
   background-repeat: no-repeat;
@@ -297,13 +316,11 @@ button > hbox > label {
 }
 
 #updateBox {
-  margin-top: 4px;
-  margin-bottom: 32px;
+  margin-block: 4px 32px;
 }
 
 #updateDeck > hbox > button {
-  margin-top: 0;
-  margin-bottom: 0;
+  margin-block: 0;
   margin-inline-end: 0;
 }
 
@@ -334,20 +351,17 @@ button > hbox > label {
 }
 
 #handlersView > richlistitem > hbox > hbox > menulist {
-  margin-top: 0;
-  margin-bottom: 0;
+  margin-block: 0;
   margin-inline-end: 0;
   min-height: 0;
 }
 
 .typeIcon {
-  margin-inline-start: 10px !important;
-  margin-inline-end: 9px !important;
+  margin-inline: 10px 9px !important;
 }
 
 .actionIcon {
-  margin-inline-start: 11px !important;
-  margin-inline-end: 8px !important;
+  margin-inline: 11px 8px !important;
 }
 
 .actionsMenu {
@@ -363,20 +377,32 @@ button > hbox > label {
 }
 
 /* Home Pane */
+
 #homepageGroup menulist,
-#homepageGroup textbox {
+#homepageGroup html|input {
   margin: 5px 0;
 }
+
+#homepageGroup html|input {
+  text-align: match-parent;
+}
+
+#homepageGroup:-moz-locale-dir(rtl) html|input {
+  unicode-bidi: plaintext;
+}
+
 #homepageAndNewWindowsOption {
   margin-top: 20px;
 }
-#homepageGroup:-moz-locale-dir(rtl) input {
-  unicode-bidi: plaintext;
+
+#homepageGroup:-moz-locale-dir(rtl) panel[type="autocomplete-richlistbox"] {
   direction: rtl;
 }
+
 .homepage-button:first-of-type {
   margin-inline-start: 0;
 }
+
 .homepage-button:last-of-type {
   margin-inline-end: 0;
 }
@@ -415,25 +441,13 @@ button > hbox > label {
 
 /* Privacy Pane */
 
-.doNotTrackLearnMore {
-  margin-inline-start: calc(1em + 30px);
-  margin-bottom: 1em;
-  font-weight: normal;
-}
-
-.doNotTrackLearnMore > label {
-  font-size: 1em !important;
-  margin-left: 0;
-}
-
 #locationBarGroup > .text-link {
   margin-top: 6px;
   line-height: 30px;
 }
 
 #allowSmartSize {
-  margin-top: 0;
-  margin-bottom: 4px;
+  margin-block: 0 4px;
 }
 
 #doNotTrackLearnMoreBox {
@@ -466,7 +480,8 @@ button > hbox > label {
 #historyPane:not([selectedIndex="2"]) > #historyCustomPane,
 #weavePrefsDeck:not([selectedIndex="1"]) > #hasFxaAccount,
 #fxaLoginStatus:not([selectedIndex="1"]) > #fxaLoginUnverified,
-#fxaLoginStatus:not([selectedIndex="2"]) > #fxaLoginRejected {
+#fxaLoginStatus:not([selectedIndex="2"]) > #fxaLoginRejected,
+#syncStatus:not([selectedIndex="1"]) > #syncConfigured {
   visibility: collapse;
 }
 
@@ -538,6 +553,8 @@ button > hbox > label {
   background: none !important;
   min-width: 0;
   min-height: auto;
+  padding-inline: 0;
+  margin-inline: 0 8px;
 }
 
 .dialogFrame {
@@ -592,39 +609,29 @@ button > hbox > label {
   border-color: #ff9500;
 }
 
-#useFirefoxSync  {
+#useFirefoxSync {
   font-size: 90%;
   margin-inline-end: 8px !important;
 }
 
 #fxaNoLoginStatus {
-  margin-top: 46px;
-  margin-bottom: 64px;
+  margin-block: 46px 64px;
 }
 
 #fxaSyncComputerName {
   -moz-box-flex: 1;
+  margin-block: 4px;
   margin-inline-start: 0;
-  margin-bottom: 4px;
 }
 
 #fxaChangeDeviceName {
-  margin-top: 4px;
-  margin-bottom: 4px;
-}
-
-#tosPP-small {
-  margin-top: 32px;
-}
-
-#tosPP-small-ToS {
-  margin-bottom: 14px;
+  margin-block: 4px;
+  margin-inline-end: 0;
 }
 
 #noFxaCaption {
   line-height: 30px;
-  margin-top: 0;
-  margin-bottom: 4px;
+  margin-block: 0 4px;
 }
 
 #noFxaSignIn {
@@ -664,12 +671,94 @@ button > hbox > label {
 
 .fxaLoginRejectedWarning {
   list-style-image: url(chrome://browser/skin/warning.svg);
-  margin-inline-start: 4px;
-  margin-inline-end: 8px;
+  margin-inline: 4px 8px;
 }
 
-#fxaSyncEngines > vbox > checkbox {
-  max-width: 224px;
+#syncStatus {
+  margin-top: 32px;
+}
+
+.sync-group {
+  border-radius: 4px;
+  padding: 16px;
+  margin-block: 16px;
+  background-color: var(--in-content-box-info-background);
+  border: 1px solid var(--in-content-border-color);
+}
+
+.sync-configured {
+  display: block;
+}
+
+.sync-engines-list > div,
+.sync-engines-list + hbox {
+  margin-top: 0;
+  padding-top: 16px;
+  max-width: 300px;
+  height: auto;
+}
+
+dialog > .sync-engines-list > div,
+dialog > .sync-engines-list + hbox {
+  padding-top: 0;
+}
+
+.sync-engines-list checkbox .checkbox-icon,
+.sync-engine-image {
+  margin-inline: 4px 8px;
+  min-width: 16px;
+  min-height: 16px;
+  -moz-context-properties: fill;
+  fill: currentColor;
+}
+
+.sync-engines-list checkbox {
+  min-width: max-content;
+  max-width: calc(50vw - 10px);
+}
+
+.sync-engines-list {
+  column-count: 2;
+  column-fill: balance;
+}
+
+.sync-engines-list > div:not([hidden]) {
+  display: flex;
+}
+
+.sync-engine-bookmarks .checkbox-icon,
+.sync-engine-bookmarks.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/bookmark.svg");
+}
+
+.sync-engine-history .checkbox-icon,
+.sync-engine-history.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/history.svg");
+}
+
+.sync-engine-tabs .checkbox-icon,
+.sync-engine-tabs.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/tab.svg");
+}
+
+.sync-engine-passwords .checkbox-icon,
+.sync-engine-passwords.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/login.svg");
+}
+
+.sync-engine-addons .checkbox-icon,
+.sync-engine-addons.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/extensions.svg");
+}
+
+.sync-engine-prefs .checkbox-icon,
+.sync-engine-prefs.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/preferences.svg");
+}
+
+.sync-engine-addresses .checkbox-icon,
+.sync-engine-addresses.sync-engine-image {
+  list-style-image: url("chrome://browser/skin/preferences/in-content/formfill.svg");
 }
 
 .fxaMobilePromo {
@@ -678,8 +767,7 @@ button > hbox > label {
 
 .androidIcon,
 .iOSIcon {
-  margin-inline-start: 2px;
-  margin-inline-end: 4px;
+  margin-inline: 2px 4px;
   width: 20px;
   height: 20px;
   vertical-align: text-bottom;
@@ -692,9 +780,8 @@ button > hbox > label {
 .update-throbber {
   width: 16px;
   min-height: 16px;
+  margin-block: 7px;
   margin-inline-end: 8px;
-  margin-top: 7px;
-  margin-bottom: 7px;
 }
 
 html|img.update-throbber {
@@ -720,35 +807,33 @@ image.update-throbber {
   list-style-image: url("chrome://browser/skin/preferences/in-content/face-sad.svg");
   width: 20px;
   height: 20px;
+  margin-block: 5px;
   margin-inline-end: 8px;
-  margin-top: 5px;
-  margin-bottom: 5px;
 }
 
 .face-smile {
   list-style-image: url("chrome://browser/skin/preferences/in-content/face-smile.svg");
   width: 20px;
   height: 20px;
+  margin-block: 5px;
   margin-inline-end: 8px;
-  margin-top: 5px;
-  margin-bottom: 5px;
 }
 
 #policies-container,
 #searchInput {
   min-height: 32px;
-  margin: 20px 0 30px 0px;
+  margin: 20px 0 30px;
 }
 
 #policies-container {
   background-color: var(--in-content-warning-container);
-  padding: 0px 8px;
+  padding: 0 8px;
   margin-inline-end: 16px;
   border-radius: 2px;
 }
 
 .policies-label {
-  margin-left: 2px;
+  margin-inline-start: 2px;
 }
 
 .info-icon {
@@ -758,6 +843,13 @@ image.update-throbber {
   margin-top: calc((32px - 16px) / 2);
 }
 
+.info-icon-telemetry {
+  list-style-image: url("chrome://browser/skin/identity-icon.svg");
+  width: 16px;
+  height: 16px;
+  margin-inline: 2px 8px;
+}
+
 .sticky-container {
   position: sticky;
   background-color: var(--in-content-page-background);
@@ -765,10 +857,8 @@ image.update-throbber {
   z-index: 1;
   /* The sticky-container should have the capability to cover all spotlight area. */
   width: calc(100% + 8px);
-  margin-left: -4px;
-  margin-right: -4px;
-  padding-left: 4px;
-  padding-right: 4px;
+  margin-inline: -4px;
+  padding-inline: 4px;
   font-size: 85%;
 }
 
@@ -827,8 +917,7 @@ image.update-throbber {
 
 menulist {
   height: 30px;
-  margin-top: 4px;
-  margin-bottom: 4px;
+  margin-block: 4px;
 }
 
 menulist[indicator=true] > menupopup menuitem:not([image]) > .menu-iconic-left {
@@ -893,10 +982,6 @@ menulist[indicator=true] > menupopup menuitem[indicator=true]:not([image]) > .me
   min-width: 20em;
 }
 
-#selectedLocales {
-  height: 150px;
-}
-
 #selectedLocales > richlistitem {
   padding-inline-start: 13px;
 }
@@ -933,9 +1018,7 @@ menulist[indicator=true] > menupopup menuitem[indicator=true]:not([image]) > .me
 .updateSettingCrossUserWarningContainer {
   background: var(--in-content-warning-container);
   border-radius: 5px;
-  padding-inline: 8px;
-  padding-block-start: 2px;
-  padding-block-end: 8px;
+  padding: 2px 8px 8px;
   margin-block-end: 17px;
 }
 
@@ -961,4 +1044,21 @@ richlistitem .text-link {
 
 richlistitem .text-link:hover {
   color: inherit;
+}
+
+#proxy-grid,
+#dnsOverHttps-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+#proxy-grid > .thin {
+  grid-column-end: 3;
+  height: 20px;
+}
+
+#dnsOverHttps-grid.custom-container-hidden #networkCustomDnsOverHttpsInputLabelContainer,
+#dnsOverHttps-grid.custom-container-hidden #networkCustomDnsOverHttpsInput {
+  display: none;
 }

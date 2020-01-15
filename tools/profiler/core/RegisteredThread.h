@@ -8,13 +8,12 @@
 #define RegisteredThread_h
 
 #include "platform.h"
-#include "ProfilerMarker.h"
-#include "ProfilerMarkerPayload.h"
 #include "ThreadInfo.h"
 
 #include "js/TraceLoggerAPI.h"
 #include "jsapi.h"
-#include "mozilla/UniquePtr.h"
+#include "mozilla/NotNull.h"
+#include "mozilla/RefPtr.h"
 #include "nsIEventTarget.h"
 
 // This class contains the state for a single thread that is accessible without
@@ -25,7 +24,11 @@
 class RacyRegisteredThread final {
  public:
   explicit RacyRegisteredThread(int aThreadId)
-      : mThreadId(aThreadId), mSleep(AWAKE), mIsBeingProfiled(false) {
+      : mProfilingStackOwner(
+            mozilla::MakeNotNull<RefPtr<class ProfilingStackOwner>>()),
+        mThreadId(aThreadId),
+        mSleep(AWAKE),
+        mIsBeingProfiled(false) {
     MOZ_COUNT_CTOR(RacyRegisteredThread);
   }
 
@@ -37,30 +40,9 @@ class RacyRegisteredThread final {
 
   bool IsBeingProfiled() const { return mIsBeingProfiled; }
 
-  void AddPendingMarker(const char* aMarkerName,
-                        JS::ProfilingCategoryPair aCategoryPair,
-                        mozilla::UniquePtr<ProfilerMarkerPayload> aPayload,
-                        double aTime) {
-    // Note: We don't assert on mIsBeingProfiled, because it could have changed
-    // between the check in the caller and now.
-    ProfilerMarker* marker = new ProfilerMarker(
-        aMarkerName, aCategoryPair, mThreadId, std::move(aPayload), aTime);
-    mPendingMarkers.insert(marker);
-  }
-
-  // Called within signal. Function must be reentrant.
-  ProfilerMarkerLinkedList* GetPendingMarkers() {
-    // The profiled thread is interrupted, so we can access the list safely.
-    // Unless the profiled thread was in the middle of changing the list when
-    // we interrupted it - in that case, accessList() will return null.
-    return mPendingMarkers.accessList();
-  }
-
   // This is called on every profiler restart. Put things that should happen at
   // that time here.
   void ReinitializeOnResume() {
-    mPendingMarkers.reset();
-
     // This is needed to cause an initial sample to be taken from sleeping
     // threads that had been observed prior to the profiler stopping and
     // restarting. Otherwise sleeping threads would not have any samples to
@@ -100,15 +82,18 @@ class RacyRegisteredThread final {
   int ThreadId() const { return mThreadId; }
 
   class ProfilingStack& ProfilingStack() {
-    return mProfilingStack;
+    return mProfilingStackOwner->ProfilingStack();
   }
-  const class ProfilingStack& ProfilingStack() const { return mProfilingStack; }
+  const class ProfilingStack& ProfilingStack() const {
+    return mProfilingStackOwner->ProfilingStack();
+  }
+
+  class ProfilingStackOwner& ProfilingStackOwner() {
+    return *mProfilingStackOwner;
+  }
 
  private:
-  class ProfilingStack mProfilingStack;
-
-  // A list of pending markers that must be moved to the circular buffer.
-  ProfilerSignalSafeLinkedList<ProfilerMarker> mPendingMarkers;
+  mozilla::NotNull<RefPtr<class ProfilingStackOwner>> mProfilingStackOwner;
 
   // mThreadId contains the thread ID of the current thread. It is safe to read
   // this from multiple threads concurrently, as it will never be mutated.
@@ -166,7 +151,7 @@ class RacyRegisteredThread final {
 // protected by the profiler state lock.
 class RegisteredThread final {
  public:
-  RegisteredThread(ThreadInfo* aInfo, nsIEventTarget* aThread, void* aStackTop);
+  RegisteredThread(ThreadInfo* aInfo, nsIThread* aThread, void* aStackTop);
   ~RegisteredThread();
 
   class RacyRegisteredThread& RacyRegisteredThread() {
@@ -178,6 +163,16 @@ class RegisteredThread final {
 
   PlatformData* GetPlatformData() const { return mPlatformData.get(); }
   const void* StackTop() const { return mStackTop; }
+
+  // aDelay is the time the event that is currently running on the thread
+  // was queued before starting to run (if a PrioritizedEventQueue
+  // (i.e. MainThread), this will be 0 for any event at a lower priority
+  // than Input).
+  // aRunning is the time the event has been running.  If no event is
+  // running these will both be TimeDuration() (i.e. 0).  Both are out
+  // params, and are always set.  Their initial value is discarded.
+  void GetRunningEventDelay(const TimeStamp& aNow, TimeDuration& aDelay,
+                            TimeDuration& aRunning);
 
   size_t SizeOfIncludingThis(mozilla::MallocSizeOf aMallocSizeOf) const;
 
@@ -205,6 +200,7 @@ class RegisteredThread final {
 
   const RefPtr<ThreadInfo> Info() const { return mThreadInfo; }
   const nsCOMPtr<nsIEventTarget> GetEventTarget() const { return mThread; }
+  void ResetMainThread(nsIThread* aThread) { mThread = aThread; }
 
   // Request that this thread start JS sampling. JS sampling won't actually
   // start until a subsequent PollJSSampling() call occurs *and* mContext has
@@ -280,7 +276,7 @@ class RegisteredThread final {
   const void* mStackTop;
 
   const RefPtr<ThreadInfo> mThreadInfo;
-  const nsCOMPtr<nsIEventTarget> mThread;
+  nsCOMPtr<nsIThread> mThread;
 
   // If this is a JS thread, this is its JSContext, which is required for any
   // JS sampling.

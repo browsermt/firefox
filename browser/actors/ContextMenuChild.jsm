@@ -18,9 +18,8 @@ XPCOMUtils.defineLazyGlobalGetters(this, ["URL"]);
 XPCOMUtils.defineLazyModuleGetters(this, {
   E10SUtils: "resource://gre/modules/E10SUtils.jsm",
   BrowserUtils: "resource://gre/modules/BrowserUtils.jsm",
-  findAllCssSelectors: "resource://gre/modules/css-selector.js",
   SpellCheckHelper: "resource://gre/modules/InlineSpellChecker.jsm",
-  LoginManagerContent: "resource://gre/modules/LoginManagerContent.jsm",
+  LoginManagerChild: "resource://gre/modules/LoginManagerChild.jsm",
   WebNavigationFrames: "resource://gre/modules/WebNavigationFrames.jsm",
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.jsm",
   InlineSpellCheckerContent:
@@ -523,7 +522,12 @@ class ContextMenuChild extends JSWindowActorChild {
 
     let defaultPrevented = aEvent.defaultPrevented;
 
-    if (!Services.prefs.getBoolPref("dom.event.contextmenu.enabled")) {
+    if (
+      // If the event is not from a chrome-privileged document, and if
+      // `dom.event.contextmenu.enabled` is false, force defaultPrevented=false.
+      !aEvent.composedTarget.nodePrincipal.isSystemPrincipal &&
+      !Services.prefs.getBoolPref("dom.event.contextmenu.enabled")
+    ) {
       let plugin = null;
 
       try {
@@ -561,9 +565,9 @@ class ContextMenuChild extends JSWindowActorChild {
     } = doc;
     docLocation = docLocation && docLocation.spec;
     let frameOuterWindowID = WebNavigationFrames.getFrameId(doc.defaultView);
-    let loginFillInfo = LoginManagerContent.getFieldContext(
-      aEvent.composedTarget
-    );
+    let loginFillInfo = LoginManagerChild.forWindow(
+      doc.defaultView
+    ).getFieldContext(aEvent.composedTarget);
 
     // The same-origin check will be done in nsContextMenu.openLinkInTab.
     let parentAllowsMixedContent = !!this.docShell.mixedContentChannel;
@@ -609,7 +613,6 @@ class ContextMenuChild extends JSWindowActorChild {
     let selectionInfo = BrowserUtils.getSelectionDetails(this.contentWindow);
     let loadContext = this.docShell.QueryInterface(Ci.nsILoadContext);
     let userContextId = loadContext.originAttributes.userContextId;
-    let popupNodeSelectors = findAllCssSelectors(aEvent.composedTarget);
 
     this._setContext(aEvent);
     let context = this.context;
@@ -678,7 +681,6 @@ class ContextMenuChild extends JSWindowActorChild {
       customMenuItems,
       contentDisposition,
       frameOuterWindowID,
-      popupNodeSelectors,
       disableSetDesktopBackground,
       parentAllowsMixedContent,
     };
@@ -702,16 +704,10 @@ class ContextMenuChild extends JSWindowActorChild {
       "on-prepare-contextmenu"
     );
 
-    // For now, JS Window Actors don't serialize Principals automatically, so we
-    // have to do it ourselves. See bug 1557852.
-    data.principal = E10SUtils.serializePrincipal(doc.nodePrincipal);
-    data.context.principal = E10SUtils.serializePrincipal(context.principal);
-    data.storagePrincipal = E10SUtils.serializePrincipal(
-      doc.effectiveStoragePrincipal
-    );
-    data.context.storagePrincipal = E10SUtils.serializePrincipal(
-      context.storagePrincipal
-    );
+    data.principal = doc.nodePrincipal;
+    data.context.principal = context.principal;
+    data.storagePrincipal = doc.effectiveStoragePrincipal;
+    data.context.storagePrincipal = context.storagePrincipal;
 
     // In the event that the content is running in the parent process, we don't
     // actually want the contextmenu events to reach the parent - we'll dispatch
@@ -874,6 +870,7 @@ class ContextMenuChild extends JSWindowActorChild {
     context.onCTPPlugin = false;
     context.onDRMMedia = false;
     context.onPiPVideo = false;
+    context.onMediaStreamVideo = false;
     context.onEditable = false;
     context.onImage = false;
     context.onKeywordField = false;
@@ -1016,6 +1013,8 @@ class ContextMenuChild extends JSWindowActorChild {
         context.onPiPVideo = true;
       }
 
+      context.onMediaStreamVideo = !!context.target.srcObject;
+
       // Firefox always creates a HTMLVideoElement when loading an ogg file
       // directly. If the media is actually audio, be smarter and provide a
       // context menu with audio operations.
@@ -1138,7 +1137,7 @@ class ContextMenuChild extends JSWindowActorChild {
           try {
             if (elem.download) {
               // Ignore download attribute on cross-origin links
-              context.principal.checkMayLoad(context.linkURI, false, true);
+              context.principal.checkMayLoad(context.linkURI, true);
               context.linkDownload = elem.download;
             }
           } catch (ex) {}

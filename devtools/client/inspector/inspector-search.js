@@ -214,7 +214,7 @@ SelectorAutocompleter.prototype = {
    *        '#f' requires an Id suggestion, so the state is States.ID
    *        'div > .foo' requires class suggestion, so state is States.CLASS
    */
-  /* eslint-disable complexity */
+  // eslint-disable-next-line complexity
   get state() {
     if (!this.searchBox || !this.searchBox.value) {
       return null;
@@ -308,7 +308,6 @@ SelectorAutocompleter.prototype = {
     }
     return this._state;
   },
-  /* eslint-enable complexity */
 
   /**
    * Removes event listeners and cleans up references.
@@ -514,16 +513,17 @@ SelectorAutocompleter.prototype = {
       query += "*";
     }
 
-    const inspectorFront = this.inspector.inspectorFront;
-    const remoteInspectors = await inspectorFront.getChildInspectors();
-    const inspectors = [inspectorFront, ...remoteInspectors];
-
-    const suggestionsPromises = inspectors.map(async inspector => {
-      const walker = inspector.walker;
-      return walker.getSuggestionsForQuery(query, firstPart, state);
-    });
-
-    this._lastQuery = Promise.all(suggestionsPromises)
+    this._lastQuery = this.inspector
+      // Get all inspectors where we want suggestions from.
+      .getAllInspectorFronts()
+      .then(inspectors => {
+        // Get all of the suggestions.
+        return Promise.all(
+          inspectors.map(async ({ walker }) => {
+            return walker.getSuggestionsForQuery(query, firstPart, state);
+          })
+        );
+      })
       .then(suggestions => {
         // Merge all the results
         const result = { query: "", suggestions: [] };

@@ -54,6 +54,9 @@ build_64=0
 clean=0
 rebuild_gyp=0
 rebuild_nspr=0
+build_nspr_tests=0
+run_nspr_tests=0
+exit_after_nspr=0
 target=Debug
 verbose=0
 fuzz=0
@@ -110,13 +113,16 @@ while [ $# -gt 0 ]; do
         --fuzz) fuzz=1 ;;
         --fuzz=oss) fuzz=1; fuzz_oss=1 ;;
         --fuzz=tls) fuzz=1; fuzz_tls=1 ;;
-        --sancov) enable_sancov ;;
-        --sancov=?*) enable_sancov "${1#*=}" ;;
+        --sancov) enable_sancov; gyp_params+=(-Dcoverage=1) ;;
+        --sancov=?*) enable_sancov "${1#*=}"; gyp_params+=(-Dcoverage=1) ;;
         --emit-llvm) gyp_params+=(-Demit_llvm=1 -Dsign_libs=0) ;;
         --no-zdefs) gyp_params+=(-Dno_zdefs=1) ;;
         --static) gyp_params+=(-Dstatic_libs=1) ;;
         --ct-verif) gyp_params+=(-Dct_verif=1) ;;
         --nspr) nspr_clean; rebuild_nspr=1 ;;
+        --nspr-test-build) build_nspr_tests=1 ;;
+        --nspr-test-run) run_nspr_tests=1 ;;
+        --nspr-only) exit_after_nspr=1 ;;
         --with-nspr=?*) set_nspr_path "${1#*=}"; no_local_nspr=1 ;;
         --system-nspr) set_nspr_path "/usr/include/nspr/:"; no_local_nspr=1 ;;
         --system-sqlite) gyp_params+=(-Duse_system_sqlite=1) ;;
@@ -124,6 +130,7 @@ while [ $# -gt 0 ]; do
         --enable-libpkix) gyp_params+=(-Ddisable_libpkix=0) ;;
         --mozpkix-only) gyp_params+=(-Dmozpkix_only=1 -Ddisable_tests=1 -Dsign_libs=0) ;;
         --disable-keylog) sslkeylogfile=0 ;;
+        --enable-legacy-db) gyp_params+=(-Ddisable_dbm=0) ;;
         -D*) gyp_params+=("$1") ;;
         *) show_help; exit 2 ;;
     esac
@@ -225,6 +232,11 @@ if [[ "$rebuild_nspr" = 1 && "$no_local_nspr" = 0 ]]; then
     nspr_build
     mv -f "$nspr_config.new" "$nspr_config"
 fi
+
+if [ "$exit_after_nspr" = 1 ]; then
+  exit 0
+fi
+
 # gyp.
 if [ "$rebuild_gyp" = 1 ]; then
     if ! hash "$GYP" 2> /dev/null; then

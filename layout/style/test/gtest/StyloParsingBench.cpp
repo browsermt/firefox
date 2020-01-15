@@ -10,6 +10,7 @@
 #include "ExampleStylesheet.h"
 #include "ServoBindings.h"
 #include "mozilla/Encoding.h"
+#include "mozilla/Utf8.h"
 #include "mozilla/NullPrincipalURI.h"
 #include "mozilla/css/SheetParsingMode.h"
 #include "ReferrerInfo.h"
@@ -34,15 +35,17 @@ static void ServoParsingBench(const StyleUseCounters* aCounters) {
   cssStr.Append(css);
   ASSERT_EQ(Encoding::UTF8ValidUpTo(css), css.Length());
 
+  RefPtr<NullPrincipalURI> uri = new NullPrincipalURI();
   nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo(nullptr);
   RefPtr<URLExtraData> data =
-      new URLExtraData(NullPrincipalURI::Create(), referrerInfo.forget(),
+      new URLExtraData(uri.forget(), referrerInfo.forget(),
                        NullPrincipal::CreateWithoutOriginAttributes());
   for (int i = 0; i < PARSING_REPETITIONS; i++) {
     RefPtr<RawServoStyleSheetContents> stylesheet =
         Servo_StyleSheet_FromUTF8Bytes(
             nullptr, nullptr, nullptr, &cssStr, eAuthorSheetFeatures, data, 0,
-            eCompatibility_FullStandards, nullptr, aCounters)
+            eCompatibility_FullStandards, nullptr, aCounters,
+            StyleSanitizationKind::None, nullptr)
             .Consume();
   }
 }
@@ -50,11 +53,12 @@ static void ServoParsingBench(const StyleUseCounters* aCounters) {
 static void ServoSetPropertyByIdBench(const nsACString& css) {
   RefPtr<RawServoDeclarationBlock> block =
       Servo_DeclarationBlock_CreateEmpty().Consume();
+  RefPtr<NullPrincipalURI> uri = new NullPrincipalURI();
   nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo(nullptr);
   RefPtr<URLExtraData> data =
-      new URLExtraData(NullPrincipalURI::Create(), referrerInfo.forget(),
+      new URLExtraData(uri.forget(), referrerInfo.forget(),
                        NullPrincipal::CreateWithoutOriginAttributes());
-  ASSERT_TRUE(IsUTF8(css));
+  ASSERT_TRUE(IsUtf8(css));
 
   for (int i = 0; i < SETPROPERTY_REPETITIONS; i++) {
     Servo_DeclarationBlock_SetPropertyById(
@@ -68,9 +72,10 @@ static void ServoGetPropertyValueById() {
   RefPtr<RawServoDeclarationBlock> block =
       Servo_DeclarationBlock_CreateEmpty().Consume();
 
+  RefPtr<NullPrincipalURI> uri = new NullPrincipalURI();
   nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo(nullptr);
   RefPtr<URLExtraData> data =
-      new URLExtraData(NullPrincipalURI::Create(), referrerInfo.forget(),
+      new URLExtraData(uri.forget(), referrerInfo.forget(),
                        NullPrincipal::CreateWithoutOriginAttributes());
   NS_NAMED_LITERAL_CSTRING(css_, "10px");
   const nsACString& css = css_;

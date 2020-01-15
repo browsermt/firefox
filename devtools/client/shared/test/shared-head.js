@@ -43,9 +43,6 @@ if (DEBUG_ALLOCATIONS) {
   });
 }
 
-const { ScratchpadManager } = ChromeUtils.import(
-  "resource://devtools/client/scratchpad/scratchpad-manager.jsm"
-);
 const { loader, require } = ChromeUtils.import(
   "resource://devtools/shared/Loader.jsm"
 );
@@ -157,8 +154,29 @@ registerCleanupFunction(() => {
 });
 
 registerCleanupFunction(async function cleanup() {
+  // Close any tab opened by the test.
+  // There should be only one tab opened by default when firefox starts the test.
   while (gBrowser.tabs.length > 1) {
     await closeTabAndToolbox(gBrowser.selectedTab);
+  }
+
+  // Note that this will run before cleanup functions registered by tests or other head.js files.
+  // So all connections must be cleaned up by the test when the test ends,
+  // before the harness starts invoking the cleanup functions
+  await waitForTick();
+
+  // All connections must be cleaned up by the test when the test ends.
+  const { DebuggerServer } = require("devtools/server/debugger-server");
+  ok(
+    !DebuggerServer.hasConnection(),
+    "The main process DebuggerServer has no pending connection when the test ends"
+  );
+  // If there is still open connection, close all of them so that following tests
+  // could pass.
+  if (DebuggerServer.hasConnection()) {
+    for (const conn of Object.values(DebuggerServer._connections)) {
+      conn.close();
+    }
   }
 });
 
@@ -423,7 +441,7 @@ function loadHelperScript(filePath) {
  * @return {Promise}
  */
 function waitForTick() {
-  return new Promise(resolve => executeSoon(resolve));
+  return new Promise(resolve => DevToolsUtils.executeSoon(resolve));
 }
 
 /**
@@ -599,7 +617,7 @@ function waitForContextMenu(popup, button, onShown, onHidden) {
 
       // Use executeSoon() to get out of the popupshown event.
       popup.addEventListener("popuphidden", onPopupHidden);
-      executeSoon(() => popup.hidePopup());
+      DevToolsUtils.executeSoon(() => popup.hidePopup());
     }
     function onPopupHidden() {
       info("onPopupHidden");
@@ -732,63 +750,6 @@ function createTestHTTPServer() {
   return server;
 }
 
-/**
- * Inject `EventUtils` helpers into ContentTask scope.
- *
- * This helper is automatically exposed to mochitest browser tests,
- * but is missing from content task scope.
- * You should call this method only once per <browser> tag
- *
- * @param {xul:browser} browser
- *        Reference to the browser in which we load content task
- */
-async function injectEventUtilsInContentTask(browser) {
-  await ContentTask.spawn(browser, {}, async function() {
-    if ("EventUtils" in this) {
-      return;
-    }
-
-    const EventUtils = (this.EventUtils = {});
-
-    EventUtils.window = {};
-    EventUtils.parent = EventUtils.window;
-    /* eslint-disable camelcase */
-    EventUtils._EU_Ci = Ci;
-    EventUtils._EU_Cc = Cc;
-    /* eslint-enable camelcase */
-    // EventUtils' `sendChar` function relies on the navigator to synthetize events.
-    EventUtils.navigator = content.navigator;
-    EventUtils.KeyboardEvent = content.KeyboardEvent;
-
-    EventUtils.synthesizeClick = element =>
-      new Promise(resolve => {
-        element.addEventListener(
-          "click",
-          function() {
-            resolve();
-          },
-          { once: true }
-        );
-
-        EventUtils.synthesizeMouseAtCenter(
-          element,
-          { type: "mousedown", isSynthesized: false },
-          content
-        );
-        EventUtils.synthesizeMouseAtCenter(
-          element,
-          { type: "mouseup", isSynthesized: false },
-          content
-        );
-      });
-
-    Services.scriptloader.loadSubScript(
-      "chrome://mochikit/content/tests/SimpleTest/EventUtils.js",
-      EventUtils
-    );
-  });
-}
-
 /*
  * Register an actor in the content process of the current tab.
  *
@@ -810,14 +771,38 @@ async function registerActorInContentProcess(url, options) {
   // chrome://mochitests URI is registered only in the parent process, so convert these
   // URLs to file:// one in order to work in the content processes
   url = url.startsWith("chrome://mochitests") ? convertChromeToFile(url) : url;
-  return ContentTask.spawn(gBrowser.selectedBrowser, { url, options }, args => {
-    // eslint-disable-next-line no-shadow
-    const { require } = ChromeUtils.import(
-      "resource://devtools/shared/Loader.jsm"
-    );
-    const {
-      ActorRegistry,
-    } = require("devtools/server/actors/utils/actor-registry");
-    ActorRegistry.registerModule(args.url, args.options);
-  });
+  return SpecialPowers.spawn(
+    gBrowser.selectedBrowser,
+    [{ url, options }],
+    args => {
+      // eslint-disable-next-line no-shadow
+      const { require } = ChromeUtils.import(
+        "resource://devtools/shared/Loader.jsm"
+      );
+      const {
+        ActorRegistry,
+      } = require("devtools/server/actors/utils/actor-registry");
+      ActorRegistry.registerModule(args.url, args.options);
+    }
+  );
+}
+
+/**
+ * Move the provided Window to the provided left, top coordinates and wait for
+ * the window position to be updated.
+ */
+async function moveWindowTo(win, left, top) {
+  // Check that the expected coordinates are within the window available area.
+  left = Math.max(win.screen.availLeft, left);
+  left = Math.min(win.screen.width, left);
+  top = Math.max(win.screen.availTop, top);
+  top = Math.min(win.screen.height, top);
+
+  info(`Moving window to {${left}, ${top}}`);
+  win.moveTo(left, top);
+
+  // Bug 1600809: window move/resize can be async on Linux sometimes.
+  // Wait so that the anchor's position is correctly measured.
+  info("Wait for window screenLeft and screenTop to be updated");
+  return waitUntil(() => win.screenLeft === left && win.screenTop === top);
 }

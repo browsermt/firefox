@@ -37,7 +37,7 @@ add_task(async function() {
   await onNetMonitor;
 
   // Reload debugee.
-  wait = waitForNetworkEvents(monitor, 1);
+  const wait = waitForNetworkEvents(monitor, 1);
   tab.linkedBrowser.reload();
   await wait;
 
@@ -59,7 +59,7 @@ add_task(async function() {
     verifyRequestItemTarget(
       document,
       getDisplayedRequests(store.getState()),
-      getSortedRequests(store.getState()).get(index),
+      getSortedRequests(store.getState())[index],
       "GET",
       CONTENT_TYPE_SJS + "?fmt=json-long",
       {

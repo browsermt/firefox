@@ -125,8 +125,8 @@ void BrowserHost::DestroyComplete() {
   }
 }
 
-bool BrowserHost::Show(const ScreenIntSize& aSize, bool aParentIsActive) {
-  return mRoot->Show(aSize, aParentIsActive);
+bool BrowserHost::Show(const OwnerShowInfo& aShowInfo) {
+  return mRoot->Show(aShowInfo);
 }
 
 void BrowserHost::UpdateDimensions(const nsIntRect& aRect,
@@ -195,17 +195,6 @@ BrowserHost::GetHasLayers(bool* aHasLayers) {
   return NS_OK;
 }
 
-/* void forceRepaint (); */
-NS_IMETHODIMP
-BrowserHost::ForceRepaint(void) {
-  if (!mRoot) {
-    return NS_OK;
-  }
-  VisitAll(
-      [](BrowserParent* aBrowserParent) { aBrowserParent->ForceRepaint(); });
-  return NS_OK;
-}
-
 /* void resolutionChanged (); */
 NS_IMETHODIMP
 BrowserHost::NotifyResolutionChanged(void) {
@@ -215,6 +204,16 @@ BrowserHost::NotifyResolutionChanged(void) {
   VisitAll([](BrowserParent* aBrowserParent) {
     aBrowserParent->NotifyResolutionChanged();
   });
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+BrowserHost::NotifyThemeChanged(void) {
+  if (!mRoot) {
+    return NS_OK;
+  }
+  VisitAll(
+      [](BrowserParent* aBrowserParent) { aBrowserParent->ThemeChanged(); });
   return NS_OK;
 }
 
@@ -270,17 +269,6 @@ BrowserHost::GetOsPid(int32_t* aOsPid) {
   return NS_OK;
 }
 
-/* readonly attribute boolean hasContentOpener; */
-NS_IMETHODIMP
-BrowserHost::GetHasContentOpener(bool* aHasContentOpener) {
-  if (!mRoot) {
-    *aHasContentOpener = false;
-    return NS_OK;
-  }
-  *aHasContentOpener = mRoot->GetHasContentOpener();
-  return NS_OK;
-}
-
 /* readonly attribute boolean hasPresented; */
 NS_IMETHODIMP
 BrowserHost::GetHasPresented(bool* aHasPresented) {
@@ -322,17 +310,6 @@ BrowserHost::GetHasBeforeUnload(bool* aHasBeforeUnload) {
       });
 
   *aHasBeforeUnload = result;
-  return NS_OK;
-}
-
-/* readonly attribute Element ownerElement; */
-NS_IMETHODIMP
-BrowserHost::GetOwnerElement(mozilla::dom::Element** aOwnerElement) {
-  if (!mRoot) {
-    *aOwnerElement = nullptr;
-    return NS_OK;
-  }
-  *aOwnerElement = mRoot->GetOwnerElement();
   return NS_OK;
 }
 

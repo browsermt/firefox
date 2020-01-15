@@ -42,9 +42,9 @@ const whitelist = {
     // Browser front-end
     "resource:///actors/AboutReaderChild.jsm",
     "resource:///actors/BrowserTabChild.jsm",
-    "resource:///modules/ContentMetaHandler.jsm",
     "resource:///actors/LinkHandlerChild.jsm",
     "resource:///actors/SearchTelemetryChild.jsm",
+    "resource://gre/actors/AutoCompleteChild.jsm",
     "resource://gre/modules/ActorChild.jsm",
     "resource://gre/modules/ActorManagerChild.jsm",
     "resource://gre/modules/E10SUtils.jsm",
@@ -62,14 +62,9 @@ const whitelist = {
   frameScripts: new Set([
     // Test related
     "chrome://mochikit/content/shutdown-leaks-collector.js",
-    "chrome://mochikit/content/tests/SimpleTest/AsyncUtilsContent.js",
-    "chrome://mochikit/content/tests/BrowserTestUtils/content-utils.js",
 
     // Browser front-end
     "chrome://global/content/browser-content.js",
-
-    // Forms
-    "chrome://formautofill/content/FormAutofillFrameScript.js",
 
     // Extensions
     "resource://gre/modules/addons/Content.js",
@@ -77,7 +72,7 @@ const whitelist = {
   processScripts: new Set([
     "chrome://global/content/process-content.js",
     "resource:///modules/ContentObservers.js",
-    "data:,ChromeUtils.import('resource://gre/modules/ExtensionProcessScript.jsm')",
+    "resource://gre/modules/extensionProcessScriptLoader.js",
     "resource://devtools/client/jsonview/converter-observer.js",
     "resource://gre/modules/WebRequestContent.js",
   ]),
@@ -97,6 +92,10 @@ const intermittently_loaded_whitelist = {
     // Webcompat about:config front-end. This is presently nightly-only and
     // part of a system add-on which may not load early enough for the test.
     "resource://webcompat/AboutCompat.jsm",
+
+    // Test related
+    "resource://testing-common/BrowserTestUtilsChild.jsm",
+    "resource://testing-common/ContentEventListenerChild.jsm",
   ]),
   frameScripts: new Set([]),
   processScripts: new Set([

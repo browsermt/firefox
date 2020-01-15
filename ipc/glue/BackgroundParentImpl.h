@@ -8,6 +8,7 @@
 #define mozilla_ipc_backgroundparentimpl_h__
 
 #include "mozilla/Attributes.h"
+#include "mozilla/ipc/InputStreamUtils.h"
 #include "mozilla/ipc/PBackgroundParent.h"
 
 namespace mozilla {
@@ -20,7 +21,14 @@ namespace ipc {
 
 // Instances of this class should never be created directly. This class is meant
 // to be inherited in BackgroundImpl.
-class BackgroundParentImpl : public PBackgroundParent {
+class BackgroundParentImpl : public PBackgroundParent,
+                             public ParentToChildStreamActorManager {
+ public:
+  PParentToChildStreamParent* SendPParentToChildStreamConstructor(
+      PParentToChildStreamParent* aActor) override;
+  PFileDescriptorSetParent* SendPFileDescriptorSetConstructor(
+      const FileDescriptor& aFD) override;
+
  protected:
   BackgroundParentImpl();
   virtual ~BackgroundParentImpl();
@@ -130,6 +138,9 @@ class BackgroundParentImpl : public PBackgroundParent {
 
   virtual bool DeallocPBackgroundStorageParent(
       PBackgroundStorageParent* aActor) override;
+
+  virtual already_AddRefed<PIdleSchedulerParent> AllocPIdleSchedulerParent()
+      override;
 
   virtual PPendingIPCBlobParent* AllocPPendingIPCBlobParent(
       const IPCBlob& aBlob) override;

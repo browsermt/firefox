@@ -12,6 +12,12 @@
 #include <algorithm>
 #include <functional>
 
+#ifdef XP_MACOSX
+// ensure that Apple Security kit enum goes before "sslproto.h"
+#  include <CoreFoundation/CFAvailability.h>
+#  include <Security/CipherSuite.h>
+#endif
+
 #include "mozilla/UniquePtr.h"
 
 #include "sigslot.h"
@@ -619,7 +625,7 @@ class TransportTestPeer : public sigslot::has_slots<> {
 
     // Start gathering
     test_utils_->sts_target()->Dispatch(
-        WrapRunnableRet(&res, ice_ctx_, &NrIceCtx::StartGathering, false, false,
+        WrapRunnableRet(&res, ice_ctx_, &NrIceCtx::StartGathering, false,
                         false),
         NS_DISPATCH_SYNC);
     ASSERT_TRUE(NS_SUCCEEDED(res));

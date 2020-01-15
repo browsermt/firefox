@@ -32,8 +32,6 @@ sinon.assert.fail = function(message) {
 // Prep Telemetry to receive events from tests
 TelemetryEvents.init();
 
-this.UUID_REGEX = /[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/;
-
 this.TEST_XPI_URL = (function() {
   const dir = getChromeDir(getResolvedURI(gTestPath));
   dir.append("addons");
@@ -133,9 +131,6 @@ this.withMockNormandyApi = function(testFunction) {
     };
 
     // Use callsFake instead of resolves so that the current values in mockApi are used.
-    mockApi.fetchRecipes = sinon
-      .stub(NormandyApi, "fetchRecipes")
-      .callsFake(async () => mockApi.recipes);
     mockApi.fetchExtensionDetails = sinon
       .stub(NormandyApi, "fetchExtensionDetails")
       .callsFake(async extensionId => {
@@ -149,7 +144,6 @@ this.withMockNormandyApi = function(testFunction) {
     try {
       await testFunction(...args, mockApi);
     } finally {
-      mockApi.fetchRecipes.restore();
       mockApi.fetchExtensionDetails.restore();
     }
   };
@@ -347,7 +341,7 @@ this.withSendEventStub = function(testFunction) {
       await testFunction(...args, stub);
     } finally {
       stub.restore();
-      Assert.ok(!stub.threw(), "some telemetry call failed");
+      Assert.ok(!stub.threw(), "Telemetry events should not fail");
     }
   };
 };

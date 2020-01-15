@@ -161,6 +161,15 @@ const GfxDeviceFamily* GfxDriverInfo::GetDeviceFamily(DeviceFamily id) {
       APPEND_DEVICE(0x2e12); /* IntelQ45_1 */
       APPEND_DEVICE(0x2e13); /* IntelQ45_2 */
       break;
+    case IntelHDGraphicsToIvyBridge:
+      APPEND_DEVICE(0x015A); /* IntelIvyBridge_GT1_1 (HD Graphics) */
+      // clang-format off
+      APPEND_DEVICE(0x0152); /* IntelIvyBridge_GT1_2 (HD Graphics 2500, desktop) */
+      APPEND_DEVICE(0x0162); /* IntelIvyBridge_GT2_1 (HD Graphics 4000, desktop) */
+      APPEND_DEVICE(0x0166); /* IntelIvyBridge_GT2_2 (HD Graphics 4000, mobile) */
+      APPEND_DEVICE(0x016A); /* IntelIvyBridge_GT2_3 (HD Graphics P4000, workstation) */
+      // clang-format on
+      [[fallthrough]];
     case IntelHDGraphicsToSandyBridge:
       APPEND_DEVICE(0x0042); /* IntelHDGraphics */
       APPEND_DEVICE(0x0046); /* IntelMobileHDGraphics */
@@ -212,14 +221,8 @@ const GfxDeviceFamily* GfxDriverInfo::GetDeviceFamily(DeviceFamily id) {
     case IntelHD3000:
       APPEND_DEVICE(0x0126);
       break;
-    case IntelHDGraphicsIvyBridge:
-      APPEND_DEVICE(0x015A); /* IntelIvyBridge_GT1_1 (HD Graphics) */
-      // clang-format off
-      APPEND_DEVICE(0x0152); /* IntelIvyBridge_GT1_2 (HD Graphics 2500, desktop) */
-      APPEND_DEVICE(0x0162); /* IntelIvyBridge_GT2_1 (HD Graphics 4000, desktop) */
-      APPEND_DEVICE(0x0166); /* IntelIvyBridge_GT2_2 (HD Graphics 4000, mobile) */
-      APPEND_DEVICE(0x016A); /* IntelIvyBridge_GT2_3 (HD Graphics P4000, workstation) */
-      // clang-format on
+    case IntelHD520:
+      APPEND_DEVICE(0x1916);
       break;
     case IntelMobileHDGraphics:
       APPEND_DEVICE(0x0046); /* IntelMobileHDGraphics */
@@ -260,6 +263,17 @@ const GfxDeviceFamily* GfxDriverInfo::GetDeviceFamily(DeviceFamily id) {
       APPEND_DEVICE(0x7240);
       APPEND_DEVICE(0x7249);
       APPEND_DEVICE(0x7291);
+      break;
+    case RadeonCaicos:
+      APPEND_DEVICE(0x6766);
+      APPEND_DEVICE(0x6767);
+      APPEND_DEVICE(0x6768);
+      APPEND_DEVICE(0x6770);
+      APPEND_DEVICE(0x6771);
+      APPEND_DEVICE(0x6772);
+      APPEND_DEVICE(0x6778);
+      APPEND_DEVICE(0x6779);
+      APPEND_DEVICE(0x677b);
       break;
     case Geforce7300GT:
       APPEND_DEVICE(0x0393);

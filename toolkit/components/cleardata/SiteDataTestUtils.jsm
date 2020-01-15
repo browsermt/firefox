@@ -10,9 +10,6 @@ const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
-const { ContentTask } = ChromeUtils.import(
-  "resource://testing-common/ContentTask.jsm"
-);
 const { BrowserTestUtils } = ChromeUtils.import(
   "resource://testing-common/BrowserTestUtils.jsm"
 );
@@ -119,22 +116,60 @@ var SiteDataTestUtils = {
     let uri = Services.io.newURI(path);
     // Register a dummy ServiceWorker.
     return BrowserTestUtils.withNewTab(uri.prePath, async function(browser) {
-      return ContentTask.spawn(browser, { path }, async ({ path: p }) => {
-        // eslint-disable-next-line no-undef
-        let r = await content.navigator.serviceWorker.register(p);
-        return new Promise(resolve => {
-          let worker = r.installing || r.waiting || r.active;
-          if (worker.state == "activated") {
-            resolve();
-          } else {
-            worker.addEventListener("statechange", () => {
-              if (worker.state == "activated") {
-                resolve();
-              }
-            });
-          }
-        });
-      });
+      return browser.ownerGlobal.SpecialPowers.spawn(
+        browser,
+        [{ path }],
+        async ({ path: p }) => {
+          // eslint-disable-next-line no-undef
+          let r = await content.navigator.serviceWorker.register(p);
+          return new Promise(resolve => {
+            let worker = r.installing || r.waiting || r.active;
+            if (worker.state == "activated") {
+              resolve();
+            } else {
+              worker.addEventListener("statechange", () => {
+                if (worker.state == "activated") {
+                  resolve();
+                }
+              });
+            }
+          });
+        }
+      );
+    });
+  },
+
+  hasCookies(origin) {
+    let principal = Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+      origin
+    );
+    for (let cookie of Services.cookies.cookies) {
+      if (
+        ChromeUtils.isOriginAttributesEqual(
+          principal.originAttributes,
+          cookie.originAttributes
+        ) &&
+        cookie.host.includes(principal.URI.host)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  },
+
+  hasIndexedDB(origin) {
+    let principal = Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+      origin
+    );
+    return new Promise(resolve => {
+      let data = true;
+      let request = indexedDB.openForPrincipal(principal, "TestDatabase", 1);
+      request.onupgradeneeded = function(e) {
+        data = false;
+      };
+      request.onsuccess = function(e) {
+        resolve(data);
+      };
     });
   },
 

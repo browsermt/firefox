@@ -53,54 +53,47 @@ class UAOverrides {
     }
 
     const { blocks, matches, telemetryKey, uaTransformer } = override.config;
-    // Where standard extension match-patterns do the job, we use them.
-    // Otherwise we match regular expressions ourselves, on *all* requests.
-    const regex = matches instanceof RegExp && matches;
-    const urls = regex ? ["*://*/*"] : matches;
     const listener = details => {
-      if (!regex || details.url.match(regex)) {
-        // Don't actually override the UA for an experiment if the user is not
-        // part of the experiment (unless they force-enabed the override).
-        if (
-          !override.config.experiment ||
-          override.experimentActive ||
-          override.permanentPrefEnabled === true
-        ) {
-          if (telemetryKey && !details.frameId) {
-            // For now, we only care about Telemetry on Fennec, where telemetry
-            // is sent in Java code (as part of the core ping). That code must
-            // be aware of each key we send, which we send as a SharedPreference.
-            browser.sharedPreferences.setBoolPref(`${telemetryKey}Used`, true);
-          }
+      // We set the "used" telemetry key if the user would have had the
+      // override applied, regardless of whether it is actually applied.
+      if (!details.frameId && override.shouldSendDetailedTelemetry) {
+        // For now, we only care about Telemetry on Fennec, where telemetry
+        // is sent in Java code (as part of the core ping). That code must
+        // be aware of each key we send, which we send as a SharedPreference.
+        browser.sharedPreferences.setBoolPref(`${telemetryKey}Used`, true);
+      }
 
-          for (const header of details.requestHeaders) {
-            if (header.name.toLowerCase() === "user-agent") {
-              header.value = uaTransformer(header.value);
-            }
+      // Don't actually override the UA for an experiment if the user is not
+      // part of the experiment (unless they force-enabed the override).
+      if (
+        !override.config.experiment ||
+        override.experimentActive ||
+        override.permanentPrefEnabled === true
+      ) {
+        for (const header of details.requestHeaders) {
+          if (header.name.toLowerCase() === "user-agent") {
+            header.value = uaTransformer(header.value);
           }
         }
       }
       return { requestHeaders: details.requestHeaders };
     };
 
-    browser.webRequest.onBeforeSendHeaders.addListener(listener, { urls }, [
-      "blocking",
-      "requestHeaders",
-    ]);
+    browser.webRequest.onBeforeSendHeaders.addListener(
+      listener,
+      { urls: matches },
+      ["blocking", "requestHeaders"]
+    );
 
     const listeners = { onBeforeSendHeaders: listener };
     if (blocks) {
-      const bregex = blocks instanceof RegExp && blocks;
-      const burls = bregex ? ["*://*/*"] : blocks;
-
       const blistener = details => {
-        const cancel = !bregex || !!details.url.match(bregex);
-        return { cancel };
+        return { cancel: true };
       };
 
       browser.webRequest.onBeforeRequest.addListener(
         blistener,
-        { urls: burls },
+        { urls: blocks },
         ["blocking"]
       );
 
@@ -109,8 +102,14 @@ class UAOverrides {
     this._activeListeners.set(override, listeners);
     override.active = true;
 
-    // If collecting telemetry on the override, note that it was activated.
+    // If telemetry is being collected, note the addon version.
     if (telemetryKey) {
+      const { version } = browser.runtime.getManifest();
+      browser.sharedPreferences.setCharPref(`${telemetryKey}Version`, version);
+    }
+
+    // If collecting detailed telemetry on the override, note that it was activated.
+    if (override.shouldSendDetailedTelemetry) {
       browser.sharedPreferences.setBoolPref(`${telemetryKey}Ready`, true);
     }
   }
@@ -136,6 +135,12 @@ class UAOverrides {
     if (override.permanentPrefEnabled === false) {
       shouldBeActive = false;
     }
+
+    // Only send detailed telemetry if the user is actively in an experiment or
+    // has opted into an experimental feature.
+    override.shouldSendDetailedTelemetry =
+      override.config.telemetryKey &&
+      (override.experimentActive || override.permanentPrefEnabled);
 
     // Overrides gated behind an experiment the user is not part of do not
     // have to be activated, unless they are gathering telemetry, or the
@@ -173,11 +178,23 @@ class UAOverrides {
       if (platformMatches.includes(override.platform)) {
         override.availableOnPlatform = true;
 
-        // If there is a specific experiment running for
-        // this override, get its state.
+        // Note whether the user is actively in the override's experiment (if any).
+        override.experimentActive = false;
         const experiment = override.config.experiment;
-        override.experimentActive =
-          experiment && (await browser.experiments.isActive(experiment));
+        if (experiment) {
+          // We expect the definition to have either one string for 'experiment'
+          // (just one branch) or an array of strings (multiple branches). So
+          // here we turn the string case into a one-element array for the loop.
+          const branches = Array.isArray(experiment)
+            ? experiment
+            : [experiment];
+          for (const branch of branches) {
+            if (await browser.experiments.isActive(branch)) {
+              override.experimentActive = true;
+              break;
+            }
+          }
+        }
 
         // If there is a specific about:config preference governing
         // this override, monitor its state.

@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Web Compat",
   "description": "Urgent post-release fixes for web compatibility.",
-  "version": "6.0.2",
+  "version": "6.4.0",
 
   "applications": {
     "gecko": {
@@ -36,6 +36,22 @@
         "paths": [["experiments"]]
       }
     },
+    "pictureInPictureChild": {
+      "schema": "experiment-apis/pictureInPicture.json",
+      "child": {
+        "scopes": ["addon_child"],
+        "script": "experiment-apis/pictureInPicture.js",
+        "paths": [["pictureInPictureChild"]]
+      }
+    },
+    "pictureInPictureParent": {
+      "schema": "experiment-apis/pictureInPicture.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "script": "experiment-apis/pictureInPicture.js",
+        "paths": [["pictureInPictureParent"]]
+      }
+    },
     "sharedPreferences": {
       "schema": "experiment-apis/sharedPreferences.json",
       "parent": {
@@ -46,7 +62,7 @@
     }
   },
 
-  "content_security_policy": "script-src 'self' 'sha256-MmZkN2QaIHhfRWPZ8TVRjijTn5Ci1iEabtTEWrt9CCo='; default-src 'self'; base-uri moz-extension://*;",
+  "content_security_policy": "script-src 'self' 'sha256-MmZkN2QaIHhfRWPZ8TVRjijTn5Ci1iEabtTEWrt9CCo='; default-src 'self'; base-uri moz-extension://*; object-src 'none'",
 
   "permissions": [
     "webRequest",
@@ -59,9 +75,12 @@
       "lib/module_shim.js",
       "lib/google.js",
       "data/injections.js",
+      "data/picture_in_picture_overrides.js",
       "data/ua_overrides.js",
       "lib/about_compat_broker.js",
+      "lib/custom_functions.js",
       "lib/injections.js",
+      "lib/picture_in_picture_overrides.js",
       "lib/ua_overrides.js",
       "run.js"
     ]

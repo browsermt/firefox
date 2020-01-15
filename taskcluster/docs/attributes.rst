@@ -133,8 +133,12 @@ some kinds, ``-j`` also matches against ``build_platform``.
 test_chunk
 ==========
 
-This is the chunk number of a chunked test suite (talos or unittest).  Note
-that this is a string!
+This is the chunk number of a chunked test suite. Note that this is a string!
+
+test_manifests
+==============
+
+A list of the test manifests that run in this task.
 
 e10s
 ====
@@ -216,10 +220,11 @@ real toolchain job name in the toolchains list for build jobs.
 always_target
 =============
 
-Tasks with this attribute will be included in the ``target_task_graph`` regardless
-of any target task filtering that occurs. When a task is included in this manner
-(i.e it otherwise would have been filtered out), it will be considered for
-optimization even if the ``optimize_target_tasks`` parameter is False.
+Tasks with this attribute will be included in the ``target_task_graph`` if
+``parameters["tasks_for"]`` is ``hg-push``, regardless of any target task
+filtering that occurs. When a task is included in this manner (i.e it otherwise
+would have been filtered out), it will be considered for optimization even if
+the ``optimize_target_tasks`` parameter is False.
 
 This is meant to be used for tasks which a developer would almost always want to
 run. Typically these tasks will be short running and have a high risk of causing
@@ -247,7 +252,7 @@ artifact_prefix
 Most taskcluster artifacts are public, so we've hardcoded ``public/build`` in a
 lot of places. To support private artifacts, we've moved this to the
 ``artifact_prefix`` attribute. It will default to ``public/build`` but will be
-overrideable per-task.
+overridable per-task.
 
 artifact_map
 ===============
@@ -326,3 +331,12 @@ disable-build-signing
 =====================
 Some GeckoView-only tasks produce APKs, but not APKs that should be
 signed.  Set this to ``true`` to disable APK signing.
+
+enable-build-signing
+====================
+We enable build-signing for ``shippable``, ``nightly``, and ``enable-build-signing`` tasks.
+
+run-visual-metrics
+==================
+If set to true, will run the visual metrics task on the provided
+video files.

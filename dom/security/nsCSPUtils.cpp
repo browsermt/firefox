@@ -13,7 +13,6 @@
 #include "nsIChannel.h"
 #include "nsICryptoHash.h"
 #include "nsIScriptError.h"
-#include "nsIServiceManager.h"
 #include "nsIStringBundle.h"
 #include "nsIURL.h"
 #include "nsReadableUtils.h"
@@ -316,6 +315,7 @@ CSPDirective CSP_ContentTypeToDirective(nsContentPolicyType aType) {
       return nsIContentSecurityPolicy::NO_DIRECTIVE;
 
     // Fall through to error for all other directives
+    // Note that we should never end up here for navigate-to
     default:
       MOZ_ASSERT(false, "Can not map nsContentPolicyType to CSPDirective");
   }
@@ -838,10 +838,10 @@ bool nsCSPKeywordSrc::allows(enum CSPKeyword aKeyword,
        mInvalidated ? "yes" : "false"));
 
   if (mInvalidated) {
-    // only 'self' and 'unsafe-inline' are keywords that can be ignored. Please
-    // note that the parser already translates 'self' into a uri (see assertion
-    // in constructor).
-    MOZ_ASSERT(mKeyword == CSP_UNSAFE_INLINE,
+    // only 'self', 'report-sample' and 'unsafe-inline' are keywords that can be
+    // ignored. Please note that the parser already translates 'self' into a uri
+    // (see assertion in constructor).
+    MOZ_ASSERT(mKeyword == CSP_UNSAFE_INLINE || mKeyword == CSP_REPORT_SAMPLE,
                "should only invalidate unsafe-inline");
     return false;
   }
@@ -1471,6 +1471,31 @@ bool nsCSPPolicy::hasDirective(CSPDirective aDir) const {
     }
   }
   return false;
+}
+
+bool nsCSPPolicy::allowsNavigateTo(nsIURI* aURI, bool aWasRedirected,
+                                   bool aEnforceWhitelist) const {
+  bool allowsNavigateTo = true;
+
+  for (unsigned long i = 0; i < mDirectives.Length(); i++) {
+    if (mDirectives[i]->equals(
+            nsIContentSecurityPolicy::NAVIGATE_TO_DIRECTIVE)) {
+      // Early return if we can skip the whitelist AND 'unsafe-allow-redirects'
+      // is present.
+      if (!aEnforceWhitelist &&
+          mDirectives[i]->allows(CSP_UNSAFE_ALLOW_REDIRECTS, EmptyString(),
+                                 false)) {
+        return true;
+      }
+      // Otherwise, check against the whitelist.
+      if (!mDirectives[i]->permits(aURI, EmptyString(), aWasRedirected, false,
+                                   false, false)) {
+        allowsNavigateTo = false;
+      }
+    }
+  }
+
+  return allowsNavigateTo;
 }
 
 /*

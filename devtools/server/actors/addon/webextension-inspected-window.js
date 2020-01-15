@@ -356,12 +356,11 @@ var WebExtensionInspectedWindowActor = protocol.ActorClassWithSpec(
         enumerable: true,
         configurable: true,
         value: dbgWindow.makeDebuggeeValue(object => {
-          const dbgObj = dbgWindow.makeDebuggeeValue(object);
-
           const consoleActor = DebuggerServer.searchAllConnectionsForActor(
             options.toolboxConsoleActorID
           );
           if (consoleActor) {
+            const dbgObj = consoleActor.makeDebuggeeValue(object);
             consoleActor.inspectObject(
               dbgObj,
               "webextension-devtools-inspectedWindow-eval"
@@ -500,7 +499,7 @@ var WebExtensionInspectedWindowActor = protocol.ActorClassWithSpec(
      *   it is called over the remote debugging protocol the target window is always
      *   `targetActor.window`.
      */
-    /* eslint-disable complexity */
+    // eslint-disable-next-line complexity
     eval(callerInfo, expression, options, customTargetWindow) {
       const window = customTargetWindow || this.window;
       options = options || {};
@@ -689,7 +688,6 @@ var WebExtensionInspectedWindowActor = protocol.ActorClassWithSpec(
 
       return { value: evalResult };
     },
-    /* eslint-enable complexity */
   }
 );
 

@@ -15,7 +15,7 @@ from taskgraph.transforms.task import taskref_or_string
 from taskgraph.transforms.job import run_job_using
 from taskgraph.util.schema import Schema
 from taskgraph.transforms.job.common import (
-        docker_worker_add_tooltool,
+        add_tooltool,
         support_vcs_checkout
 )
 from voluptuous import Any, Optional, Required
@@ -109,7 +109,7 @@ def docker_worker_run_task(config, job, taskdesc):
 
     if run['tooltool-downloads']:
         internal = run['tooltool-downloads'] == 'internal'
-        docker_worker_add_tooltool(config, job, taskdesc, internal=internal)
+        add_tooltool(config, job, taskdesc, internal=internal)
 
     if run.get('cache-dotcache'):
         worker['caches'].append({
@@ -155,11 +155,15 @@ def generic_worker_run_task(config, job, taskdesc):
     is_mac = worker['os'] == 'macosx'
     is_bitbar = worker['os'] == 'linux-bitbar'
 
+    if run['tooltool-downloads']:
+        internal = run['tooltool-downloads'] == 'internal'
+        add_tooltool(config, job, taskdesc, internal=internal)
+
     if is_win:
         command = ['C:/mozilla-build/python3/python3.exe', 'run-task']
     elif is_mac:
         command = ['/tools/python37/bin/python3.7', 'run-task']
-        if job['worker-type'].endswith('1014'):
+        if job['worker-type'].endswith(('1014', '1014-pgo')):
             command = ['/usr/local/bin/python3', 'run-task']
     else:
         command = ['./run-task']

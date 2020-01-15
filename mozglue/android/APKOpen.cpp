@@ -31,7 +31,7 @@
 #include "sqlite3.h"
 #include "SQLiteBridge.h"
 #include "NSSBridge.h"
-#include "ElfLoader.h"
+#include "Linker.h"
 #include "application.ini.h"
 
 #include "mozilla/arm.h"
@@ -99,7 +99,7 @@ JavaVM* sJavaVM;
 
 void abortThroughJava(const char* msg) {
   struct sigaction sigact = {};
-  if (SEGVHandler::__wrap_sigaction(SIGSEGV, nullptr, &sigact)) {
+  if (__wrap_sigaction(SIGSEGV, nullptr, &sigact)) {
     return;  // sigaction call failed.
   }
 
@@ -196,8 +196,13 @@ static mozglueresult loadGeckoLibs() {
   getrusage(RUSAGE_THREAD, &usage1_thread);
   getrusage(RUSAGE_SELF, &usage1);
 
-  gBootstrap = GetBootstrap(getUnpackedLibraryName("libxul.so").get(),
-                            LibLoadingStrategy::ReadAhead);
+  static const char* libxul = getenv("MOZ_ANDROID_LIBDIR_OVERRIDE");
+  if (libxul) {
+    gBootstrap = GetBootstrap(libxul, LibLoadingStrategy::ReadAhead);
+  } else {
+    gBootstrap = GetBootstrap(getUnpackedLibraryName("libxul.so").get(),
+                              LibLoadingStrategy::ReadAhead);
+  }
   if (!gBootstrap) {
     __android_log_print(ANDROID_LOG_ERROR, "GeckoLibLoad",
                         "Couldn't get a handle to libxul!");
@@ -368,9 +373,13 @@ Java_org_mozilla_gecko_mozglue_GeckoLoader_nativeRun(JNIEnv* jenv, jclass jc,
       return;
     }
 
+#ifdef MOZ_LINKER
     ElfLoader::Singleton.ExpectShutdown(false);
+#endif
     gBootstrap->GeckoStart(jenv, argv, argc, sAppData);
+#ifdef MOZ_LINKER
     ElfLoader::Singleton.ExpectShutdown(true);
+#endif
   } else {
     gBootstrap->XRE_SetAndroidChildFds(
         jenv, {prefsFd, prefMapFd, ipcFd, crashFd, crashAnnotationFd});

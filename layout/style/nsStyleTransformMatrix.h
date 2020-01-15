@@ -11,11 +11,11 @@
 #ifndef nsStyleTransformMatrix_h_
 #define nsStyleTransformMatrix_h_
 
-#include "gfxPoint.h"
 #include "mozilla/gfx/Matrix.h"
 #include "mozilla/EnumeratedArray.h"
+#include "mozilla/ServoStyleConsts.h"
 #include "nsSize.h"
-
+#include "Units.h"  // for CSSPoint
 #include <limits>
 
 class nsIFrame;
@@ -24,7 +24,7 @@ struct gfxQuaternion;
 struct nsRect;
 
 namespace mozilla {
-struct MotionPathData;
+struct ResolvedMotionPathData;
 }
 
 /**
@@ -172,9 +172,17 @@ mozilla::gfx::Matrix4x4 ReadTransforms(const mozilla::StyleTransform& aList,
 mozilla::gfx::Matrix4x4 ReadTransforms(
     const mozilla::StyleTranslate&, const mozilla::StyleRotate&,
     const mozilla::StyleScale&,
-    const mozilla::Maybe<mozilla::MotionPathData>& aMotion,
+    const mozilla::Maybe<mozilla::ResolvedMotionPathData>& aMotion,
     const mozilla::StyleTransform&, TransformReferenceBox& aRefBox,
     float aAppUnitsPerMatrixUnit);
+
+/**
+ * Given the x and y values, compute the 2d position with respect to the given
+ * a reference box size that these values describe, in CSS pixels.
+ */
+mozilla::CSSPoint Convert2DPosition(const mozilla::LengthPercentage& aX,
+                                    const mozilla::LengthPercentage& aY,
+                                    const mozilla::CSSSize& aSize);
 
 /**
  * Given the x and y values, compute the 2d position with respect to the given

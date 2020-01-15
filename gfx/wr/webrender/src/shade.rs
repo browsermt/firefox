@@ -66,12 +66,14 @@ pub(crate) enum ShaderKind {
     #[allow(dead_code)]
     VectorCover,
     Resolve,
+    Composite,
 }
 
 pub struct LazilyCompiledShader {
     program: Option<Program>,
     name: &'static str,
     kind: ShaderKind,
+    cached_projection: Transform3D<f32>,
     features: Vec<&'static str>,
 }
 
@@ -87,6 +89,9 @@ impl LazilyCompiledShader {
             program: None,
             name,
             kind,
+            //Note: this isn't really the default state, but there is no chance
+            // an actual projection passed here would accidentally match.
+            cached_projection: Transform3D::identity(),
             features: features.to_vec(),
         };
 
@@ -110,7 +115,8 @@ impl LazilyCompiledShader {
         projection: &Transform3D<f32>,
         renderer_errors: &mut Vec<RendererError>,
     ) {
-        let program = match self.get(device) {
+        let update_projection = self.cached_projection != *projection;
+        let program = match self.get_internal(device, ShaderPrecacheFlags::FULL_COMPILE) {
             Ok(program) => program,
             Err(e) => {
                 renderer_errors.push(RendererError::from(e));
@@ -118,7 +124,11 @@ impl LazilyCompiledShader {
             }
         };
         device.bind_program(program);
-        device.set_uniforms(program, projection);
+        if update_projection {
+            device.set_uniforms(program, projection);
+            // thanks NLL for this (`program` technically borrows `self`)
+            self.cached_projection = *projection;
+        }
     }
 
     fn get_internal(
@@ -156,6 +166,13 @@ impl LazilyCompiledShader {
                         &self.features,
                     )
                 }
+                ShaderKind::Composite => {
+                    create_prim_shader(
+                        self.name,
+                        device,
+                        &self.features,
+                    )
+                }
                 ShaderKind::ClipCache => {
                     create_clip_shader(
                         self.name,
@@ -179,6 +196,7 @@ impl LazilyCompiledShader {
                 ShaderKind::VectorCover => VertexArrayKind::VectorCover,
                 ShaderKind::ClipCache => VertexArrayKind::Clip,
                 ShaderKind::Resolve => VertexArrayKind::Resolve,
+                ShaderKind::Composite => VertexArrayKind::Composite,
             };
 
             let vertex_descriptor = match vertex_format {
@@ -193,6 +211,7 @@ impl LazilyCompiledShader {
                 VertexArrayKind::Scale => &desc::SCALE,
                 VertexArrayKind::Resolve => &desc::RESOLVE,
                 VertexArrayKind::SvgFilter => &desc::SVG_FILTER,
+                VertexArrayKind::Composite => &desc::COMPOSITE,
             };
 
             device.link_program(program, vertex_descriptor)?;
@@ -233,10 +252,6 @@ impl LazilyCompiledShader {
         }
 
         Ok(program)
-    }
-
-    fn get(&mut self, device: &mut Device) -> Result<&mut Program, ShaderError> {
-        self.get_internal(device, ShaderPrecacheFlags::FULL_COMPILE)
     }
 
     fn deinit(self, device: &mut Device) {
@@ -523,6 +538,7 @@ pub struct Shaders {
     brush_yuv_image: Vec<Option<BrushShader>>,
     brush_radial_gradient: BrushShader,
     brush_linear_gradient: BrushShader,
+    brush_opacity: BrushShader,
 
     /// These are "cache clip shaders". These shaders are used to
     /// draw clip instances into the cached clip mask. The results
@@ -549,6 +565,13 @@ pub struct Shaders {
     pub pls_resolve: LazilyCompiledShader,
 
     ps_split_composite: LazilyCompiledShader,
+
+    // Composite shader. This is a very simple shader used to composite
+    // picture cache tiles into the framebuffer. In future, this will
+    // only be used on platforms that aren't directly handing picture
+    // cache surfaces to an OS compositor, such as DirectComposite or
+    // CoreAnimation.
+    pub composite: LazilyCompiledShader,
 }
 
 impl Shaders {
@@ -613,6 +636,16 @@ impl Shaders {
             } else {
                &[]
             },
+            options.precache_flags,
+            false /* advanced blend */,
+            false /* dual source */,
+            use_pixel_local_storage,
+        )?;
+
+        let brush_opacity = BrushShader::new(
+            "brush_opacity",
+            device,
+            &[],
             options.precache_flags,
             false /* advanced blend */,
             false /* dual source */,
@@ -848,6 +881,14 @@ impl Shaders {
             options.precache_flags,
         )?;
 
+        let composite = LazilyCompiledShader::new(
+            ShaderKind::Composite,
+            "composite",
+            &[],
+            device,
+            options.precache_flags,
+        )?;
+
         Ok(Shaders {
             cs_blur_a8,
             cs_blur_rgba8,
@@ -865,6 +906,7 @@ impl Shaders {
             brush_yuv_image,
             brush_radial_gradient,
             brush_linear_gradient,
+            brush_opacity,
             cs_clip_rectangle_slow,
             cs_clip_rectangle_fast,
             cs_clip_box_shadow,
@@ -874,6 +916,7 @@ impl Shaders {
             ps_text_run,
             ps_text_run_dual_source,
             ps_split_composite,
+            composite,
         })
     }
 
@@ -924,6 +967,9 @@ impl Shaders {
                             .as_mut()
                             .expect("Unsupported YUV shader kind")
                     }
+                    BrushBatchKind::Opacity => {
+                        &mut self.brush_opacity
+                    }
                 };
                 brush_shader.get(key.blend_mode, debug_flags)
             }
@@ -947,6 +993,7 @@ impl Shaders {
         self.brush_mix_blend.deinit(device);
         self.brush_radial_gradient.deinit(device);
         self.brush_linear_gradient.deinit(device);
+        self.brush_opacity.deinit(device);
         self.cs_clip_rectangle_slow.deinit(device);
         self.cs_clip_rectangle_fast.deinit(device);
         self.cs_clip_box_shadow.deinit(device);
@@ -975,6 +1022,7 @@ impl Shaders {
         self.cs_line_decoration.deinit(device);
         self.cs_border_segment.deinit(device);
         self.ps_split_composite.deinit(device);
+        self.composite.deinit(device);
     }
 }
 

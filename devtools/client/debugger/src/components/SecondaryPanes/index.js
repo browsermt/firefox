@@ -27,6 +27,7 @@ import {
   getThreadContext,
   getSourceFromId,
   getSkipPausing,
+  shouldLogEventBreakpoints,
 } from "../../selectors";
 
 import AccessibleImage from "../shared/AccessibleImage";
@@ -44,6 +45,7 @@ import XHRBreakpoints from "./XHRBreakpoints";
 import EventListeners from "./EventListeners";
 import DOMMutationBreakpoints from "./DOMMutationBreakpoints";
 import WhyPaused from "./WhyPaused";
+import FrameTimeline from "./FrameTimeline";
 
 import Scopes from "./Scopes";
 
@@ -84,6 +86,10 @@ type State = {
   showXHRInput: boolean,
 };
 
+type OwnProps = {|
+  horizontal: boolean,
+  toggleShortcutsModal: () => void,
+|};
 type Props = {
   cx: ThreadContext,
   expressions: List<Expression>,
@@ -99,6 +105,7 @@ type Props = {
   shouldPauseOnCaughtExceptions: boolean,
   workers: ThreadList,
   skipPausing: boolean,
+  logEventBreakpoints: boolean,
   source: ?Source,
   toggleShortcutsModal: () => void,
   toggleAllBreakpoints: typeof actions.toggleAllBreakpoints,
@@ -106,6 +113,7 @@ type Props = {
   evaluateExpressions: typeof actions.evaluateExpressions,
   pauseOnExceptions: typeof actions.pauseOnExceptions,
   breakOnNext: typeof actions.breakOnNext,
+  toggleEventLogging: typeof actions.toggleEventLogging,
 };
 
 const mdnLink =
@@ -277,6 +285,26 @@ class SecondaryPanes extends Component<Props, State> {
     ];
   }
 
+  getEventButtons() {
+    const { logEventBreakpoints } = this.props;
+    return [
+      <div key="events-buttons">
+        <label
+          className="events-header"
+          title={L10N.getStr("eventlisteners.log.label")}
+          onClick={e => e.stopPropagation()}
+        >
+          <input
+            type="checkbox"
+            checked={logEventBreakpoints ? "checked" : ""}
+            onChange={e => this.props.toggleEventLogging()}
+          />
+          {L10N.getStr("eventlisteners.log")}
+        </label>
+      </div>,
+    ];
+  }
+
   getWatchItem(): AccordionPaneItem {
     return {
       header: L10N.getStr("watchExpressions.header"),
@@ -317,7 +345,7 @@ class SecondaryPanes extends Component<Props, State> {
     return {
       header: L10N.getStr("callStack.header"),
       className: "call-stack-pane",
-      component: <Frames />,
+      component: <Frames panel="debugger" />,
       opened: prefs.callStackVisible,
       onToggle: opened => {
         prefs.callStackVisible = opened;
@@ -366,7 +394,7 @@ class SecondaryPanes extends Component<Props, State> {
     return {
       header: L10N.getStr("eventListenersHeader1"),
       className: "event-listeners-pane",
-      buttons: [],
+      buttons: this.getEventButtons(),
       component: <EventListeners />,
       opened: prefs.eventListenersVisible,
       onToggle: opened => {
@@ -494,6 +522,7 @@ class SecondaryPanes extends Component<Props, State> {
     return (
       <div className="secondary-panes-wrapper">
         <CommandBar horizontal={this.props.horizontal} />
+        <FrameTimeline />
         <div
           className={classnames(
             "secondary-panes",
@@ -540,12 +569,13 @@ const mapStateToProps = state => {
     shouldPauseOnCaughtExceptions: getShouldPauseOnCaughtExceptions(state),
     workers: getThreads(state),
     skipPausing: getSkipPausing(state),
+    logEventBreakpoints: shouldLogEventBreakpoints(state),
     source:
       selectedFrame && getSourceFromId(state, selectedFrame.location.sourceId),
   };
 };
 
-export default connect(
+export default connect<Props, OwnProps, _, _, _, _>(
   mapStateToProps,
   {
     toggleAllBreakpoints: actions.toggleAllBreakpoints,
@@ -553,5 +583,6 @@ export default connect(
     pauseOnExceptions: actions.pauseOnExceptions,
     toggleMapScopes: actions.toggleMapScopes,
     breakOnNext: actions.breakOnNext,
+    toggleEventLogging: actions.toggleEventLogging,
   }
 )(SecondaryPanes);

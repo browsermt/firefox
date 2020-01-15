@@ -22,6 +22,7 @@ from mozversioncontrol import (
     GitRepository,
     HgRepository,
     InvalidRepoPath,
+    MissingConfigureInfo,
 )
 
 from .backend.configenvironment import (
@@ -54,7 +55,10 @@ def ancestors(path):
 
 
 def samepath(path1, path2):
-    if hasattr(os.path, 'samefile'):
+    # Under Python 3 (but NOT Python 2), MozillaBuild exposes the
+    # os.path.samefile function despite it not working, so only use it if we're
+    # not running under Windows.
+    if hasattr(os.path, 'samefile') and os.name != 'nt':
         return os.path.samefile(path1, path2)
     return os.path.normcase(os.path.realpath(path1)) == \
         os.path.normcase(os.path.realpath(path2))
@@ -109,7 +113,7 @@ class MozbuildObject(ProcessExecutionMixin):
         self._virtualenv_manager = None
 
     @classmethod
-    def from_environment(cls, cwd=None, detect_virtualenv_mozinfo=True):
+    def from_environment(cls, cwd=None, detect_virtualenv_mozinfo=True, **kwargs):
         """Create a MozbuildObject by detecting the proper one from the env.
 
         This examines environment state like the current working directory and
@@ -186,7 +190,7 @@ class MozbuildObject(ProcessExecutionMixin):
         # If we can't resolve topobjdir, oh well. We'll figure out when we need
         # one.
         return cls(topsrcdir, None, None, topobjdir=topobjdir,
-                   mozconfig=mozconfig)
+                   mozconfig=mozconfig, **kwargs)
 
     def resolve_mozconfig_topobjdir(self, default=None):
         topobjdir = self.mozconfig['topobjdir'] or default
@@ -256,10 +260,13 @@ class MozbuildObject(ProcessExecutionMixin):
     @property
     def virtualenv_manager(self):
         if self._virtualenv_manager is None:
+            name = "init"
+            if six.PY3:
+                name += "_py3"
             self._virtualenv_manager = VirtualenvManager(
                 self.topsrcdir,
                 self.topobjdir,
-                os.path.join(self.topobjdir, '_virtualenvs', 'init'),
+                os.path.join(self.topobjdir, '_virtualenvs', name),
                 sys.stdout,
                 os.path.join(self.topsrcdir, 'build', 'virtualenv_packages.txt')
                 )
@@ -273,7 +280,7 @@ class MozbuildObject(ProcessExecutionMixin):
         # the environment variable, which has an impact on autodetection (when
         # path is MozconfigLoader.AUTODETECT), and memoization wouldn't account
         # for it without the explicit (unused) argument.
-        out = six.BytesIO()
+        out = six.StringIO()
         env = os.environ
         if path and path != MozconfigLoader.AUTODETECT:
             env = dict(env)
@@ -399,7 +406,7 @@ class MozbuildObject(ProcessExecutionMixin):
         # If we don't have a configure context, fall back to auto-detection.
         try:
             return get_repository_from_build_config(self)
-        except BuildEnvironmentNotFoundException:
+        except (BuildEnvironmentNotFoundException, MissingConfigureInfo):
             pass
 
         return get_repository_object(self.topsrcdir)
@@ -929,6 +936,13 @@ class MachCommandConditions(object):
         return False
 
     @staticmethod
+    def is_jsshell(cls):
+        """Must have a jsshell build."""
+        if hasattr(cls, 'substs'):
+            return cls.substs.get('MOZ_BUILD_APP') == 'js'
+        return False
+
+    @staticmethod
     def is_thunderbird(cls):
         """Must have a Thunderbird build."""
         if hasattr(cls, 'substs'):
@@ -953,6 +967,18 @@ class MachCommandConditions(object):
     def is_firefox_or_android(cls):
         """Must have a Firefox or Android build."""
         return MachCommandConditions.is_firefox(cls) or MachCommandConditions.is_android(cls)
+
+    @staticmethod
+    def has_build(cls):
+        """Must have a build."""
+        return (MachCommandConditions.is_firefox_or_android(cls) or
+                MachCommandConditions.is_thunderbird(cls))
+
+    @staticmethod
+    def has_build_or_shell(cls):
+        """Must have a build or a shell build."""
+        return (MachCommandConditions.has_build(cls) or
+                MachCommandConditions.is_jsshell(cls))
 
     @staticmethod
     def is_hg(cls):

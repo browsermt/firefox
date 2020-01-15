@@ -44,7 +44,9 @@ typedef wr::WrImageKey ImageKey;
 typedef wr::WrFontKey FontKey;
 typedef wr::WrFontInstanceKey FontInstanceKey;
 typedef wr::WrEpoch Epoch;
-typedef wr::WrExternalImageId ExternalImageId;
+
+class RenderedFrameIdType {};
+typedef layers::BaseTransactionId<RenderedFrameIdType> RenderedFrameId;
 
 typedef mozilla::Maybe<mozilla::wr::IdNamespace> MaybeIdNamespace;
 typedef mozilla::Maybe<mozilla::wr::ImageMask> MaybeImageMask;
@@ -195,36 +197,47 @@ struct ImageDescriptor : public wr::WrImageDescriptor {
     height = 0;
     stride = 0;
     opacity = OpacityType::HasAlphaChannel;
+    prefer_compositor_surface = false;
   }
 
-  ImageDescriptor(const gfx::IntSize& aSize, gfx::SurfaceFormat aFormat) {
+  ImageDescriptor(const gfx::IntSize& aSize, gfx::SurfaceFormat aFormat,
+                  bool aPreferCompositorSurface = false) {
     format = wr::SurfaceFormatToImageFormat(aFormat).value();
     width = aSize.width;
     height = aSize.height;
     stride = 0;
     opacity = gfx::IsOpaque(aFormat) ? OpacityType::Opaque
                                      : OpacityType::HasAlphaChannel;
+    prefer_compositor_surface = aPreferCompositorSurface;
   }
 
   ImageDescriptor(const gfx::IntSize& aSize, uint32_t aByteStride,
-                  gfx::SurfaceFormat aFormat) {
+                  gfx::SurfaceFormat aFormat,
+                  bool aPreferCompositorSurface = false) {
     format = wr::SurfaceFormatToImageFormat(aFormat).value();
     width = aSize.width;
     height = aSize.height;
     stride = aByteStride;
     opacity = gfx::IsOpaque(aFormat) ? OpacityType::Opaque
                                      : OpacityType::HasAlphaChannel;
+    prefer_compositor_surface = aPreferCompositorSurface;
   }
 
   ImageDescriptor(const gfx::IntSize& aSize, uint32_t aByteStride,
-                  gfx::SurfaceFormat aFormat, OpacityType aOpacity) {
+                  gfx::SurfaceFormat aFormat, OpacityType aOpacity,
+                  bool aPreferCompositorSurface = false) {
     format = wr::SurfaceFormatToImageFormat(aFormat).value();
     width = aSize.width;
     height = aSize.height;
     stride = aByteStride;
     opacity = aOpacity;
+    prefer_compositor_surface = aPreferCompositorSurface;
   }
 };
+
+inline uint64_t AsUint64(const NativeSurfaceId& aId) {
+  return static_cast<uint64_t>(aId._0);
+}
 
 // Whenever possible, use wr::WindowId instead of manipulating uint64_t.
 inline uint64_t AsUint64(const WindowId& aId) {
@@ -598,8 +611,8 @@ static inline wr::BorderRadius ToBorderRadius(
 static inline wr::ComplexClipRegion ToComplexClipRegion(
     const nsRect& aRect, const nscoord* aRadii, int32_t aAppUnitsPerDevPixel) {
   wr::ComplexClipRegion ret;
-  ret.rect = ToRoundedLayoutRect(
-      LayoutDeviceRect::FromAppUnits(aRect, aAppUnitsPerDevPixel));
+  ret.rect =
+      ToLayoutRect(LayoutDeviceRect::FromAppUnits(aRect, aAppUnitsPerDevPixel));
   ret.radii = ToBorderRadius(
       LayoutDeviceSize::FromAppUnits(
           nsSize(aRadii[eCornerTopLeftX], aRadii[eCornerTopLeftY]),
@@ -687,12 +700,12 @@ static inline wr::WrOpacityProperty ToWrOpacityProperty(uint64_t id,
 
 // Whenever possible, use wr::ExternalImageId instead of manipulating uint64_t.
 inline uint64_t AsUint64(const ExternalImageId& aId) {
-  return static_cast<uint64_t>(aId.mHandle);
+  return static_cast<uint64_t>(aId._0);
 }
 
 static inline ExternalImageId ToExternalImageId(uint64_t aID) {
   ExternalImageId Id;
-  Id.mHandle = aID;
+  Id._0 = aID;
   return Id;
 }
 

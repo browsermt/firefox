@@ -26,6 +26,7 @@
 #include <CoreVideo/CoreVideo.h>
 
 #include "mozilla/layers/CompositorBridgeParent.h"
+#include "mozilla/layers/SurfacePool.h"
 #include "VsyncSource.h"
 
 using namespace mozilla;
@@ -167,12 +168,14 @@ static const char kFontMenlo[] = "Menlo";
 static const char kFontMicrosoftTaiLe[] = "Microsoft Tai Le";
 static const char kFontMingLiUExtB[] = "MingLiU-ExtB";
 static const char kFontMyanmarMN[] = "Myanmar MN";
+static const char kFontNotoSansMongolian[] = "Noto Sans Mongolian";
 static const char kFontPlantagenetCherokee[] = "Plantagenet Cherokee";
 static const char kFontSimSunExtB[] = "SimSun-ExtB";
 static const char kFontSongtiSC[] = "Songti SC";
 static const char kFontSTHeiti[] = "STHeiti";
 static const char kFontSTIXGeneral[] = "STIXGeneral";
 static const char kFontTamilMN[] = "Tamil MN";
+static const char kFontZapfDingbats[] = "Zapf Dingbats";
 
 void gfxPlatformMac::GetCommonFallbackFonts(uint32_t aCh, uint32_t aNextCh,
                                             Script aRunScript,
@@ -242,7 +245,7 @@ void gfxPlatformMac::GetCommonFallbackFonts(uint32_t aCh, uint32_t aNextCh,
         aFontList.AppendElement(kFontGeneva);
         break;
       case 0x18:  // Mongolian, UCAS
-        aFontList.AppendElement(kFontSTHeiti);
+        aFontList.AppendElement(kFontNotoSansMongolian);
         aFontList.AppendElement(kFontEuphemiaUCAS);
         break;
       case 0x19:  // Khmer
@@ -253,6 +256,9 @@ void gfxPlatformMac::GetCommonFallbackFonts(uint32_t aCh, uint32_t aNextCh,
       case 0x1e:
         aFontList.AppendElement(kFontGeneva);
         break;
+      case 0x27:  // For Dingbats block 2700-27BF, prefer Zapf Dingbats
+        aFontList.AppendElement(kFontZapfDingbats);
+        [[fallthrough]];
       case 0x20:  // Symbol ranges
       case 0x21:
       case 0x22:
@@ -260,7 +266,6 @@ void gfxPlatformMac::GetCommonFallbackFonts(uint32_t aCh, uint32_t aNextCh,
       case 0x24:
       case 0x25:
       case 0x26:
-      case 0x27:
       case 0x29:
       case 0x2a:
       case 0x2b:
@@ -387,40 +392,28 @@ class OSXVsyncSource final : public VsyncSource {
         return;
       }
 
-      // Workaround for bug 1201401: CGDisplayIDToOpenGLDisplayMask() is a
-      // documented method with undocumented behavior -- it returns '0' as an
-      // error condition. Through at least macOS Catalina, Apple relies on
-      // this behavior in the CoreVideo framework to indicate that a given
-      // display is (temporarily) invalid (kCVReturnInvalidDisplay). But a
-      // method called (indirectly) from CVDisplayLinkCreateWithCGDisplays()
-      // ignores this error return (again indirectly), eventually leading to
-      // crashes in CVCGDisplayLink::getDisplayTimes(). The workaround is to
-      // call CGDisplayIDToOpenGLDisplayMask() ourselves, and do an early
-      // return if it returns '0' (that is, if a succeeding call to
-      // CVDisplayLinkCreateWithCGDisplays() would trigger Apple's bug and
-      // lead to a crash). It also makes sense to return early if
-      // CGGetActiveDisplayList() fails or there are no active displays.
-      const UInt32 kMaxDisplays = 256;
-      uint32_t displayCount;
-      CGDirectDisplayID displays[kMaxDisplays];
-      if ((CGGetActiveDisplayList(kMaxDisplays, displays, &displayCount) !=
-           kCGErrorSuccess) ||
-          (displayCount == 0)) {
-        return;
-      }
-      for (uint32_t i = 0; i < displayCount; ++i) {
-        if (CGDisplayIDToOpenGLDisplayMask(displays[i]) == 0) {
-          return;
-        }
-      }
-
       // Create a display link capable of being used with all active displays
       // TODO: See if we need to create an active DisplayLink for each monitor
       // in multi-monitor situations. According to the docs, it is compatible
       // with all displays running on the computer But if we have different
       // monitors at different display rates, we may hit issues.
-      if (CVDisplayLinkCreateWithCGDisplays(
-              displays, displayCount, &mDisplayLink) != kCVReturnSuccess) {
+      CVReturn retval = CVDisplayLinkCreateWithActiveCGDisplays(&mDisplayLink);
+
+      // Workaround for bug 1201401: CVDisplayLinkCreateWithCGDisplays()
+      // (called by CVDisplayLinkCreateWithActiveCGDisplays()) sometimes
+      // creates a CVDisplayLinkRef with an uninitialized (nulled) internal
+      // pointer. If we continue to use this CVDisplayLinkRef, we will
+      // eventually crash in CVCGDisplayLink::getDisplayTimes(), where the
+      // internal pointer is dereferenced. Fortunately, when this happens
+      // another internal variable is also left uninitialized (zeroed),
+      // which is accessible via CVDisplayLinkGetCurrentCGDisplay(). In
+      // normal conditions the current display is never zero.
+      if ((retval == kCVReturnSuccess) &&
+          (CVDisplayLinkGetCurrentCGDisplay(mDisplayLink) == 0)) {
+        retval = kCVReturnInvalidDisplay;
+      }
+
+      if (retval != kCVReturnSuccess) {
         NS_WARNING(
             "Could not create a display link with all active displays. "
             "Retrying");

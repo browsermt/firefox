@@ -35,7 +35,7 @@ add_task(async function() {
   verifyRequestItemTarget(
     document,
     getDisplayedRequests(store.getState()),
-    getSortedRequests(store.getState()).get(0),
+    getSortedRequests(store.getState())[0],
     "GET",
     HTTPS_CONTENT_TYPE_SJS + "?fmt=br",
     {
@@ -49,7 +49,7 @@ add_task(async function() {
     }
   );
 
-  wait = waitForDOM(document, ".CodeMirror-code");
+  const wait = waitForDOM(document, ".CodeMirror-code");
   const onResponseContent = monitor.panelWin.api.once(
     EVENTS.RECEIVED_RESPONSE_CONTENT
   );

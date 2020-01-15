@@ -6,48 +6,73 @@
 #include "Instance.h"
 
 #include "Adapter.h"
-#include "InstanceProvider.h"
-#include "mozilla/dom/WebGPUBinding.h"
+#include "gfxConfig.h"
 #include "nsIGlobalObject.h"
+#include "ipc/WebGPUChild.h"
+#include "ipc/WebGPUTypes.h"
+#include "mozilla/layers/CompositorBridgeChild.h"
 
 namespace mozilla {
 namespace webgpu {
 
+GPU_IMPL_CYCLE_COLLECTION(Instance, mBridge, mOwner)
+
 /*static*/
-RefPtr<Instance> Instance::Create(nsIGlobalObject* parent) {
-  return new Instance(parent);
+already_AddRefed<Instance> Instance::Create(nsIGlobalObject* aOwner) {
+  if (!gfx::gfxConfig::IsEnabled(gfx::Feature::WEBGPU)) {
+    return nullptr;
+  }
+
+  RefPtr<WebGPUChild> bridge =
+      layers::CompositorBridgeChild::Get()->GetWebGPUChild();
+  if (NS_WARN_IF(!bridge)) {
+    MOZ_CRASH("Failed to create an IPDL bridge for WebGPU!");
+  }
+
+  RefPtr<Instance> result = new Instance(aOwner, bridge);
+  return result.forget();
 }
 
-Instance::Instance(nsIGlobalObject* parent) : mParent(parent) {}
+Instance::Instance(nsIGlobalObject* aOwner, WebGPUChild* aBridge)
+    : mOwner(aOwner), mBridge(aBridge) {}
 
 Instance::~Instance() = default;
 
-already_AddRefed<Adapter> Instance::GetAdapter(
-    const dom::WebGPUAdapterDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-template <typename T>
-void ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback& callback,
-                                 const nsCOMPtr<T>& field, const char* name,
-                                 uint32_t flags) {
-  CycleCollectionNoteChild(callback, field.get(), name, flags);
-}
-
-template <typename T>
-void ImplCycleCollectionUnlink(const nsCOMPtr<T>& field) {
-  const auto mut = const_cast<nsCOMPtr<T>*>(&field);
-  *mut = nullptr;
-}
-
 JSObject* Instance::WrapObject(JSContext* cx,
                                JS::Handle<JSObject*> givenProto) {
-  return dom::WebGPU_Binding::Wrap(cx, this, givenProto);
+  return dom::GPU_Binding::Wrap(cx, this, givenProto);
 }
-NS_IMPL_CYCLE_COLLECTION_ROOT_NATIVE(Instance, AddRef)
-NS_IMPL_CYCLE_COLLECTION_UNROOT_NATIVE(Instance, Release)
 
-NS_IMPL_CYCLE_COLLECTION_WRAPPERCACHE(Instance, mParent)
+WebGPUChild* Instance::GetBridge() const { return mBridge; }
+
+already_AddRefed<dom::Promise> Instance::RequestAdapter(
+    const dom::GPURequestAdapterOptions& aOptions, ErrorResult& aRv) {
+  RefPtr<dom::Promise> promise = dom::Promise::Create(mOwner, aRv);
+  if (NS_WARN_IF(aRv.Failed())) {
+    return nullptr;
+  }
+
+  RefPtr<Instance> instance = this;
+
+  mBridge->InstanceRequestAdapter(aOptions)->Then(
+      GetMainThreadSerialEventTarget(), __func__,
+      [promise, instance](RawId id) {
+        MOZ_ASSERT(id != 0);
+        RefPtr<Adapter> adapter = new Adapter(instance, id);
+        promise->MaybeResolve(adapter);
+      },
+      [promise](const Maybe<ipc::ResponseRejectReason>& aRv) {
+        if (aRv.isSome()) {
+          promise->MaybeRejectWithDOMException(NS_ERROR_DOM_ABORT_ERR,
+                                               "Internal communication error!");
+        } else {
+          promise->MaybeRejectWithDOMException(NS_ERROR_DOM_INVALID_STATE_ERR,
+                                               "No matching adapter found!");
+        }
+      });
+
+  return promise.forget();
+}
 
 }  // namespace webgpu
 }  // namespace mozilla

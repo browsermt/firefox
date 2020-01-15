@@ -20,8 +20,7 @@ registerCleanupFunction(() => {
 loader.lazyRequireGetter(
   this,
   "ResponsiveUIManager",
-  "devtools/client/responsive/manager",
-  true
+  "devtools/client/responsive/manager"
 );
 
 const TESTCASE_URI = TEST_BASE_HTTPS + "media-rules.html";
@@ -143,7 +142,7 @@ function waitForResizeTo(rdmUI, type, value) {
 
 async function getSizing(rdmUI) {
   const browser = rdmUI.getViewportBrowser();
-  const sizing = await ContentTask.spawn(browser, {}, async function() {
+  const sizing = await SpecialPowers.spawn(browser, [], async function() {
     return {
       width: content.innerWidth,
       height: content.innerHeight,

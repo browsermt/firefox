@@ -39,6 +39,9 @@ class ChromeUtils {
 
  public:
   // Implemented in devtools/shared/heapsnapshot/HeapSnapshot.cpp
+  static uint64_t GetObjectNodeId(GlobalObject& global, JS::HandleObject aVal);
+
+  // Implemented in devtools/shared/heapsnapshot/HeapSnapshot.cpp
   static void SaveHeapSnapshot(GlobalObject& global,
                                const HeapSnapshotBoundaries& boundaries,
                                nsAString& filePath, ErrorResult& rv);
@@ -195,6 +198,9 @@ class ChromeUtils {
 
   static void PrivateNoteIntentionalCrash(const GlobalObject& aGlobal,
                                           ErrorResult& aError);
+
+  static void GenerateMediaControlKeysTestEvent(
+      const GlobalObject& aGlobal, MediaControlKeysTestEvent aEvent);
 };
 
 }  // namespace dom

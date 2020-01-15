@@ -16,16 +16,16 @@ header {
   display: flex;
   grid-area: header;
   align-items: center;
-  background-color: var(--in-content-box-background);
-  border-bottom: 1px solid var(--in-content-box-border-color);
+  background-color: var(--in-content-page-background);
+  border-bottom: 1px solid var(--in-content-border-color);
   padding-inline-end: 23px;
 }
 
 login-filter {
-  min-width: 320px;
+  min-width: 200px;
   max-width: 400px;
   margin-inline: 40px auto;
-  flex-grow: 1;
+  flex-grow: 0.5;
   align-self: center;
 }
 
@@ -38,10 +38,13 @@ login-list {
   grid-area: logins;
 }
 
+:root:not(.initialized) login-intro,
+:root:not(.initialized) login-item,
+:root.empty-search login-intro,
 :root:not(.no-logins):not(.empty-search):not(.login-selected) login-intro,
 login-item[data-editing="true"] + login-intro,
 .login-selected login-intro,
-.empty-search:not(.login-selected) login-item:not([data-editing="true"]),
+:root:not(.login-selected) login-item:not([data-editing="true"]),
 .no-logins login-item:not([data-editing="true"]) {
   display: none;
 }
@@ -49,10 +52,6 @@ login-item[data-editing="true"] + login-intro,
 login-intro,
 login-item {
   grid-area: login;
-}
-
-login-item {
-  max-width: 700px;
 }
 
 #branding-logo {
@@ -73,4 +72,22 @@ login-item {
 
 :root:not(.official-branding) #branding-logo {
   display: none;
+}
+
+:root:not(.master-password-auth-required) #master-password-required-overlay {
+  display: none;
+}
+
+.master-password-auth-required > body > header,
+.master-password-auth-required > body > login-list,
+.master-password-auth-required > body > login-intro {
+  filter: blur(2px)
+}
+
+#master-password-required-overlay {
+  z-index: 1;
+  position: fixed;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0,0,0,0.2);
 }

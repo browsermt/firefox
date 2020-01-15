@@ -13,6 +13,7 @@
 
 enum CanvasWindingRule { "nonzero", "evenodd" };
 
+[GenerateInit]
 dictionary ContextAttributes2D {
   // whether or not we're planning to do a lot of readback operations
   boolean willReadFrequently = false;
@@ -34,6 +35,7 @@ typedef (HTMLOrSVGImageElement or
          HTMLVideoElement or
          ImageBitmap) CanvasImageSource;
 
+[Exposed=Window]
 interface CanvasRenderingContext2D {
 
   // back-reference to the canvas.  Might be null if we're not
@@ -113,7 +115,7 @@ interface CanvasRenderingContext2D {
    */
   [Throws, Func="CanvasUtils::HasDrawWindowPrivilege"]
   void drawWindow(Window window, double x, double y, double w, double h,
-                  DOMString bgColor, optional unsigned long flags = 0);
+                  UTF8String bgColor, optional unsigned long flags = 0);
 
   /**
    * This causes a context that is currently using a hardware-accelerated
@@ -332,13 +334,15 @@ interface mixin CanvasHitRegions {
   [Pref="canvas.hitregions.enabled"] void clearHitRegions();
 };
 
+[Exposed=Window]
 interface CanvasGradient {
   // opaque object
   [Throws]
   // addColorStop should take a double
-  void addColorStop(float offset, DOMString color);
+  void addColorStop(float offset, UTF8String color);
 };
 
+[Exposed=Window]
 interface CanvasPattern {
   // opaque object
   // [Throws, LenientFloat] - could not do this overload because of bug 1020975
@@ -348,6 +352,7 @@ interface CanvasPattern {
   void setTransform(SVGMatrix matrix);
 };
 
+[Exposed=Window]
 interface TextMetrics {
 
   // x-direction
@@ -374,11 +379,13 @@ interface TextMetrics {
 };
 
 [Pref="canvas.path.enabled",
- Constructor,
- Constructor(Path2D other),
- Constructor(DOMString pathString)]
+ Exposed=Window]
 interface Path2D
 {
+  constructor();
+  constructor(Path2D other);
+  constructor(DOMString pathString);
+
   [Throws] void addPath(Path2D path, optional DOMMatrix2DInit transform = {});
 };
 Path2D includes CanvasPathMethods;

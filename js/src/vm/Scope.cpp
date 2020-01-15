@@ -12,6 +12,9 @@
 #include <new>
 
 #include "builtin/ModuleObject.h"
+#include "frontend/ParseInfo.h"
+#include "frontend/SharedContext.h"
+#include "frontend/Stencil.h"
 #include "gc/Allocator.h"
 #include "util/StringBuffer.h"
 #include "vm/EnvironmentObject.h"
@@ -83,9 +86,8 @@ const char* js::ScopeKindString(ScopeKind kind) {
   MOZ_CRASH("Bad ScopeKind");
 }
 
-static Shape* EmptyEnvironmentShape(JSContext* cx, const JSClass* cls,
-                                    uint32_t numSlots,
-                                    uint32_t baseShapeFlags) {
+Shape* js::EmptyEnvironmentShape(JSContext* cx, const JSClass* cls,
+                                 uint32_t numSlots, uint32_t baseShapeFlags) {
   // Put as many slots into the object header as possible.
   uint32_t numFixed = gc::GetGCKindSlots(gc::GetGCObjectKind(numSlots));
   return EmptyShape::getInitialShape(cx, cls, TaggedProto(nullptr), numFixed,
@@ -495,7 +497,7 @@ uint32_t LexicalScope::firstFrameSlot() const {
     case ScopeKind::Catch:
     case ScopeKind::FunctionLexical:
       // For intra-frame scopes, find the enclosing scope's next frame slot.
-      return nextFrameSlot(enclosing());
+      return nextFrameSlot(AbstractScope(enclosing()));
     case ScopeKind::NamedLambda:
     case ScopeKind::StrictNamedLambda:
       // Named lambda scopes cannot have frame slots.
@@ -508,39 +510,28 @@ uint32_t LexicalScope::firstFrameSlot() const {
 }
 
 /* static */
-uint32_t LexicalScope::nextFrameSlot(Scope* scope) {
-  for (ScopeIter si(scope); si; si++) {
+uint32_t LexicalScope::nextFrameSlot(const AbstractScope& scope) {
+  for (AbstractScopeIter si(scope); si; si++) {
     switch (si.kind()) {
+      case ScopeKind::With:
+        continue;
       case ScopeKind::Function:
-        return si.scope()->as<FunctionScope>().nextFrameSlot();
       case ScopeKind::FunctionBodyVar:
       case ScopeKind::ParameterExpressionVar:
-        return si.scope()->as<VarScope>().nextFrameSlot();
       case ScopeKind::Lexical:
       case ScopeKind::SimpleCatch:
       case ScopeKind::Catch:
       case ScopeKind::FunctionLexical:
-        return si.scope()->as<LexicalScope>().nextFrameSlot();
       case ScopeKind::NamedLambda:
       case ScopeKind::StrictNamedLambda:
-        // Named lambda scopes cannot have frame slots.
-        return 0;
-      case ScopeKind::With:
-        continue;
       case ScopeKind::Eval:
       case ScopeKind::StrictEval:
-        return si.scope()->as<EvalScope>().nextFrameSlot();
       case ScopeKind::Global:
       case ScopeKind::NonSyntactic:
-        return 0;
       case ScopeKind::Module:
-        return si.scope()->as<ModuleScope>().nextFrameSlot();
       case ScopeKind::WasmInstance:
-        // TODO return si.scope()->as<WasmInstanceScope>().nextFrameSlot();
-        return 0;
       case ScopeKind::WasmFunction:
-        // TODO return si.scope()->as<WasmFunctionScope>().nextFrameSlot();
-        return 0;
+        return si.abstractScope().nextFrameSlot();
     }
   }
   MOZ_CRASH("Not an enclosing intra-frame Scope");
@@ -563,11 +554,11 @@ LexicalScope* LexicalScope::create(JSContext* cx, ScopeKind kind,
   return createWithData(cx, kind, &copy, firstFrameSlot, enclosing);
 }
 
-/* static */
-LexicalScope* LexicalScope::createWithData(JSContext* cx, ScopeKind kind,
-                                           MutableHandle<UniquePtr<Data>> data,
+bool LexicalScope::prepareForScopeCreation(JSContext* cx, ScopeKind kind,
                                            uint32_t firstFrameSlot,
-                                           HandleScope enclosing) {
+                                           Handle<AbstractScope> enclosing,
+                                           MutableHandle<UniquePtr<Data>> data,
+                                           MutableHandleShape envShape) {
   bool isNamedLambda =
       kind == ScopeKind::NamedLambda || kind == ScopeKind::StrictNamedLambda;
 
@@ -575,11 +566,25 @@ LexicalScope* LexicalScope::createWithData(JSContext* cx, ScopeKind kind,
                 firstFrameSlot == nextFrameSlot(enclosing));
   MOZ_ASSERT_IF(isNamedLambda, firstFrameSlot == LOCALNO_LIMIT);
 
-  RootedShape envShape(cx);
   BindingIter bi(*data, firstFrameSlot, isNamedLambda);
   if (!PrepareScopeData<LexicalScope>(
           cx, bi, data, &LexicalEnvironmentObject::class_,
-          BaseShape::NOT_EXTENSIBLE | BaseShape::DELEGATE, &envShape)) {
+          BaseShape::NOT_EXTENSIBLE | BaseShape::DELEGATE, envShape)) {
+    return false;
+  }
+  return true;
+}
+
+/* static */
+LexicalScope* LexicalScope::createWithData(JSContext* cx, ScopeKind kind,
+                                           MutableHandle<UniquePtr<Data>> data,
+                                           uint32_t firstFrameSlot,
+                                           HandleScope enclosing) {
+  RootedShape envShape(cx);
+  Rooted<AbstractScope> abstractScope(cx, enclosing);
+
+  if (!prepareForScopeCreation(cx, kind, firstFrameSlot, abstractScope, data,
+                               &envShape)) {
     return nullptr;
   }
 
@@ -680,24 +685,15 @@ FunctionScope* FunctionScope::create(JSContext* cx, Handle<Data*> dataArg,
       needsEnvironment, fun, enclosing);
 }
 
-/* static */
-FunctionScope* FunctionScope::createWithData(
+bool FunctionScope::prepareForScopeCreation(
     JSContext* cx, MutableHandle<UniquePtr<Data>> data, bool hasParameterExprs,
     IsFieldInitializer isFieldInitializer, bool needsEnvironment,
-    HandleFunction fun, HandleScope enclosing) {
-  MOZ_ASSERT(data);
-  MOZ_ASSERT(fun->isTenured());
-
-  // FunctionScope::Data has GCManagedDeletePolicy because it contains a
-  // GCPtr. Destruction of |data| below may trigger calls into the GC.
-
-  RootedShape envShape(cx);
-
+    HandleFunction fun, MutableHandleShape envShape) {
   BindingIter bi(*data, hasParameterExprs);
   uint32_t shapeFlags = FunctionScopeEnvShapeFlags(hasParameterExprs);
   if (!PrepareScopeData<FunctionScope>(cx, bi, data, &CallObject::class_,
-                                       shapeFlags, &envShape)) {
-    return nullptr;
+                                       shapeFlags, envShape)) {
+    return false;
   }
 
   data->isFieldInitializer = isFieldInitializer;
@@ -711,10 +707,30 @@ FunctionScope* FunctionScope::createWithData(
   //   - Being a derived class constructor
   //   - Being a generator
   if (!envShape && needsEnvironment) {
-    envShape = getEmptyEnvironmentShape(cx, hasParameterExprs);
+    envShape.set(getEmptyEnvironmentShape(cx, hasParameterExprs));
     if (!envShape) {
-      return nullptr;
+      return false;
     }
+  }
+
+  return true;
+}
+
+/* static */
+FunctionScope* FunctionScope::createWithData(
+    JSContext* cx, MutableHandle<UniquePtr<Data>> data, bool hasParameterExprs,
+    IsFieldInitializer isFieldInitializer, bool needsEnvironment,
+    HandleFunction fun, HandleScope enclosing) {
+  MOZ_ASSERT(data);
+  MOZ_ASSERT(fun->isTenured());
+
+  // FunctionScope::Data has GCManagedDeletePolicy because it contains a
+  // GCPtr. Destruction of |data| below may trigger calls into the GC.
+  RootedShape envShape(cx);
+
+  if (!prepareForScopeCreation(cx, data, hasParameterExprs, isFieldInitializer,
+                               needsEnvironment, fun, &envShape)) {
+    return nullptr;
   }
 
   return Scope::create<FunctionScope>(cx, ScopeKind::Function, enclosing,
@@ -867,6 +883,30 @@ VarScope* VarScope::create(JSContext* cx, ScopeKind kind, Handle<Data*> dataArg,
                         enclosing);
 }
 
+bool VarScope::prepareForScopeCreation(JSContext* cx, ScopeKind kind,
+                                       MutableHandle<UniquePtr<Data>> data,
+                                       uint32_t firstFrameSlot,
+                                       bool needsEnvironment,
+                                       MutableHandleShape envShape) {
+  BindingIter bi(*data, firstFrameSlot);
+  if (!PrepareScopeData<VarScope>(cx, bi, data, &VarEnvironmentObject::class_,
+                                  VarScopeEnvShapeFlags, envShape)) {
+    return false;
+  }
+
+  // An environment may be needed regardless of existence of any closed over
+  // bindings:
+  //   - Extensible scopes (i.e., due to direct eval)
+  //   - Being a generator
+  if (!envShape && needsEnvironment) {
+    envShape.set(getEmptyEnvironmentShape(cx));
+    if (!envShape) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* static */
 VarScope* VarScope::createWithData(JSContext* cx, ScopeKind kind,
                                    MutableHandle<UniquePtr<Data>> data,
@@ -876,21 +916,9 @@ VarScope* VarScope::createWithData(JSContext* cx, ScopeKind kind,
   MOZ_ASSERT(data);
 
   RootedShape envShape(cx);
-  BindingIter bi(*data, firstFrameSlot);
-  if (!PrepareScopeData<VarScope>(cx, bi, data, &VarEnvironmentObject::class_,
-                                  VarScopeEnvShapeFlags, &envShape)) {
+  if (!prepareForScopeCreation(cx, kind, data, firstFrameSlot, needsEnvironment,
+                               &envShape)) {
     return nullptr;
-  }
-
-  // An environment may be needed regardless of existence of any closed over
-  // bindings:
-  //   - Extensible scopes (i.e., due to direct eval)
-  //   - Being a generator
-  if (!envShape && needsEnvironment) {
-    envShape = getEmptyEnvironmentShape(cx);
-    if (!envShape) {
-      return nullptr;
-    }
   }
 
   return Scope::create<VarScope>(cx, kind, enclosing, envShape, data);
@@ -1003,7 +1031,6 @@ GlobalScope* GlobalScope::clone(JSContext* cx, Handle<GlobalScope*> scope,
   if (!dataClone) {
     return nullptr;
   }
-
   return Scope::create<GlobalScope>(cx, kind, nullptr, nullptr, &dataClone);
 }
 
@@ -1066,7 +1093,6 @@ template <XDRMode mode>
 XDRResult WithScope::XDR(XDRState<mode>* xdr, HandleScope enclosing,
                          MutableHandleScope scope) {
   JSContext* cx = xdr->cx();
-
   if (mode == XDR_DECODE) {
     scope.set(create(cx, enclosing));
     if (!scope) {
@@ -1107,6 +1133,29 @@ EvalScope* EvalScope::create(JSContext* cx, ScopeKind scopeKind,
   return createWithData(cx, scopeKind, &data, enclosing);
 }
 
+bool EvalScope::prepareForScopeCreation(JSContext* cx, ScopeKind scopeKind,
+                                        MutableHandle<UniquePtr<Data>> data,
+                                        MutableHandleShape envShape) {
+  if (scopeKind == ScopeKind::StrictEval) {
+    BindingIter bi(*data, true);
+    if (!PrepareScopeData<EvalScope>(cx, bi, data,
+                                     &VarEnvironmentObject::class_,
+                                     EvalScopeEnvShapeFlags, envShape)) {
+      return false;
+    }
+  }
+
+  // Strict eval and direct eval in parameter expressions always get their own
+  // var environment even if there are no bindings.
+  if (!envShape && scopeKind == ScopeKind::StrictEval) {
+    envShape.set(getEmptyEnvironmentShape(cx));
+    if (!envShape) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /* static */
 EvalScope* EvalScope::createWithData(JSContext* cx, ScopeKind scopeKind,
                                      MutableHandle<UniquePtr<Data>> data,
@@ -1114,22 +1163,8 @@ EvalScope* EvalScope::createWithData(JSContext* cx, ScopeKind scopeKind,
   MOZ_ASSERT(data);
 
   RootedShape envShape(cx);
-  if (scopeKind == ScopeKind::StrictEval) {
-    BindingIter bi(*data, true);
-    if (!PrepareScopeData<EvalScope>(cx, bi, data,
-                                     &VarEnvironmentObject::class_,
-                                     EvalScopeEnvShapeFlags, &envShape)) {
-      return nullptr;
-    }
-  }
-
-  // Strict eval and direct eval in parameter expressions always get their own
-  // var environment even if there are no bindings.
-  if (!envShape && scopeKind == ScopeKind::StrictEval) {
-    envShape = getEmptyEnvironmentShape(cx);
-    if (!envShape) {
-      return nullptr;
-    }
+  if (!prepareForScopeCreation(cx, scopeKind, data, &envShape)) {
+    return nullptr;
   }
 
   return Scope::create<EvalScope>(cx, scopeKind, enclosing, envShape, data);
@@ -1178,7 +1213,6 @@ XDRResult EvalScope::XDR(XDRState<mode>* xdr, ScopeKind kind,
       if (!data->length) {
         MOZ_ASSERT(!data->nextFrameSlot);
       }
-
       scope.set(createWithData(cx, kind, &uniqueData.ref(), enclosing));
       if (!scope) {
         return xdr->fail(JS::TranscodeResult_Throw);
@@ -1213,6 +1247,11 @@ Zone* ModuleScope::Data::zone() const {
 ModuleScope* ModuleScope::create(JSContext* cx, Handle<Data*> dataArg,
                                  HandleModuleObject module,
                                  HandleScope enclosing) {
+  // ModuleScope::Data has GCManagedDeletePolicy because it contains a
+  // GCPtr. Destruction of |data| below may trigger calls into the GC.
+
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
   Rooted<UniquePtr<Data>> data(cx, dataArg
                                        ? CopyScopeData<ModuleScope>(cx, dataArg)
                                        : NewEmptyScopeData<ModuleScope>(cx));
@@ -1224,6 +1263,30 @@ ModuleScope* ModuleScope::create(JSContext* cx, Handle<Data*> dataArg,
 }
 
 /* static */
+bool ModuleScope::prepareForScopeCreation(JSContext* cx,
+                                          MutableHandle<UniquePtr<Data>> data,
+                                          HandleModuleObject module,
+                                          MutableHandleShape envShape) {
+  BindingIter bi(*data);
+  if (!PrepareScopeData<ModuleScope>(cx, bi, data,
+                                     &ModuleEnvironmentObject::class_,
+                                     ModuleScopeEnvShapeFlags, envShape)) {
+    return false;
+  }
+
+  // Modules always need an environment object for now.
+  if (!envShape) {
+    envShape.set(getEmptyEnvironmentShape(cx));
+    if (!envShape) {
+      return false;
+    }
+  }
+
+  data->module.init(module);
+  return true;
+}
+
+/* static */
 ModuleScope* ModuleScope::createWithData(JSContext* cx,
                                          MutableHandle<UniquePtr<Data>> data,
                                          HandleModuleObject module,
@@ -1231,28 +1294,10 @@ ModuleScope* ModuleScope::createWithData(JSContext* cx,
   MOZ_ASSERT(data);
   MOZ_ASSERT(enclosing->is<GlobalScope>());
 
-  // ModuleScope::Data has GCManagedDeletePolicy because it contains a
-  // GCPtr. Destruction of |copy| below may trigger calls into the GC.
-
-  // The data that's passed in is from the frontend and is LifoAlloc'd.
-  // Copy it now that we're creating a permanent VM scope.
   RootedShape envShape(cx);
-  BindingIter bi(*data);
-  if (!PrepareScopeData<ModuleScope>(cx, bi, data,
-                                     &ModuleEnvironmentObject::class_,
-                                     ModuleScopeEnvShapeFlags, &envShape)) {
+  if (!prepareForScopeCreation(cx, data, module, &envShape)) {
     return nullptr;
   }
-
-  // Modules always need an environment object for now.
-  if (!envShape) {
-    envShape = getEmptyEnvironmentShape(cx);
-    if (!envShape) {
-      return nullptr;
-    }
-  }
-
-  data->module.init(module);
 
   return Scope::create<ModuleScope>(cx, ScopeKind::Module, enclosing, envShape,
                                     data);
@@ -1282,6 +1327,65 @@ static JSAtom* GenerateWasmName(JSContext* cx,
 
   return sb.finishAtom();
 }
+
+template <XDRMode mode>
+/* static */
+XDRResult ModuleScope::XDR(XDRState<mode>* xdr, HandleModuleObject module,
+                           HandleScope enclosing, MutableHandleScope scope) {
+  JSContext* cx = xdr->cx();
+  Rooted<Data*> data(cx);
+  MOZ_TRY(
+      XDRSizedBindingNames<ModuleScope>(xdr, scope.as<ModuleScope>(), &data));
+
+  {
+    Maybe<Rooted<UniquePtr<Data>>> uniqueData;
+    if (mode == XDR_DECODE) {
+      uniqueData.emplace(cx, data);
+    }
+
+    uint32_t nextFrameSlot;
+    if (mode == XDR_ENCODE) {
+      nextFrameSlot = data->nextFrameSlot;
+    }
+
+    MOZ_TRY(xdr->codeUint32(&data->varStart));
+    MOZ_TRY(xdr->codeUint32(&data->letStart));
+    MOZ_TRY(xdr->codeUint32(&data->constStart));
+    MOZ_TRY(xdr->codeUint32(&nextFrameSlot));
+
+    if (mode == XDR_DECODE) {
+      if (!data->length) {
+        MOZ_ASSERT(!data->varStart);
+        MOZ_ASSERT(!data->letStart);
+        MOZ_ASSERT(!data->constStart);
+        MOZ_ASSERT(!data->nextFrameSlot);
+      }
+
+      scope.set(createWithData(cx, &uniqueData.ref(), module, enclosing));
+      if (!scope) {
+        return xdr->fail(JS::TranscodeResult_Throw);
+      }
+
+      // nextFrameSlot is used only for this correctness check.
+      MOZ_ASSERT(nextFrameSlot ==
+                 scope->as<ModuleScope>().data().nextFrameSlot);
+    }
+  }
+
+  return Ok();
+}
+
+template
+    /* static */
+    XDRResult
+    ModuleScope::XDR(XDRState<XDR_ENCODE>* xdr, HandleModuleObject module,
+                     HandleScope enclosing, MutableHandleScope scope);
+
+template
+    /* static */
+    XDRResult
+    ModuleScope::XDR(XDRState<XDR_DECODE>* xdr, HandleModuleObject module,
+                     HandleScope enclosing, MutableHandleScope scope);
 
 static void InitializeTrailingName(TrailingNamesArray& trailingNames, size_t i,
                                    JSAtom* name) {
@@ -1337,13 +1441,11 @@ WasmInstanceScope* WasmInstanceScope::create(JSContext* cx,
   MOZ_ASSERT(data->length == namesCount);
 
   data->instance.init(instance);
-  data->memoriesStart = 0;
   data->globalsStart = globalsStart;
 
-  Rooted<Scope*> enclosingScope(cx, &cx->global()->emptyGlobalScope());
-
+  RootedScope enclosing(cx, &cx->global()->emptyGlobalScope());
   return Scope::create<WasmInstanceScope>(cx, ScopeKind::WasmInstance,
-                                          enclosingScope,
+                                          enclosing,
                                           /* envShape = */ nullptr, &data);
 }
 
@@ -1373,8 +1475,9 @@ WasmFunctionScope* WasmFunctionScope::create(JSContext* cx,
   // TODO pull the local variable names from the wasm function definition.
   wasm::ValTypeVector locals;
   size_t argsLength;
-  if (!instance->instance().debug().debugGetLocalTypes(funcIndex, &locals,
-                                                       &argsLength)) {
+  wasm::StackResults unusedStackResults;
+  if (!instance->instance().debug().debugGetLocalTypes(
+          funcIndex, &locals, &argsLength, &unusedStackResults)) {
     return nullptr;
   }
   uint32_t namesCount = locals.length();
@@ -1394,8 +1497,6 @@ WasmFunctionScope* WasmFunctionScope::create(JSContext* cx,
     InitializeNextTrailingName(data, wasmName);
   }
   MOZ_ASSERT(data->length == namesCount);
-
-  data->funcIndex = funcIndex;
 
   return Scope::create<WasmFunctionScope>(cx, ScopeKind::WasmFunction,
                                           enclosing,
@@ -1701,3 +1802,228 @@ JS::ubi::Node::Size JS::ubi::Concrete<Scope>::size(
   return js::gc::Arena::thingSize(get().asTenured().getAllocKind()) +
          get().sizeOfExcludingThis(mallocSizeOf);
 }
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               Handle<FunctionScope::Data*> dataArg,
+                               bool hasParameterExprs, bool needsEnvironment,
+                               frontend::FunctionBox* funbox,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<FunctionScope::Data>> data(
+      cx, dataArg ? CopyScopeData<FunctionScope>(cx, dataArg)
+                  : NewEmptyScopeData<FunctionScope>(cx));
+  if (!data) {
+    return false;
+  }
+
+  RootedShape envShape(cx);
+  RootedFunction fun(cx, funbox->function());
+  if (!FunctionScope::prepareForScopeCreation(
+          cx, &data, hasParameterExprs,
+          dataArg ? dataArg->isFieldInitializer : IsFieldInitializer::No,
+          needsEnvironment, fun, &envShape)) {
+    return false;
+  }
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(
+      cx, ScopeKind::Function, enclosing, std::move(data.get()), envShape,
+      funbox);
+}
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               ScopeKind kind,
+                               Handle<LexicalScope::Data*> dataArg,
+                               uint32_t firstFrameSlot,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<LexicalScope::Data>> data(
+      cx, CopyScopeData<LexicalScope>(cx, dataArg));
+  if (!data) {
+    return false;
+  }
+
+  RootedShape envShape(cx);
+  if (!LexicalScope::prepareForScopeCreation(cx, kind, firstFrameSlot,
+                                             enclosing, &data, &envShape)) {
+    return false;
+  }
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(
+      cx, kind, enclosing, std::move(data.get()), envShape);
+}
+
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               ScopeKind kind, Handle<VarScope::Data*> dataArg,
+                               uint32_t firstFrameSlot, bool needsEnvironment,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<VarScope::Data>> data(
+      cx, dataArg ? CopyScopeData<VarScope>(cx, dataArg)
+                  : NewEmptyVarScopeData(cx, firstFrameSlot));
+  if (!data) {
+    return false;
+  }
+
+  RootedShape envShape(cx);
+  if (!VarScope::prepareForScopeCreation(cx, kind, &data, firstFrameSlot,
+                                         needsEnvironment, &envShape)) {
+    return false;
+  }
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(
+      cx, kind, enclosing, std::move(data.get()), envShape);
+}
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               ScopeKind kind,
+                               Handle<GlobalScope::Data*> dataArg,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<GlobalScope::Data>> data(
+      cx, dataArg ? CopyScopeData<GlobalScope>(cx, dataArg)
+                  : NewEmptyScopeData<GlobalScope>(cx));
+  if (!data) {
+    return false;
+  }
+
+  // The global scope has no environment shape. Its environment is the
+  // global lexical scope and the global object or non-syntactic objects
+  // created by embedding, all of which are not only extensible but may
+  // have names on them deleted.
+  Rooted<AbstractScope> enclosing(cx);
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(cx, kind, enclosing,
+                                                 std::move(data.get()));
+}
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               ScopeKind kind, Handle<EvalScope::Data*> dataArg,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<EvalScope::Data>> data(
+      cx, dataArg ? CopyScopeData<EvalScope>(cx, dataArg)
+                  : NewEmptyScopeData<EvalScope>(cx));
+  if (!data) {
+    return false;
+  }
+
+  RootedShape envShape(cx);
+  if (!EvalScope::prepareForScopeCreation(cx, kind, &data, &envShape)) {
+    return false;
+  }
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(
+      cx, kind, enclosing, std::move(data.get()), envShape);
+}
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               Handle<ModuleScope::Data*> dataArg,
+                               HandleModuleObject module,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  Rooted<UniquePtr<ModuleScope::Data>> data(
+      cx, dataArg ? CopyScopeData<ModuleScope>(cx, dataArg)
+                  : NewEmptyScopeData<ModuleScope>(cx));
+  if (!data) {
+    return false;
+  }
+
+  MOZ_ASSERT(enclosing.get().is<GlobalScope>());
+
+  // The data that's passed in is from the frontend and is LifoAlloc'd.
+  // Copy it now that we're creating a permanent VM scope.
+  RootedShape envShape(cx);
+  if (!ModuleScope::prepareForScopeCreation(cx, &data, module, &envShape)) {
+    return false;
+  }
+
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(
+      cx, ScopeKind::Module, enclosing, std::move(data.get()), envShape);
+}
+
+/* static */
+bool ScopeCreationData::create(JSContext* cx, frontend::ParseInfo& parseInfo,
+                               Handle<AbstractScope> enclosing,
+                               ScopeIndex* index) {
+  *index = parseInfo.scopeCreationData.length();
+  return parseInfo.scopeCreationData.emplaceBack(cx, ScopeKind::With,
+                                                 enclosing);
+}
+
+// WithScopes are unique because they don't go through the
+// Scope::create<ConcreteType> path.
+template <>
+Scope* ScopeCreationData::createSpecificScope<WithScope>(JSContext* cx) {
+  RootedScope enclosingScope(cx);
+  if (!getOrCreateEnclosingScope(cx, &enclosingScope)) {
+    return nullptr;
+  }
+
+  WithScope* scope = static_cast<WithScope*>(
+      Scope::create(cx, ScopeKind::With, enclosingScope, nullptr));
+
+  if (!scope) {
+    return nullptr;
+  }
+
+  scope_ = scope;
+
+  return scope;
+}
+
+template <class SpecificScopeType>
+Scope* ScopeCreationData::createSpecificScope(JSContext* cx) {
+  Rooted<UniquePtr<typename SpecificScopeType::Data>> rootedData(
+      cx, releaseData<SpecificScopeType>());
+  RootedShape shape(cx, environmentShape_);
+
+  RootedScope enclosingScope(cx);
+  if (!getOrCreateEnclosingScope(cx, &enclosingScope)) {
+    return nullptr;
+  }
+
+  // Because we already baked the data here, we needn't do it again.
+  SpecificScopeType* scope = Scope::create<SpecificScopeType>(
+      cx, kind(), enclosingScope, shape, &rootedData);
+  if (!scope) {
+    return nullptr;
+  }
+
+  scope_ = scope;
+
+  return scope;
+}
+
+template Scope* ScopeCreationData::createSpecificScope<FunctionScope>(
+    JSContext* cx);
+template Scope* ScopeCreationData::createSpecificScope<LexicalScope>(
+    JSContext* cx);
+template Scope* ScopeCreationData::createSpecificScope<EvalScope>(
+    JSContext* cx);
+template Scope* ScopeCreationData::createSpecificScope<GlobalScope>(
+    JSContext* cx);
+template Scope* ScopeCreationData::createSpecificScope<VarScope>(JSContext* cx);
+template Scope* ScopeCreationData::createSpecificScope<ModuleScope>(
+    JSContext* cx);

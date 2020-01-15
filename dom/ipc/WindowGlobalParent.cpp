@@ -13,6 +13,7 @@
 #include "mozilla/dom/ContentParent.h"
 #include "mozilla/dom/BrowserHost.h"
 #include "mozilla/dom/BrowserParent.h"
+#include "mozilla/dom/RemoteWebProgress.h"
 #include "mozilla/dom/WindowGlobalActorsBinding.h"
 #include "mozilla/dom/WindowGlobalChild.h"
 #include "mozilla/dom/ChromeUtils.h"
@@ -30,7 +31,12 @@
 #include "nsQueryObject.h"
 #include "nsFrameLoaderOwner.h"
 #include "nsSerializationHelper.h"
+#include "nsIBrowser.h"
 #include "nsITransportSecurityInfo.h"
+#include "nsISharePicker.h"
+
+#include "mozilla/dom/DOMException.h"
+#include "mozilla/dom/DOMExceptionBinding.h"
 
 #include "mozilla/dom/JSWindowActorBinding.h"
 #include "mozilla/dom/JSWindowActorParent.h"
@@ -89,7 +95,7 @@ void WindowGlobalParent::Init(const WindowGlobalInit& aInit) {
 
   MOZ_DIAGNOSTIC_ASSERT(
       !mBrowsingContext->GetParent() ||
-          mBrowsingContext->GetEmbedderWindowGlobal(),
+          mBrowsingContext->GetEmbedderInnerWindowId(),
       "When creating a non-root WindowGlobalParent, the WindowGlobalParent "
       "for our embedder should've already been created.");
 
@@ -165,7 +171,8 @@ bool WindowGlobalParent::IsProcessRoot() {
     return true;
   }
 
-  auto* embedder = BrowsingContext()->GetEmbedderWindowGlobal();
+  RefPtr<WindowGlobalParent> embedder =
+      BrowsingContext()->GetEmbedderWindowGlobal();
   if (NS_WARN_IF(!embedder)) {
     return false;
   }
@@ -174,8 +181,8 @@ bool WindowGlobalParent::IsProcessRoot() {
 }
 
 mozilla::ipc::IPCResult WindowGlobalParent::RecvLoadURI(
-    dom::BrowsingContext* aTargetBC,
-    nsDocShellLoadState* aLoadState) {
+    dom::BrowsingContext* aTargetBC, nsDocShellLoadState* aLoadState,
+    bool aSetNavigating) {
   if (!aTargetBC || aTargetBC->IsDiscarded()) {
     MOZ_LOG(
         BrowsingContext::GetLog(), LogLevel::Debug,
@@ -193,15 +200,30 @@ mozilla::ipc::IPCResult WindowGlobalParent::RecvLoadURI(
   // FIXME: We should really initiate the load in the parent before bouncing
   // back down to the child.
 
-  WindowGlobalParent* wgp = aTargetBC->Canonical()->GetCurrentWindowGlobal();
-  if (!wgp) {
+  aTargetBC->LoadURI(nullptr, aLoadState, aSetNavigating);
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult WindowGlobalParent::RecvInternalLoad(
+    dom::BrowsingContext* aTargetBC, nsDocShellLoadState* aLoadState) {
+  if (!aTargetBC || aTargetBC->IsDiscarded()) {
     MOZ_LOG(
         BrowsingContext::GetLog(), LogLevel::Debug,
-        ("ParentIPC: Target BrowsingContext has no WindowGlobalParent"));
+        ("ParentIPC: Trying to send a message with dead or detached context"));
     return IPC_OK();
   }
 
-  Unused << wgp->SendLoadURIInChild(aLoadState);
+  // FIXME: For cross-process loads, we should double check CanAccess() for the
+  // source browsing context in the parent process.
+
+  if (aTargetBC->Group() != BrowsingContext()->Group()) {
+    return IPC_FAIL(this, "Illegal cross-group BrowsingContext load");
+  }
+
+  // FIXME: We should really initiate the load in the parent before bouncing
+  // back down to the child.
+
+  aTargetBC->InternalLoad(mBrowsingContext, aLoadState, nullptr, nullptr);
   return IPC_OK();
 }
 
@@ -243,19 +265,23 @@ IPCResult WindowGlobalParent::RecvDestroy() {
 }
 
 IPCResult WindowGlobalParent::RecvRawMessage(
-    const JSWindowActorMessageMeta& aMeta, const ClonedMessageData& aData) {
+    const JSWindowActorMessageMeta& aMeta, const ClonedMessageData& aData,
+    const ClonedMessageData& aStack) {
   StructuredCloneData data;
   data.BorrowFromClonedMessageDataForParent(aData);
-  ReceiveRawMessage(aMeta, std::move(data));
+  StructuredCloneData stack;
+  stack.BorrowFromClonedMessageDataForParent(aStack);
+  ReceiveRawMessage(aMeta, std::move(data), std::move(stack));
   return IPC_OK();
 }
 
 void WindowGlobalParent::ReceiveRawMessage(
-    const JSWindowActorMessageMeta& aMeta, StructuredCloneData&& aData) {
+    const JSWindowActorMessageMeta& aMeta, StructuredCloneData&& aData,
+    StructuredCloneData&& aStack) {
   RefPtr<JSWindowActorParent> actor =
       GetActor(aMeta.actorName(), IgnoreErrors());
   if (actor) {
-    actor->ReceiveRawMessage(aMeta, std::move(aData));
+    actor->ReceiveRawMessage(aMeta, std::move(aData), std::move(aStack));
   }
 }
 
@@ -265,6 +291,64 @@ const nsAString& WindowGlobalParent::GetRemoteType() {
   }
 
   return VoidString();
+}
+
+void WindowGlobalParent::NotifyContentBlockingEvent(
+    uint32_t aEvent, nsIRequest* aRequest, bool aBlocked, nsIURI* aURIHint,
+    const nsTArray<nsCString>& aTrackingFullHashes,
+    const Maybe<AntiTrackingCommon::StorageAccessGrantedReason>& aReason) {
+  MOZ_ASSERT(NS_IsMainThread());
+  MOZ_ASSERT(aURIHint);
+  DebugOnly<bool> isCookiesBlockedTracker =
+      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_TRACKER ||
+      aEvent == nsIWebProgressListener::STATE_COOKIES_BLOCKED_SOCIALTRACKER;
+  MOZ_ASSERT_IF(aBlocked, aReason.isNothing());
+  MOZ_ASSERT_IF(!isCookiesBlockedTracker, aReason.isNothing());
+  MOZ_ASSERT_IF(isCookiesBlockedTracker && !aBlocked, aReason.isSome());
+  MOZ_DIAGNOSTIC_ASSERT(XRE_IsParentProcess());
+  MOZ_DIAGNOSTIC_ASSERT_IF(XRE_IsE10sParentProcess(), !IsInProcess());
+
+  // Return early if this WindowGlobalParent is in process.
+  if (IsInProcess()) {
+    return;
+  }
+
+  nsAutoCString origin;
+  nsContentUtils::GetASCIIOrigin(aURIHint, origin);
+
+  Maybe<uint32_t> event = GetContentBlockingLog()->RecordLogParent(
+      origin, aEvent, aBlocked, aReason, aTrackingFullHashes);
+
+  // Notify the OnContentBlockingEvent if necessary.
+  if (event) {
+    // Get the browser parent from the manager directly since the content
+    // blocking event could happen in the early stage of loading, i.e.
+    // accessing cookies for the http header. At this stage, the actor is
+    // not ready, so we would get a nullptr from GetBrowserParent(). But,
+    // we can actually get it from the manager.
+    RefPtr<BrowserParent> browserParent =
+        static_cast<BrowserParent*>(Manager());
+    if (NS_WARN_IF(!browserParent)) {
+      return;
+    }
+
+    nsCOMPtr<nsIBrowser> browser;
+    nsCOMPtr<nsIWebProgress> manager;
+    nsCOMPtr<nsIWebProgressListener> managerAsListener;
+
+    if (!browserParent->GetWebProgressListener(
+            getter_AddRefs(browser), getter_AddRefs(manager),
+            getter_AddRefs(managerAsListener))) {
+      return;
+    }
+
+    nsCOMPtr<nsIWebProgress> webProgress =
+        new RemoteWebProgress(manager, OuterWindowId(), InnerWindowId(), 0,
+                              false, BrowsingContext()->IsTopContent());
+
+    Unused << managerAsListener->OnContentBlockingEvent(webProgress, aRequest,
+                                                        event.value());
+  }
 }
 
 already_AddRefed<JSWindowActorParent> WindowGlobalParent::GetActor(
@@ -303,82 +387,91 @@ bool WindowGlobalParent::IsCurrentGlobal() {
   return CanSend() && mBrowsingContext->GetCurrentWindowGlobal() == this;
 }
 
-IPCResult WindowGlobalParent::RecvDidEmbedBrowsingContext(
-    dom::BrowsingContext* aContext) {
-  MOZ_ASSERT(aContext);
-  aContext->Canonical()->SetEmbedderWindowGlobal(this);
+namespace {
+
+class ShareHandler final : public PromiseNativeHandler {
+ public:
+  explicit ShareHandler(
+      mozilla::dom::WindowGlobalParent::ShareResolver&& aResolver)
+      : mResolver(std::move(aResolver)) {}
+
+  NS_DECL_ISUPPORTS
+
+ public:
+  virtual void ResolvedCallback(JSContext* aCx,
+                                JS::Handle<JS::Value> aValue) override {
+    mResolver(NS_OK);
+  }
+
+  virtual void RejectedCallback(JSContext* aCx,
+                                JS::Handle<JS::Value> aValue) override {
+    if (NS_WARN_IF(!aValue.isObject())) {
+      mResolver(NS_ERROR_FAILURE);
+      return;
+    }
+
+    // nsresult is stored as Exception internally in Promise
+    JS::Rooted<JSObject*> obj(aCx, &aValue.toObject());
+    RefPtr<DOMException> unwrapped;
+    nsresult rv = UNWRAP_OBJECT(DOMException, &obj, unwrapped);
+    if (NS_WARN_IF(NS_FAILED(rv))) {
+      mResolver(NS_ERROR_FAILURE);
+      return;
+    }
+
+    mResolver(unwrapped->GetResult());
+  }
+
+ private:
+  ~ShareHandler() = default;
+
+  mozilla::dom::WindowGlobalParent::ShareResolver mResolver;
+};
+
+NS_IMPL_ISUPPORTS0(ShareHandler)
+
+}  // namespace
+
+mozilla::ipc::IPCResult WindowGlobalParent::RecvShare(
+    IPCWebShareData&& aData, WindowGlobalParent::ShareResolver&& aResolver) {
+  // Widget Layer handoff...
+  nsCOMPtr<nsISharePicker> sharePicker =
+      do_GetService("@mozilla.org/sharepicker;1");
+  if (!sharePicker) {
+    aResolver(NS_ERROR_DOM_NOT_SUPPORTED_ERR);
+    return IPC_OK();
+  }
+
+  // Initialize the ShareWidget
+  RefPtr<BrowserParent> parent = GetBrowserParent();
+  nsCOMPtr<mozIDOMWindowProxy> openerWindow;
+  if (parent) {
+    openerWindow = parent->GetParentWindowOuter();
+    if (!openerWindow) {
+      aResolver(NS_ERROR_FAILURE);
+      return IPC_OK();
+    }
+  }
+  sharePicker->Init(openerWindow);
+
+  // And finally share the data...
+  RefPtr<Promise> promise;
+  nsresult rv = sharePicker->Share(aData.title(), aData.text(), aData.url(),
+                                   getter_AddRefs(promise));
+  if (NS_FAILED(rv)) {
+    aResolver(rv);
+    return IPC_OK();
+  }
+
+  // Handler finally awaits response...
+  RefPtr<ShareHandler> handler = new ShareHandler(std::move(aResolver));
+  promise->AppendNativeHandler(handler);
+
   return IPC_OK();
 }
 
-already_AddRefed<Promise> WindowGlobalParent::ChangeFrameRemoteness(
-    dom::BrowsingContext* aBc, const nsAString& aRemoteType,
-    uint64_t aPendingSwitchId, ErrorResult& aRv) {
-  RefPtr<BrowserParent> embedderBrowserParent = GetBrowserParent();
-  if (NS_WARN_IF(!embedderBrowserParent)) {
-    aRv.Throw(NS_ERROR_FAILURE);
-    return nullptr;
-  }
-
-  nsIGlobalObject* global = GetParentObject();
-  RefPtr<Promise> promise = Promise::Create(global, aRv);
-  if (aRv.Failed()) {
-    return nullptr;
-  }
-
-  RefPtr<CanonicalBrowsingContext> browsingContext =
-      CanonicalBrowsingContext::Cast(aBc);
-
-  // When the reply comes back from content, either resolve or reject.
-  auto resolve =
-      [=](mozilla::Tuple<nsresult, PBrowserBridgeParent*>&& aResult) {
-        nsresult rv = Get<0>(aResult);
-        RefPtr<BrowserBridgeParent> bridge =
-            static_cast<BrowserBridgeParent*>(Get<1>(aResult));
-        if (NS_FAILED(rv)) {
-          promise->MaybeReject(rv);
-          return;
-        }
-
-        // If we got a `BrowserBridgeParent`, the frame is out-of-process, so we
-        // can get the target off of it. Otherwise, it's an in-process frame, so
-        // we can use the embedder `BrowserParent`.
-        RefPtr<BrowserParent> browserParent;
-        if (bridge) {
-          browserParent = bridge->GetBrowserParent();
-        } else {
-          browserParent = embedderBrowserParent;
-        }
-        MOZ_ASSERT(browserParent);
-
-        if (!browserParent || !browserParent->CanSend()) {
-          promise->MaybeReject(NS_ERROR_FAILURE);
-          return;
-        }
-
-        // Update our BrowsingContext to its new owner, if it hasn't been
-        // updated yet. This can happen when switching from a out-of-process to
-        // in-process frame. For remote frames, the BrowserBridgeParent::Init
-        // method should've already set up the OwnerProcessId.
-        uint64_t childId = browserParent->Manager()->ChildID();
-        MOZ_ASSERT_IF(bridge,
-                      browsingContext == browserParent->GetBrowsingContext());
-        MOZ_ASSERT_IF(bridge, browsingContext->IsOwnedByProcess(childId));
-        browsingContext->SetOwnerProcessId(childId);
-
-        promise->MaybeResolve(childId);
-      };
-
-  auto reject = [=](ResponseRejectReason aReason) {
-    promise->MaybeReject(NS_ERROR_FAILURE);
-  };
-
-  SendChangeFrameRemoteness(aBc, PromiseFlatString(aRemoteType),
-                            aPendingSwitchId, resolve, reject);
-  return promise.forget();
-}
-
 already_AddRefed<mozilla::dom::Promise> WindowGlobalParent::DrawSnapshot(
-    const DOMRect* aRect, double aScale, const nsAString& aBackgroundColor,
+    const DOMRect* aRect, double aScale, const nsACString& aBackgroundColor,
     mozilla::ErrorResult& aRv) {
   nsIGlobalObject* global = GetParentObject();
   RefPtr<Promise> promise = Promise::Create(global, aRv);

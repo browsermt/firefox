@@ -7,7 +7,6 @@
 #include "mozilla/ArrayUtils.h"
 
 #include "nsCOMPtr.h"
-#include "nsAutoPtr.h"
 #include "nsDirectoryService.h"
 #include "nsLocalFile.h"
 #include "nsDebug.h"
@@ -65,11 +64,6 @@ nsresult nsDirectoryService::GetCurrentProcessDirectory(nsIFile** aFile)
   }
   return mXCurProcD->Clone(aFile);
 }  // GetCurrentProcessDirectory()
-
-nsresult nsDirectoryService::SetCurrentProcessDirectory(nsIFile* aFile) {
-  mXCurProcD = aFile;
-  return NS_OK;
-}
 
 StaticRefPtr<nsDirectoryService> nsDirectoryService::gService;
 
@@ -182,6 +176,8 @@ nsDirectoryService::Get(const char* aProp, const nsIID& aUuid, void** aResult) {
   if (NS_WARN_IF(!aProp)) {
     return NS_ERROR_INVALID_ARG;
   }
+
+  MOZ_ASSERT(NS_IsMainThread(), "Do not call dirsvc::get on non-main threads!");
 
   nsDependentCString key(aProp);
 

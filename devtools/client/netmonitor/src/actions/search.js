@@ -14,27 +14,37 @@ const {
   UPDATE_SEARCH_STATUS,
   SEARCH_STATUS,
   SET_TARGET_SEARCH_RESULT,
+  SELECT_ACTION_BAR_TAB,
   TOGGLE_SEARCH_CASE_SENSITIVE_SEARCH,
-} = require("../constants");
+  PANELS,
+} = require("devtools/client/netmonitor/src/constants");
 
 const {
   getDisplayedRequests,
   getOngoingSearch,
   getSearchStatus,
   getRequestById,
-} = require("../selectors/index");
+} = require("devtools/client/netmonitor/src/selectors/index");
 
-const { selectRequest } = require("./selection");
-const { selectDetailsPanelTab } = require("./ui");
-const { fetchNetworkUpdatePacket } = require("../utils/request-utils");
-const { searchInResource } = require("../workers/search/index");
+const {
+  selectRequest,
+} = require("devtools/client/netmonitor/src/actions/selection");
+const {
+  selectDetailsPanelTab,
+} = require("devtools/client/netmonitor/src/actions/ui");
+const {
+  fetchNetworkUpdatePacket,
+} = require("devtools/client/netmonitor/src/utils/request-utils");
+const {
+  searchInResource,
+} = require("devtools/client/netmonitor/src/workers/search/index");
 
 /**
  * Search through all resources. This is the main action exported
  * from this module and consumed by Network panel UI.
  */
 function search(connector, query) {
-  let cancelled = false;
+  let canceled = false;
 
   // Instantiate an `ongoingSearch` function/object. It's responsible
   // for triggering set of asynchronous steps like fetching
@@ -57,12 +67,15 @@ function search(connector, query) {
     // search through the resource structure.
     const requests = getDisplayedRequests(state);
     for (const request of requests) {
-      if (cancelled) {
+      if (canceled) {
         return;
       }
 
       // Fetch all data for the resource.
       await loadResource(connector, request);
+      if (canceled) {
+        return;
+      }
 
       // The state changed, so make sure to get fresh new reference
       // to the updated resource object.
@@ -76,7 +89,11 @@ function search(connector, query) {
   // Implement support for canceling (used e.g. when a new search
   // is executed or the user stops the searching manually).
   newOngoingSearch.cancel = () => {
-    cancelled = true;
+    canceled = true;
+  };
+
+  newOngoingSearch.isCanceled = () => {
+    return canceled;
   };
 
   return newOngoingSearch;
@@ -107,6 +124,7 @@ async function loadResource(connector, resource) {
 function searchResource(resource, query) {
   return async (dispatch, getState) => {
     const state = getState();
+    const ongoingSearch = getOngoingSearch(state);
 
     const modifiers = {
       caseSensitive: state.search.caseSensitive,
@@ -116,7 +134,7 @@ function searchResource(resource, query) {
     // value is an array with search occurrences.
     const result = await searchInResource(resource, query, modifiers);
 
-    if (!result.length) {
+    if (!result.length || ongoingSearch.isCanceled()) {
       return;
     }
 
@@ -151,6 +169,17 @@ function addSearchQuery(query) {
 function clearSearchResults() {
   return {
     type: CLEAR_SEARCH_RESULTS,
+  };
+}
+
+/**
+ * Used to clear and cancel an ongoing search.
+ * @returns {Function}
+ */
+function clearSearchResultAndCancel() {
+  return (dispatch, getState) => {
+    dispatch(stopOngoingSearch());
+    dispatch(clearSearchResults());
   };
 }
 
@@ -200,9 +229,15 @@ function toggleCaseSensitiveSearch() {
 function toggleSearchPanel() {
   return (dispatch, getState) => {
     const state = getState();
-    state.search.panelOpen
+
+    state.search.panelOpen && state.ui.selectedActionBarTabId === PANELS.SEARCH
       ? dispatch({ type: CLOSE_SEARCH })
       : dispatch({ type: OPEN_SEARCH });
+
+    dispatch({
+      type: SELECT_ACTION_BAR_TAB,
+      id: PANELS.SEARCH,
+    });
   };
 }
 
@@ -271,4 +306,6 @@ module.exports = {
   navigate,
   setTargetSearchResult,
   toggleCaseSensitiveSearch,
+  clearSearchResultAndCancel,
+  stopOngoingSearch,
 };

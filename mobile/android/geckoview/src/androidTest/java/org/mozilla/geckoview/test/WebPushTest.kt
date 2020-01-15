@@ -5,8 +5,8 @@
 package org.mozilla.geckoview.test
 
 import android.os.Parcel
-import android.support.test.filters.MediumTest
-import android.support.test.runner.AndroidJUnit4
+import androidx.test.filters.MediumTest
+import androidx.test.ext.junit.runners.AndroidJUnit4
 import android.util.Base64
 import org.hamcrest.MatcherAssert.assertThat
 import org.hamcrest.Matchers.*
@@ -46,10 +46,8 @@ class WebPushTest : BaseSessionTest() {
         }
 
         private fun generateAuthSecret(): ByteArray {
-            val bytes = BigInteger(128, SecureRandom()).toByteArray()
-            if (bytes.size > 16) {
-                return bytes.copyOfRange(bytes.size - 16, bytes.size)
-            }
+            val bytes = ByteArray(16)
+            SecureRandom().nextBytes(bytes)
 
             return bytes
         }
@@ -149,7 +147,7 @@ class WebPushTest : BaseSessionTest() {
         val p = mainSession.evaluatePromiseJS("window.doWaitForPushEvent()")
 
         val testPayload = "The Payload";
-        sessionRule.runtime.webPushController.onPushEvent(delegate!!.storedSubscription!!, testPayload.toByteArray(Charsets.UTF_8))
+        sessionRule.runtime.webPushController.onPushEvent(delegate!!.storedSubscription!!.scope, testPayload.toByteArray(Charsets.UTF_8))
 
         assertThat("Push data should match", p.value as String, equalTo(testPayload))
     }

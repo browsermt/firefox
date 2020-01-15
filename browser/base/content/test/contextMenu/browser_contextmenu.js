@@ -46,14 +46,17 @@ function getThisFrameSubMenu(base_menu) {
 }
 
 add_task(async function init() {
-  // Ensure screenshots is really disabled (bug 1498738)
+  // Ensure screenshots is really disabled (bug 1498738).
   const addon = await AddonManager.getAddonByID("screenshots@mozilla.org");
   await addon.disable({ allowSystemAddons: true });
+  await SpecialPowers.pushPrefEnv({
+    set: [["browser.search.separatePrivateDefault.ui.enabled", true]],
+  });
 });
 
 // Below are test cases for XUL element
 add_task(async function test_xul_text_link_label() {
-  let url = chrome_base + "subtst_contextmenu_xul.xul";
+  let url = chrome_base + "subtst_contextmenu_xul.xhtml";
 
   await BrowserTestUtils.openNewForegroundTab({
     gBrowser,
@@ -84,6 +87,8 @@ add_task(async function test_xul_text_link_label() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -92,19 +97,19 @@ add_task(async function test_xul_text_link_label() {
     null,
   ]);
 
-  // Clean up so won't affect HTML element test cases
+  // Clean up so won't affect HTML element test cases.
   lastElementSelector = null;
   gBrowser.removeCurrentTab();
 });
 
-// Below are test cases for HTML element
+// Below are test cases for HTML element.
 
 add_task(async function test_setup_html() {
   let url = example_base + "subtst_contextmenu.html";
 
   await BrowserTestUtils.openNewForegroundTab(gBrowser, url);
 
-  await ContentTask.spawn(gBrowser.selectedBrowser, null, async function() {
+  await SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function() {
     let doc = content.document;
     let audioIframe = doc.querySelector("#test-audio-in-iframe");
     // media documents always use a <video> tag.
@@ -203,6 +208,8 @@ add_task(async function test_link() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -237,6 +244,8 @@ add_task(async function test_link_in_shadow_dom() {
       true,
       "context-searchselect",
       true,
+      "context-searchselect-private",
+      true,
       "---",
       null,
       "context-sendlinktodevice",
@@ -256,6 +265,8 @@ add_task(async function test_mailto() {
     "context-copyemail",
     true,
     "context-searchselect",
+    true,
+    "context-searchselect-private",
     true,
   ]);
 });
@@ -1117,7 +1128,7 @@ add_task(async function test_copylinkcommand() {
 
       // The easiest way to check the clipboard is to paste the contents
       // into a textbox.
-      await ContentTask.spawn(gBrowser.selectedBrowser, null, async function() {
+      await SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function() {
         let doc = content.document;
         let input = doc.getElementById("test-input");
         input.focus();
@@ -1126,7 +1137,7 @@ add_task(async function test_copylinkcommand() {
       document.commandDispatcher
         .getControllerForCommand("cmd_paste")
         .doCommand("cmd_paste");
-      await ContentTask.spawn(gBrowser.selectedBrowser, null, async function() {
+      await SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function() {
         let doc = content.document;
         let input = doc.getElementById("test-input");
         Assert.equal(
@@ -1231,9 +1242,9 @@ add_task(async function test_pagemenu() {
         )[0];
         ok(item, "Got generated XUL menu item");
         item.doCommand();
-        await ContentTask.spawn(
+        await SpecialPowers.spawn(
           gBrowser.selectedBrowser,
-          null,
+          [],
           async function() {
             let pagemenu = content.document.getElementById("test-pagemenu");
             Assert.ok(
@@ -1302,9 +1313,9 @@ add_task(async function test_dom_full_screen() {
           ["full-screen-api.transition-duration.enter", "0 0"],
           ["full-screen-api.transition-duration.leave", "0 0"]
         );
-        await ContentTask.spawn(
+        await SpecialPowers.spawn(
           gBrowser.selectedBrowser,
-          null,
+          [],
           async function() {
             let doc = content.document;
             let win = doc.defaultView;
@@ -1321,9 +1332,9 @@ add_task(async function test_dom_full_screen() {
         );
       },
       async postCheckContextMenuFn() {
-        await ContentTask.spawn(
+        await SpecialPowers.spawn(
           gBrowser.selectedBrowser,
-          null,
+          [],
           async function() {
             let win = content.document.defaultView;
             let awaitFullScreenChange = ContentTaskUtils.waitForEvent(
@@ -1396,6 +1407,8 @@ add_task(async function test_select_text() {
       null,
       "context-searchselect",
       true,
+      "context-searchselect-private",
+      true,
       "context-viewpartialsource-selection",
       true,
     ],
@@ -1439,6 +1452,8 @@ add_task(async function test_select_text_link() {
       null,
       "context-searchselect",
       true,
+      "context-searchselect-private",
+      true,
       "---",
       null,
       "context-sendlinktodevice",
@@ -1455,9 +1470,9 @@ add_task(async function test_select_text_link() {
         await selectText("#test-select-text-link");
       },
       async postCheckContextMenuFn() {
-        await ContentTask.spawn(
+        await SpecialPowers.spawn(
           gBrowser.selectedBrowser,
-          null,
+          [],
           async function() {
             let win = content.document.defaultView;
             win.getSelection().removeAllRanges();
@@ -1521,17 +1536,18 @@ add_task(async function test_select_input_text() {
 
   /*
   yield test_contextmenu("#test-select-input-text",
-    ["context-undo",         false,
-     "---",                  null,
-     "context-cut",          true,
-     "context-copy",         true,
-     "context-paste",        null, // ignore clipboard state
-     "context-delete",       true,
-     "---",                  null,
-     "context-selectall",    true,
-     "context-searchselect", true,
-     "---",                  null,
-     "spell-check-enabled",  true
+    ["context-undo",                 false,
+     "---",                          null,
+     "context-cut",                  true,
+     "context-copy",                 true,
+     "context-paste",                null, // ignore clipboard state
+     "context-delete",               true,
+     "---",                          null,
+     "context-selectall",            true,
+     "context-searchselect",         true,
+     "context-searchselect-private", true,
+     "---",                          null,
+     "spell-check-enabled",          true
     ].concat(LOGIN_FILL_ITEMS),
     {
       *preCheckContextMenuFn() {
@@ -1775,6 +1791,8 @@ add_task(async function test_svg_link() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -1805,6 +1823,8 @@ add_task(async function test_svg_link() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -1834,6 +1854,8 @@ add_task(async function test_svg_link() {
     "context-copylink",
     true,
     "context-searchselect",
+    true,
+    "context-searchselect-private",
     true,
     "---",
     null,
@@ -1867,6 +1889,8 @@ add_task(async function test_svg_relative_link() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -1896,6 +1920,8 @@ add_task(async function test_svg_relative_link() {
     "context-copylink",
     true,
     "context-searchselect",
+    true,
+    "context-searchselect-private",
     true,
     "---",
     null,
@@ -1927,6 +1953,8 @@ add_task(async function test_svg_relative_link() {
     true,
     "context-searchselect",
     true,
+    "context-searchselect-private",
+    true,
     "---",
     null,
     "context-sendlinktodevice",
@@ -1948,18 +1976,20 @@ add_task(async function test_cleanup_html() {
  *        the element that will be referenced.
  */
 async function selectText(selector) {
-  await ContentTask.spawn(gBrowser.selectedBrowser, selector, async function(
-    contentSelector
-  ) {
-    info(`Selecting text of ${contentSelector}`);
-    let doc = content.document;
-    let win = doc.defaultView;
-    win.getSelection().removeAllRanges();
-    let div = doc.createRange();
-    let element = doc.querySelector(contentSelector);
-    Assert.ok(element, "Found element to select text from");
-    div.setStartBefore(element);
-    div.setEndAfter(element);
-    win.getSelection().addRange(div);
-  });
+  await SpecialPowers.spawn(
+    gBrowser.selectedBrowser,
+    [selector],
+    async function(contentSelector) {
+      info(`Selecting text of ${contentSelector}`);
+      let doc = content.document;
+      let win = doc.defaultView;
+      win.getSelection().removeAllRanges();
+      let div = doc.createRange();
+      let element = doc.querySelector(contentSelector);
+      Assert.ok(element, "Found element to select text from");
+      div.setStartBefore(element);
+      div.setEndAfter(element);
+      win.getSelection().addRange(div);
+    }
+  );
 }

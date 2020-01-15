@@ -9,9 +9,7 @@
 #include "nsIDNSListener.h"
 #include "nsIDNSByTypeRecord.h"
 #include "nsICancelable.h"
-#include "nsIPrefService.h"
 #include "nsIPrefBranch.h"
-#include "nsIServiceManager.h"
 #include "nsIXPConnect.h"
 #include "nsProxyRelease.h"
 #include "nsReadableUtils.h"
@@ -42,6 +40,8 @@
 #include "mozilla/net/DNSListenerProxy.h"
 #include "mozilla/Services.h"
 #include "mozilla/StaticPtr.h"
+#include "mozilla/TextUtils.h"
+#include "mozilla/Utf8.h"
 
 using namespace mozilla;
 using namespace mozilla::net;
@@ -776,12 +776,12 @@ nsresult nsDNSService::PreprocessHostname(bool aLocalDomain,
     }
   }
 
-  if (!aIDN || IsASCII(aInput)) {
+  if (!aIDN || IsAscii(aInput)) {
     aACE = aInput;
     return NS_OK;
   }
 
-  if (!(IsUTF8(aInput) && NS_SUCCEEDED(aIDN->ConvertUTF8toACE(aInput, aACE)))) {
+  if (!(IsUtf8(aInput) && NS_SUCCEEDED(aIDN->ConvertUTF8toACE(aInput, aACE)))) {
     return NS_ERROR_FAILURE;
   }
   return NS_OK;
@@ -1077,6 +1077,14 @@ nsresult nsDNSService::ResolveInternal(
   RefPtr<nsDNSSyncRequest> syncReq = new nsDNSSyncRequest(mon);
 
   uint16_t af = GetAFForLookup(hostname, flags);
+
+  // TRR uses the main thread for the HTTPS channel to the DoH server.
+  // If this were to block the main thread while waiting for TRR it would
+  // likely cause a deadlock. Instead we intentionally choose to not use TRR
+  // for this.
+  if (NS_IsMainThread()) {
+    flags |= RESOLVE_DISABLE_TRR;
+  }
 
   rv = res->ResolveHost(hostname, RESOLVE_TYPE_DEFAULT, aOriginAttributes,
                         flags, af, syncReq);

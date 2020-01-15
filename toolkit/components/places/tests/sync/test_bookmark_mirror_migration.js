@@ -4,6 +4,10 @@
 // Keep in sync with `SyncedBookmarksMirror.jsm`.
 const CURRENT_MIRROR_SCHEMA_VERSION = 7;
 
+// The oldest schema version that we support. Any databases with schemas older
+// than this will be dropped and recreated.
+const OLDEST_SUPPORTED_MIRROR_SCHEMA_VERSION = 5;
+
 async function getIndexNames(db, table, schema = "mirror") {
   let rows = await db.execute(`PRAGMA ${schema}.index_list(${table})`);
   let names = [];
@@ -19,6 +23,45 @@ async function getIndexNames(db, table, schema = "mirror") {
   return names.sort();
 }
 
+add_task(async function test_migrate_after_downgrade() {
+  await PlacesTestUtils.markBookmarksAsSynced();
+
+  let dbFile = await setupFixtureFile("mirror_v5.sqlite");
+  let oldBuf = await SyncedBookmarksMirror.open({
+    path: dbFile.path,
+    recordStepTelemetry() {},
+    recordValidationTelemetry() {},
+  });
+
+  info("Downgrade schema version to oldest supported");
+  await oldBuf.db.setSchemaVersion(
+    OLDEST_SUPPORTED_MIRROR_SCHEMA_VERSION,
+    "mirror"
+  );
+  await oldBuf.finalize();
+
+  let buf = await SyncedBookmarksMirror.open({
+    path: dbFile.path,
+    recordStepTelemetry() {},
+    recordValidationTelemetry() {},
+  });
+
+  // All migrations between `OLDEST_SUPPORTED_MIRROR_SCHEMA_VERSION` should
+  // be idempotent. When we downgrade, we roll back the schema version, but
+  // leave the schema changes in place, since we can't anticipate what a
+  // future version will change.
+  let schemaVersion = await buf.db.getSchemaVersion("mirror");
+  equal(
+    schemaVersion,
+    CURRENT_MIRROR_SCHEMA_VERSION,
+    "Should upgrade downgraded mirror schema"
+  );
+
+  await buf.finalize();
+  await PlacesUtils.bookmarks.eraseEverything();
+  await PlacesSyncUtils.bookmarks.reset();
+});
+
 // Migrations between 5 and 7 add three indexes.
 add_task(async function test_migrate_from_5_to_current() {
   await PlacesTestUtils.markBookmarksAsSynced();
@@ -26,7 +69,6 @@ add_task(async function test_migrate_from_5_to_current() {
   let dbFile = await setupFixtureFile("mirror_v5.sqlite");
   let buf = await SyncedBookmarksMirror.open({
     path: dbFile.path,
-    recordTelemetryEvent(object, method, value, extra) {},
     recordStepTelemetry() {},
     recordValidationTelemetry() {},
   });
@@ -98,56 +140,21 @@ add_task(async function test_migrate_from_5_to_current() {
 // Migrations between 1 and 2 discard the entire database.
 add_task(async function test_migrate_from_1_to_2() {
   let dbFile = await setupFixtureFile("mirror_v1.sqlite");
-  let telemetryEvents = [];
   let buf = await SyncedBookmarksMirror.open({
     path: dbFile.path,
-    recordTelemetryEvent(object, method, value, extra) {
-      telemetryEvents.push({ object, method, value, extra });
-    },
   });
-  let dbFileSize = Math.floor((await OS.File.stat(dbFile.path)).size / 1024);
-  deepEqual(telemetryEvents, [
-    {
-      object: "mirror",
-      method: "open",
-      value: "retry",
-      extra: { why: "corrupt" },
-    },
-    {
-      object: "mirror",
-      method: "open",
-      value: "success",
-      extra: { size: dbFileSize.toString(10) },
-    },
-  ]);
+  ok(
+    buf.wasCorrupt,
+    "Migrating from unsupported version should mark database as corrupt"
+  );
   await buf.finalize();
 });
 
 add_task(async function test_database_corrupt() {
   let corruptFile = await setupFixtureFile("mirror_corrupt.sqlite");
-  let telemetryEvents = [];
   let buf = await SyncedBookmarksMirror.open({
     path: corruptFile.path,
-    recordTelemetryEvent(object, method, value, extra) {
-      telemetryEvents.push({ object, method, value, extra });
-    },
   });
-  let dbFileSize = Math.floor(
-    (await OS.File.stat(corruptFile.path)).size / 1024
-  );
-  deepEqual(telemetryEvents, [
-    {
-      object: "mirror",
-      method: "open",
-      value: "retry",
-      extra: { why: "corrupt" },
-    },
-    {
-      object: "mirror",
-      method: "open",
-      value: "success",
-      extra: { size: dbFileSize.toString(10) },
-    },
-  ]);
+  ok(buf.wasCorrupt, "Opening corrupt database should mark it as such");
   await buf.finalize();
 });

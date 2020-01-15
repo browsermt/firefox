@@ -12,6 +12,7 @@
 // For UnrestrictedDoubleOrKeyframeAnimationOptions;
 #include "mozilla/dom/CSSPseudoElement.h"
 #include "mozilla/dom/KeyframeEffectBinding.h"
+#include "mozilla/dom/MutationObservers.h"
 #include "mozilla/AnimationUtils.h"
 #include "mozilla/AutoRestore.h"
 #include "mozilla/ComputedStyleInlines.h"
@@ -35,7 +36,6 @@
 #include "nsCSSPseudoElements.h"    // For PseudoStyleType
 #include "nsDOMMutationObserver.h"  // For nsAutoAnimationMutationBatch
 #include "nsIFrame.h"
-#include "nsIScriptError.h"
 #include "nsPresContextInlines.h"
 #include "nsRefreshDriver.h"
 
@@ -109,7 +109,7 @@ void KeyframeEffect::SetIterationComposite(
   }
 
   if (mAnimation && mAnimation->IsRelevant()) {
-    nsNodeUtils::AnimationChanged(mAnimation);
+    MutationObservers::NotifyAnimationChanged(mAnimation);
   }
 
   mEffectOptions.mIterationComposite = aIterationComposite;
@@ -128,7 +128,7 @@ void KeyframeEffect::SetComposite(const CompositeOperation& aComposite) {
   mEffectOptions.mComposite = aComposite;
 
   if (mAnimation && mAnimation->IsRelevant()) {
-    nsNodeUtils::AnimationChanged(mAnimation);
+    MutationObservers::NotifyAnimationChanged(mAnimation);
   }
 
   if (mTarget) {
@@ -149,7 +149,7 @@ void KeyframeEffect::NotifySpecifiedTimingUpdated() {
     mAnimation->NotifyEffectTimingUpdated();
 
     if (mAnimation->IsRelevant()) {
-      nsNodeUtils::AnimationChanged(mAnimation);
+      MutationObservers::NotifyAnimationChanged(mAnimation);
     }
 
     RequestRestyle(EffectCompositor::RestyleType::Layer);
@@ -242,7 +242,7 @@ void KeyframeEffect::SetKeyframes(nsTArray<Keyframe>&& aKeyframes,
   KeyframeUtils::DistributeKeyframes(mKeyframes);
 
   if (mAnimation && mAnimation->IsRelevant()) {
-    nsNodeUtils::AnimationChanged(mAnimation);
+    MutationObservers::NotifyAnimationChanged(mAnimation);
   }
 
   // We need to call UpdateProperties() unless the target element doesn't have
@@ -876,13 +876,14 @@ already_AddRefed<ComputedStyle> KeyframeEffect::GetTargetComputedStyle(
 
 #ifdef DEBUG
 void DumpAnimationProperties(
+    const RawServoStyleSet* aRawSet,
     nsTArray<AnimationProperty>& aAnimationProperties) {
   for (auto& p : aAnimationProperties) {
     printf("%s\n", nsCString(nsCSSProps::GetStringValue(p.mProperty)).get());
     for (auto& s : p.mSegments) {
       nsString fromValue, toValue;
-      s.mFromValue.SerializeSpecifiedValue(p.mProperty, fromValue);
-      s.mToValue.SerializeSpecifiedValue(p.mProperty, toValue);
+      s.mFromValue.SerializeSpecifiedValue(p.mProperty, aRawSet, fromValue);
+      s.mToValue.SerializeSpecifiedValue(p.mProperty, aRawSet, toValue);
       printf("  %f..%f: %s..%s\n", s.mFromKey, s.mToKey,
              NS_ConvertUTF16toUTF8(fromValue).get(),
              NS_ConvertUTF16toUTF8(toValue).get());
@@ -938,6 +939,9 @@ already_AddRefed<KeyframeEffect> KeyframeEffect::Constructor(
   //       computed offsets and rebuild the animation properties.
   effect->mKeyframes = aSource.mKeyframes;
   effect->mProperties = aSource.mProperties;
+  for (auto iter = aSource.mBaseValues.ConstIter(); !iter.Done(); iter.Next()) {
+    effect->mBaseValues.Put(iter.Key(), iter.Data());
+  }
   return effect.forget();
 }
 
@@ -983,7 +987,7 @@ void KeyframeEffect::SetTarget(
 
     nsAutoAnimationMutationBatch mb(mTarget->mElement->OwnerDoc());
     if (mAnimation) {
-      nsNodeUtils::AnimationRemoved(mAnimation);
+      MutationObservers::NotifyAnimationRemoved(mAnimation);
     }
   }
 
@@ -1000,7 +1004,7 @@ void KeyframeEffect::SetTarget(
 
     nsAutoAnimationMutationBatch mb(mTarget->mElement->OwnerDoc());
     if (mAnimation) {
-      nsNodeUtils::AnimationAdded(mAnimation);
+      MutationObservers::NotifyAnimationAdded(mAnimation);
       mAnimation->ReschedulePendingTasks();
     }
   }
@@ -1014,12 +1018,12 @@ static void CreatePropertyValue(
     nsCSSPropertyID aProperty, float aOffset,
     const Maybe<ComputedTimingFunction>& aTimingFunction,
     const AnimationValue& aValue, dom::CompositeOperation aComposite,
-    AnimationPropertyValueDetails& aResult) {
+    const RawServoStyleSet* aRawSet, AnimationPropertyValueDetails& aResult) {
   aResult.mOffset = aOffset;
 
   if (!aValue.IsNull()) {
     nsString stringValue;
-    aValue.SerializeSpecifiedValue(aProperty, stringValue);
+    aValue.SerializeSpecifiedValue(aProperty, aRawSet, stringValue);
     aResult.mValue.Construct(stringValue);
   }
 
@@ -1035,6 +1039,9 @@ static void CreatePropertyValue(
 
 void KeyframeEffect::GetProperties(
     nsTArray<AnimationPropertyDetails>& aProperties, ErrorResult& aRv) const {
+  const RawServoStyleSet* rawSet =
+      mDocument->StyleSetForPresShellOrMediaQueryEvaluation()->RawSet();
+
   for (const AnimationProperty& property : mProperties) {
     AnimationPropertyDetails propertyDetails;
     propertyDetails.mProperty =
@@ -1060,7 +1067,7 @@ void KeyframeEffect::GetProperties(
       binding_detail::FastAnimationPropertyValueDetails fromValue;
       CreatePropertyValue(property.mProperty, segment.mFromKey,
                           segment.mTimingFunction, segment.mFromValue,
-                          segment.mFromComposite, fromValue);
+                          segment.mFromComposite, rawSet, fromValue);
       // We don't apply timing functions for zero-length segments, so
       // don't return one here.
       if (segment.mFromKey == segment.mToKey) {
@@ -1079,7 +1086,8 @@ void KeyframeEffect::GetProperties(
           property.mSegments[segmentIdx + 1].mFromValue != segment.mToValue) {
         binding_detail::FastAnimationPropertyValueDetails toValue;
         CreatePropertyValue(property.mProperty, segment.mToKey, Nothing(),
-                            segment.mToValue, segment.mToComposite, toValue);
+                            segment.mToValue, segment.mToComposite, rawSet,
+                            toValue);
         // It doesn't really make sense to have a timing function on the
         // last property value or before a sudden jump so we just drop the
         // easing property altogether.
@@ -1127,6 +1135,9 @@ void KeyframeEffect::GetKeyframes(JSContext*& aCx, nsTArray<JSObject*>& aResult,
     // short-term (and unshipped) behavior until bug 1391537 is fixed.
     computedStyle = GetTargetComputedStyle(Flush::Style);
   }
+
+  const RawServoStyleSet* rawSet =
+      mDocument->StyleSetForPresShellOrMediaQueryEvaluation()->RawSet();
 
   for (const Keyframe& keyframe : mKeyframes) {
     // Set up a dictionary object for the explicit members
@@ -1176,18 +1187,36 @@ void KeyframeEffect::GetKeyframes(JSContext*& aCx, nsTArray<JSObject*>& aResult,
       if (propertyValue.mServoDeclarationBlock) {
         Servo_DeclarationBlock_SerializeOneValue(
             propertyValue.mServoDeclarationBlock, propertyValue.mProperty,
-            &stringValue, computedStyle, customProperties);
+            &stringValue, computedStyle, customProperties, rawSet);
       } else {
         RawServoAnimationValue* value =
             mBaseValues.GetWeak(propertyValue.mProperty);
 
         if (value) {
-          Servo_AnimationValue_Serialize(value, propertyValue.mProperty,
+          Servo_AnimationValue_Serialize(value, propertyValue.mProperty, rawSet,
                                          &stringValue);
         }
       }
 
-      const char* name = nsCSSProps::PropertyIDLName(propertyValue.mProperty);
+      // Basically, we need to do the mapping:
+      // * eCSSProperty_offset => "cssOffset"
+      // * eCSSProperty_float => "cssFloat"
+      // This means if property refers to the CSS "offset"/"float" property,
+      // return the string "cssOffset"/"cssFloat". (So avoid overlapping
+      // "offset" property in BaseKeyframe.)
+      // https://drafts.csswg.org/web-animations/#property-name-conversion
+      const char* name = nullptr;
+      switch (propertyValue.mProperty) {
+        case nsCSSPropertyID::eCSSProperty_offset:
+          name = "cssOffset";
+          break;
+        case nsCSSPropertyID::eCSSProperty_float:
+          // FIXME: Bug 1582314: Should handle cssFloat manually if we remove it
+          // from nsCSSProps::PropertyIDLName().
+        default:
+          name = nsCSSProps::PropertyIDLName(propertyValue.mProperty);
+      }
+
       JS::Rooted<JS::Value> value(aCx);
       if (!ToJSValue(aCx, stringValue, &value) ||
           !JS_DefineProperty(aCx, keyframeObject, name, value,
@@ -1467,16 +1496,6 @@ bool KeyframeEffect::CanAnimateTransformOnCompositor(
   const nsIFrame* primaryFrame =
       nsLayoutUtils::GetPrimaryFrameFromStyleFrame(aFrame);
 
-  // Disallow OMTA for preserve-3d transform. Note that we check the style
-  // property rather than Extend3DContext() since that can recurse back into
-  // this function via HasOpacity(). See bug 779598.
-  if (primaryFrame->Combines3DTransformWithAncestors() ||
-      primaryFrame->StyleDisplay()->mTransformStyle ==
-          NS_STYLE_TRANSFORM_STYLE_PRESERVE_3D) {
-    aPerformanceWarning =
-        AnimationPerformanceWarning::Type::TransformPreserve3D;
-    return false;
-  }
   // Note that testing BackfaceIsHidden() is not a sufficient test for
   // what we need for animating backface-visibility correctly if we
   // remove the above test for Extend3DContext(); that would require
@@ -1881,13 +1900,6 @@ KeyframeEffect::MatchForCompositor KeyframeEffect::IsMatchForCompositor(
         return KeyframeEffect::MatchForCompositor::No;
       }
     }
-  }
-
-  // Bug 1429305: Drop this after supporting compositor animations for motion
-  // path.
-  if (aPropertySet.Intersects(nsCSSPropertyIDSet::TransformLikeProperties()) &&
-      !aFrame->StyleDisplay()->mOffsetPath.IsNone()) {
-    return KeyframeEffect::MatchForCompositor::No;
   }
 
   return mAnimation->IsPlaying() ? KeyframeEffect::MatchForCompositor::Yes

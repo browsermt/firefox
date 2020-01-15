@@ -234,7 +234,11 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
 
     // If set, the family name was quoted and so must not be treated as a CSS
     // generic.
-    eQuotedFamilyName = 1 << 3
+    eQuotedFamilyName = 1 << 3,
+
+    // If set, "hidden" font families (like ".SF NS Text" on macOS) are
+    // searched in addition to standard user-visible families.
+    eSearchHiddenFamilies = 1 << 4,
   };
 
   // Find family(ies) matching aFamily and append to the aOutput array
@@ -302,6 +306,10 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
 
   // get the system default font family
   FontFamily GetDefaultFont(const gfxFontStyle* aStyle);
+
+  // get the "ultimate" default font, for use if the font list is otherwise
+  // unusable (e.g. in the middle of being updated)
+  gfxFontEntry* GetDefaultFontEntry() { return mDefaultFontEntry.get(); }
 
   /**
    * Look up a font by name on the host platform.
@@ -440,8 +448,17 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
     return mCodepointsWithNoFonts.test(aCh);
   }
 
+  // If using the shared font list, returns a generation count that is
+  // incremented if/when the platform list is reinitialized (e.g. because
+  // fonts are installed/removed while the browser is running), such that
+  // existing references to shared font family or face objects and character
+  // maps will no longer be valid.
+  // (The legacy (non-shared) list just returns 0 here.)
+  uint32_t GetGeneration() const;
+
  protected:
   friend class mozilla::fontlist::FontList;
+  friend class InitOtherFamilyNamesForStylo;
 
   class InitOtherFamilyNamesRunnable : public mozilla::CancelableRunnable {
    public:
@@ -796,6 +813,8 @@ class gfxPlatformFontList : public gfxFontInfoLoader {
 
   nsRefPtrHashtable<nsPtrHashKey<mozilla::fontlist::Face>, gfxFontEntry>
       mFontEntries;
+
+  RefPtr<gfxFontEntry> mDefaultFontEntry;
 
   bool mFontFamilyWhitelistActive;
 };

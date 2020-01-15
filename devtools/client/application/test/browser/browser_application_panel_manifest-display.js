@@ -19,11 +19,11 @@ add_task(async function() {
 
   info("Waiting for the manifest to be displayed");
   await waitUntil(() => doc.querySelector(".js-manifest") !== null);
-  ok("Manifest is being displayed");
+  ok(true, "Manifest is being displayed");
 
   // assert manifest members are being properly displayed
   checkManifestMember(doc, "name", "Foo");
-  checkManifestMember(doc, "background_color", "#ff0000");
+  checkManifestMember(doc, "background_color", "#ff0000ff");
 
   ok(
     doc.querySelector(".js-manifest-issues") === null,
@@ -49,7 +49,7 @@ add_task(async function() {
 
   info("Waiting for the manifest to be displayed");
   await waitUntil(() => doc.querySelector(".js-manifest") !== null);
-  ok("Manifest is being displayed");
+  ok(true, "Manifest is being displayed");
 
   // assert manifest members are being properly displayed
   checkManifestMember(doc, "name", "Foo");
@@ -80,7 +80,7 @@ add_task(async function() {
 
   info("Waiting for the manifest to be displayed");
   await waitUntil(() => doc.querySelector(".js-manifest") !== null);
-  ok("Manifest is being displayed");
+  ok(true, "Manifest is being displayed");
 
   const issuesEl = doc.querySelector(".js-manifest-issues");
   ok(issuesEl !== null, "Validation issues are displayed");
@@ -95,13 +95,50 @@ add_task(async function() {
   await BrowserTestUtils.removeTab(tab);
 });
 
-function checkManifestMember(doc, member, expectedValue) {
-  const itemEl = [...doc.querySelectorAll(".js-manifest-item")].find(x =>
+add_task(async function() {
+  info("Test that we are displaying correctly a manifest with icons");
+  const url = URL_ROOT + "resources/manifest/load-ok-icons.html";
+
+  await enableApplicationPanel();
+  const { panel, tab } = await openNewTabAndApplicationPanel(url);
+  const doc = panel.panelWin.document;
+
+  selectPage(panel, "manifest");
+
+  info("Waiting for the manifest to be displayed");
+  await waitUntil(() => doc.querySelector(".js-manifest") !== null);
+  ok(true, "Manifest is being displayed");
+
+  // assert manifest icon is being displayed
+  const iconEl = findMemberByLabel(doc, "128x128image/svg");
+  ok(iconEl !== null, "Icon label is being displayed with size and image type");
+  const imgEl = iconEl.querySelector(".js-manifest-item-content img");
+  ok(imgEl !== null, "An image is displayed for the icon");
+  is(
+    imgEl.src,
+    URL_ROOT + "resources/manifest/icon.svg",
+    "The icon image has the the icon url as source"
+  );
+  const iconTextContent = iconEl.querySelector(".js-manifest-item-content")
+    .textContent;
+  ok(iconTextContent.includes("any"), "Purpose is being displayed");
+
+  // close the tab
+  info("Closing the tab.");
+  await BrowserTestUtils.removeTab(tab);
+});
+
+function findMemberByLabel(doc, member) {
+  return [...doc.querySelectorAll(".js-manifest-item")].find(x =>
     x.querySelector(".js-manifest-item-label").textContent.startsWith(member)
   );
-  ok(
-    itemEl.querySelector(".js-manifest-item-content").textContent ===
-      expectedValue,
-    `Manifest member ${member} is being displayed with value ${expectedValue}`
+}
+
+function checkManifestMember(doc, member, expectedValue) {
+  const itemEl = findMemberByLabel(doc, member);
+  is(
+    itemEl.querySelector(".js-manifest-item-content").textContent,
+    expectedValue,
+    `Manifest member ${member} displays the correct value`
   );
 }

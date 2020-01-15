@@ -7,6 +7,7 @@
 #include "nss.h"
 #include "pk11func.h"
 #include "secder.h"
+#include "sechash.h"
 #include "ssl.h"
 #include "sslproto.h"
 #include "sslimpl.h"
@@ -538,6 +539,15 @@ tls13_MakePssSpki(const SECKEYPublicKey *pub, SECOidTag hashOid)
         goto loser; /* Code already set. */
     }
 
+    /* Always include saltLength: all hashes are larger than 20. */
+    unsigned int saltLength = HASH_ResultLenByOidTag(hashOid);
+    PORT_Assert(saltLength > 20);
+    if (!SEC_ASN1EncodeInteger(arena, &params.saltLength, saltLength)) {
+        PORT_SetError(SEC_ERROR_LIBRARY_FAILURE);
+        goto loser;
+    }
+    /* Omit the trailerField always. */
+
     SECItem *algorithmItem =
         SEC_ASN1EncodeItem(arena, NULL, &params,
                            SEC_ASN1_GET(SECKEY_RSAPSSParamsTemplate));
@@ -703,6 +713,18 @@ SSLExp_DelegateCredential(const CERTCertificate *cert,
     if (rv != SECSuccess) {
         goto loser;
     }
+
+    if (dc->alg == ssl_sig_none) {
+        SECOidTag spkiOid = SECOID_GetAlgorithmTag(&cert->subjectPublicKeyInfo.algorithm);
+        /* If the Cert SPKI contained an AlgorithmIdentifier of "rsaEncryption", set a
+         * default rsa_pss_rsae_sha256 scheme. */
+        if (spkiOid == SEC_OID_PKCS1_RSA_ENCRYPTION) {
+            SSLSignatureScheme scheme = ssl_sig_rsa_pss_rsae_sha256;
+            if (ssl_SignatureSchemeValid(scheme, spkiOid, PR_TRUE /* isTls13 */)) {
+                dc->alg = scheme;
+            }
+        }
+    }
     PORT_Assert(dc->alg != ssl_sig_none);
 
     rv = tls13_AppendCredentialParams(&dcBuf, dc);
@@ -739,6 +761,8 @@ SSLExp_DelegateCredential(const CERTCertificate *cert,
     if (rv != SECSuccess) {
         goto loser;
     }
+
+    PRINT_BUF(20, (NULL, "delegated credential", dcBuf.buf, dcBuf.len));
 
     SECKEY_DestroySubjectPublicKeyInfo(spki);
     SECKEY_DestroyPrivateKey(tmpPriv);

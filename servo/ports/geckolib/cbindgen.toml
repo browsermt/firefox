@@ -6,8 +6,13 @@ header = """/* This Source Code Form is subject to the terms of the Mozilla Publ
 #pragma GCC diagnostic push
 #ifdef __clang__
 #  pragma GCC diagnostic ignored "-Wreturn-type-c-linkage"
-#endif"""
+#endif
+// Work-around silly windows.h define.
+#pragma push_macro("STRICT")
+#undef STRICT
+"""
 trailer = """
+#pragma pop_macro("STRICT")
 #pragma GCC diagnostic pop
 #include "mozilla/ServoStyleConstsInlines.h"
 """
@@ -33,6 +38,7 @@ extra_bindings = ["style"]
 include = ["style", "cssparser", "style_traits", "servo_arc"]
 
 [struct]
+associated_constants_in_body = true
 derive_eq = true
 derive_neq = true
 
@@ -40,6 +46,8 @@ derive_neq = true
 # This will actually never be defined, but is handy to avoid cbindgen
 # generating Servo-only types.
 "feature = servo" = "CBINDGEN_IS_SERVO"
+"target_pointer_width = 32" = "SERVO_32_BITS"
+"target_pointer_width = 64" = "HAVE_64BIT_BUILD"
 
 [macro_expansion]
 bitflags = true
@@ -49,6 +57,7 @@ derive_helper_methods = true
 derive_const_casts = true
 derive_tagged_enum_destructor = true
 derive_tagged_enum_copy_constructor = true
+derive_tagged_enum_copy_assignment = true
 private_default_tagged_enum_constructor = true
 cast_assert_name = "MOZ_ASSERT"
 
@@ -130,6 +139,7 @@ include = [
   "TouchAction",
   "WillChange",
   "TextDecorationLine",
+  "TextUnderlinePosition",
   "TextTransform",
   "TextOverflow",
   "MozListReversed",
@@ -177,8 +187,11 @@ include = [
   "CounterSetOrReset",
   "CounterIncrement",
   "WritingMode",
+  "VecU8",
+  "Content",
+  "ContentItem",
 ]
-item_types = ["enums", "structs", "typedefs", "functions", "constants"]
+item_types = ["enums", "structs", "unions", "typedefs", "functions", "constants"]
 renaming_overrides_prefixing = true
 
 # Prevent some renaming for Gecko types that cbindgen doesn't otherwise understand.
@@ -195,6 +208,7 @@ renaming_overrides_prefixing = true
 "nsTArray" = "nsTArray"
 "nsPresContext" = "nsPresContext"
 "ComputedTiming" = "ComputedTiming"
+"CountedUnknownProperty" = "CountedUnknownProperty"
 "RefPtr" = "RefPtr"
 "nsCSSPropertyID" = "nsCSSPropertyID"
 "nsCSSPropertyIDSet" = "nsCSSPropertyIDSet"
@@ -235,13 +249,53 @@ renaming_overrides_prefixing = true
   inline nscoord ToAppUnits() const;
   inline bool IsZero() const;
   float ToCSSPixels() const { return _0; }
+  inline void ScaleBy(float);
 """
 
-"LengthPercentage" = """
-  static constexpr inline StyleLengthPercentage Zero();
-  static inline StyleLengthPercentage FromAppUnits(nscoord);
-  static inline StyleLengthPercentage FromPixels(CSSCoord);
-  static inline StyleLengthPercentage FromPercentage(float);
+"LengthPercentageUnion" = """
+  using Self = StyleLengthPercentageUnion;
+
+  // TODO(emilio): cbindgen should be able to generate these in the body of the
+  // union, but it seems it's only implemented for structs, not unions.
+  static const uint32_t TAG_CALC = StyleLengthPercentageUnion_TAG_CALC;
+  static const uint32_t TAG_LENGTH = StyleLengthPercentageUnion_TAG_LENGTH;
+  static const uint32_t TAG_PERCENTAGE = StyleLengthPercentageUnion_TAG_PERCENTAGE;
+  static const uint32_t TAG_MASK = StyleLengthPercentageUnion_TAG_MASK;
+
+ private:
+  uint32_t Tag() const {
+    return tag.tag & TAG_MASK;
+  }
+
+ public:
+  // We need to do all this manually because cbingen can't reason about unions.
+  inline StyleLengthPercentageUnion();
+  inline StyleLengthPercentageUnion(const Self&);
+  inline ~StyleLengthPercentageUnion();
+  inline Self& operator=(const Self&);
+
+  inline bool operator==(const Self& aOther) const;
+  inline bool operator!=(const Self& aOther) const;
+
+  inline bool IsLength() const;
+  inline bool IsPercentage() const;
+  inline bool IsCalc() const;
+
+  inline const StyleLength& AsLength() const;
+  inline StyleLength& AsLength();
+
+  inline const StylePercentage& AsPercentage() const;
+  inline StylePercentage& AsPercentage();
+
+  inline const StyleCalcLengthPercentage& AsCalc() const;
+  inline StyleCalcLengthPercentage& AsCalc();
+
+  static inline Self Zero();
+  static inline Self FromAppUnits(nscoord);
+  static inline Self FromPixels(CSSCoord);
+  static inline Self FromPercentage(float);
+
+  inline void ScaleLengthsBy(float);
   inline CSSCoord LengthInCSSPixels() const;
   inline float Percentage() const;
   inline bool HasPercent() const;
@@ -334,6 +388,13 @@ renaming_overrides_prefixing = true
 "TextTransform" = """
   static inline StyleTextTransform None();
   inline bool IsNone() const;
+"""
+
+"TextUnderlinePosition" = """
+  inline bool IsAuto() const;
+  inline bool IsUnder() const;
+  inline bool IsLeft() const;
+  inline bool IsRight() const;
 """
 
 # TODO(emilio): Add hooks to cbindgen to be able to generate MOZ_MUST_USE_TYPE
@@ -519,6 +580,16 @@ renaming_overrides_prefixing = true
   inline static StyleAngle Zero();
   inline float ToDegrees() const;
   inline double ToRadians() const;
+  StyleAngle operator+(const StyleAngle& aAngle) const {
+    return StyleAngle{_0 + aAngle._0};
+  }
+  StyleAngle operator-(const StyleAngle& aAngle) const {
+    return StyleAngle{_0 - aAngle._0};
+  }
+"""
+
+"CoordPair" = """
+  explicit StyleCoordPair(const gfx::Point& aPoint): _0(aPoint.x), _1(aPoint.y) {}
 """
 
 "TextOverflow" = """
@@ -572,7 +643,7 @@ renaming_overrides_prefixing = true
   inline StyleCorsMode CorsMode() const;
   already_AddRefed<nsIURI> ResolveLocalRef(nsIURI* aBase) const;
   already_AddRefed<nsIURI> ResolveLocalRef(const nsIContent* aContent) const;
-  imgRequestProxy* LoadImage(mozilla::dom::Document&);
+  already_AddRefed<imgRequestProxy> LoadImage(mozilla::dom::Document&);
 """
 
 "GenericGradient" = """
@@ -610,12 +681,18 @@ renaming_overrides_prefixing = true
   inline nsRect ToLayoutRect(nscoord aAutoSize = NS_MAXSIZE) const;
 """
 
-"WritingMode" = """
-  StyleWritingMode operator^(const StyleWritingMode& other) const {
-    return {static_cast<decltype(bits)>(this->bits ^ other.bits)};
+"VecU8" = """
+  StyleVecU8(): data(nullptr), length(0), capacity(0) {}
+  StyleVecU8(const StyleVecU8& aOther) = delete;
+  StyleVecU8(StyleVecU8&& aOther)
+    : data(aOther.data), length(aOther.length), capacity(aOther.capacity) {
+    aOther.data = nullptr;
+    aOther.length = 0;
+    aOther.capacity = 0;
   }
-  StyleWritingMode& operator^=(const StyleWritingMode& other) {
-    *this = (*this ^ other);
-    return *this;
-  }
+  StyleVecU8& operator=(StyleVecU8&& aOther) = delete;
+  StyleVecU8& operator=(const StyleVecU8& aOther) = delete;
+
+  // This type is not safe to return by value. Should be careful.
+  inline ~StyleVecU8();
 """

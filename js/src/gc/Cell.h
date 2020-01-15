@@ -48,13 +48,66 @@ struct Chunk;
 class StoreBuffer;
 class TenuredCell;
 
+#ifdef DEBUG
+extern bool CurrentThreadIsGCMarking();
+#endif
+
+// Like gc::MarkColor but allows the possibility of the cell being unmarked.
+//
+// This class mimics an enum class, but supports operator overloading.
+class CellColor {
+ public:
+  enum Color { White = 0, Gray = 1, Black = 2 };
+
+  CellColor() : color(White) {}
+
+  MOZ_IMPLICIT CellColor(MarkColor markColor)
+      : color(markColor == MarkColor::Black ? Black : Gray) {}
+
+  MOZ_IMPLICIT constexpr CellColor(Color c) : color(c) {}
+
+  MarkColor asMarkColor() const {
+    MOZ_ASSERT(color != White);
+    return color == Black ? MarkColor::Black : MarkColor::Gray;
+  }
+
+  // Implement a total ordering for CellColor, with white being 'least marked'
+  // and black being 'most marked'.
+  bool operator<(const CellColor other) const { return color < other.color; }
+  bool operator>(const CellColor other) const { return color > other.color; }
+  bool operator<=(const CellColor other) const { return color <= other.color; }
+  bool operator>=(const CellColor other) const { return color >= other.color; }
+  bool operator!=(const CellColor other) const { return color != other.color; }
+  bool operator==(const CellColor other) const { return color == other.color; }
+  explicit operator bool() const { return color != White; }
+
+#if defined(JS_GC_ZEAL) || defined(DEBUG)
+  const char* name() const {
+    switch (color) {
+      case CellColor::White:
+        return "white";
+      case CellColor::Black:
+        return "black";
+      case CellColor::Gray:
+        return "gray";
+      default:
+        MOZ_CRASH("Unexpected cell color");
+    }
+  }
+#endif
+
+ private:
+  Color color;
+};
+
 // [SMDOC] GC Cell
 //
 // A GC cell is the base class for all GC things. All types allocated on the GC
 // heap extend either gc::Cell or gc::TenuredCell. If a type is always tenured,
 // prefer the TenuredCell class as base.
 //
-// The first word (a pointer or uintptr_t) of each Cell must reserve the low
+// The first word (a pointer or uintptr_t) of each Cell must reserve the low bit
+// for GC purposes. In addition to that, nursery Cells must reserve the low
 // Cell::ReservedBits bits for GC purposes. The remaining bits are available to
 // sub-classes and typically store a pointer to another gc::Cell.
 //
@@ -64,17 +117,21 @@ class TenuredCell;
 struct alignas(gc::CellAlignBytes) Cell {
  public:
   // The low bits of the first word of each Cell are reserved for GC flags.
-  static constexpr int ReservedBits = 2;
-  static constexpr uintptr_t RESERVED_MASK = JS_BITMASK(ReservedBits);
+  static constexpr int ReservedBits = 3;
+  static constexpr uintptr_t RESERVED_MASK = BitMask(ReservedBits);
 
   // Indicates if the cell is currently a RelocationOverlay
-  static constexpr uintptr_t FORWARD_BIT = JS_BIT(0);
+  static constexpr uintptr_t FORWARD_BIT = Bit(0);
 
   // When a Cell is in the nursery, this will indicate if it is a JSString (1)
-  // or JSObject (0). When not in nursery, this bit is still reserved for
+  // or JSObject/BigInt (0). When not in nursery, this bit is still reserved for
   // JSString to use as JSString::NON_ATOM bit. This may be removed by Bug
   // 1376646.
-  static constexpr uintptr_t JSSTRING_BIT = JS_BIT(1);
+  static constexpr uintptr_t JSSTRING_BIT = Bit(1);
+
+  // When a Cell is in the nursery, this will indicate if it is a BigInt (1)
+  // or JSObject/JSString (0).
+  static constexpr uintptr_t BIGINT_BIT = Bit(2);
 
   MOZ_ALWAYS_INLINE bool isTenured() const { return !IsInsideNursery(this); }
   MOZ_ALWAYS_INLINE const TenuredCell& asTenured() const;
@@ -85,6 +142,12 @@ struct alignas(gc::CellAlignBytes) Cell {
   MOZ_ALWAYS_INLINE bool isMarkedGray() const;
   MOZ_ALWAYS_INLINE bool isMarked(gc::MarkColor color) const;
   MOZ_ALWAYS_INLINE bool isMarkedAtLeast(gc::MarkColor color) const;
+
+  MOZ_ALWAYS_INLINE CellColor color() const {
+    return isMarkedBlack()
+               ? CellColor::Black
+               : isMarkedGray() ? CellColor::Gray : CellColor::White;
+  }
 
   inline JSRuntime* runtimeFromMainThread() const;
 
@@ -112,6 +175,12 @@ struct alignas(gc::CellAlignBytes) Cell {
     MOZ_ASSERT(!isTenured());
     uintptr_t firstWord = *reinterpret_cast<const uintptr_t*>(this);
     return firstWord & JSSTRING_BIT;
+  }
+
+  inline bool nurseryCellIsBigInt() const {
+    MOZ_ASSERT(!isTenured());
+    uintptr_t firstWord = *reinterpret_cast<const uintptr_t*>(this);
+    return firstWord & BIGINT_BIT;
   }
 
   template <class T>
@@ -151,10 +220,6 @@ struct alignas(gc::CellAlignBytes) Cell {
 // heap, such as access to the arena and mark bits.
 class TenuredCell : public Cell {
  public:
-  // Construct a TenuredCell from a void*, making various sanity assertions.
-  static MOZ_ALWAYS_INLINE TenuredCell* fromPointer(void* ptr);
-  static MOZ_ALWAYS_INLINE const TenuredCell* fromPointer(const void* ptr);
-
   MOZ_ALWAYS_INLINE bool isTenured() const {
     MOZ_ASSERT(!IsInsideNursery(this));
     return true;
@@ -165,10 +230,16 @@ class TenuredCell : public Cell {
   MOZ_ALWAYS_INLINE bool isMarkedBlack() const;
   MOZ_ALWAYS_INLINE bool isMarkedGray() const;
 
+  // Same as Cell::color, but skips nursery checks.
+  MOZ_ALWAYS_INLINE CellColor color() const {
+    return isMarkedBlack()
+               ? CellColor::Black
+               : isMarkedGray() ? CellColor::Gray : CellColor::White;
+  }
+
   // The return value indicates if the cell went from unmarked to marked.
-  MOZ_ALWAYS_INLINE bool markIfUnmarked(
-      MarkColor color = MarkColor::Black) const;
-  MOZ_ALWAYS_INLINE void markBlack() const;
+  MOZ_ALWAYS_INLINE bool markIfUnmarked(MarkColor color = MarkColor::Black);
+  MOZ_ALWAYS_INLINE void markBlack();
   MOZ_ALWAYS_INLINE void copyMarkBitsFrom(const TenuredCell* src);
   MOZ_ALWAYS_INLINE void unmark();
 
@@ -179,6 +250,10 @@ class TenuredCell : public Cell {
   inline JS::Zone* zone() const;
   inline JS::Zone* zoneFromAnyThread() const;
   inline bool isInsideZone(JS::Zone* zone) const;
+
+  inline size_t indexInArena() const;
+  inline uint8_t markBits() const;
+  inline uint8_t& markBitsRef();
 
   MOZ_ALWAYS_INLINE JS::shadow::Zone* shadowZone() const {
     return JS::shadow::Zone::from(zone());
@@ -221,6 +296,9 @@ class TenuredCell : public Cell {
 #ifdef DEBUG
   inline bool isAligned() const;
 #endif
+
+ private:
+  inline size_t divideByThingSize(size_t numerator) const;
 };
 
 MOZ_ALWAYS_INLINE const TenuredCell& Cell::asTenured() const {
@@ -281,13 +359,28 @@ inline StoreBuffer* Cell::storeBuffer() const {
   return chunk()->trailer.storeBuffer;
 }
 
+#ifdef DEBUG
+extern Cell* UninlinedForwarded(const Cell* cell);
+#endif
+
 inline JS::TraceKind Cell::getTraceKind() const {
   if (isTenured()) {
+    MOZ_ASSERT_IF(isForwarded(), UninlinedForwarded(this)->getTraceKind() ==
+                                     asTenured().getTraceKind());
     return asTenured().getTraceKind();
   }
   if (nurseryCellIsString()) {
+    MOZ_ASSERT_IF(isForwarded(), UninlinedForwarded(this)->getTraceKind() ==
+                                     JS::TraceKind::String);
     return JS::TraceKind::String;
   }
+  if (nurseryCellIsBigInt()) {
+    MOZ_ASSERT_IF(isForwarded(), UninlinedForwarded(this)->getTraceKind() ==
+                                     JS::TraceKind::BigInt);
+    return JS::TraceKind::BigInt;
+  }
+  MOZ_ASSERT_IF(isForwarded(), UninlinedForwarded(this)->getTraceKind() ==
+                                   JS::TraceKind::Object);
   return JS::TraceKind::Object;
 }
 
@@ -295,46 +388,72 @@ inline JS::TraceKind Cell::getTraceKind() const {
   return JS::shadow::Zone::from(zone)->needsIncrementalBarrier();
 }
 
-/* static */ MOZ_ALWAYS_INLINE TenuredCell* TenuredCell::fromPointer(
-    void* ptr) {
-  MOZ_ASSERT(static_cast<TenuredCell*>(ptr)->isTenured());
-  return static_cast<TenuredCell*>(ptr);
+uint8_t TenuredCell::markBits() const {
+  return arena()->markBits()[indexInArena()];
 }
 
-/* static */ MOZ_ALWAYS_INLINE const TenuredCell* TenuredCell::fromPointer(
-    const void* ptr) {
-  MOZ_ASSERT(static_cast<const TenuredCell*>(ptr)->isTenured());
-  return static_cast<const TenuredCell*>(ptr);
+uint8_t& TenuredCell::markBitsRef() {
+  return arena()->markBits()[indexInArena()];
+}
+
+size_t TenuredCell::indexInArena() const {
+  // Cells are numbered in reverse order from the end of the arena because this
+  // doesn't require looking up the offset of the first cell.
+  size_t offsetFromStart = uintptr_t(this) & ArenaMask;
+  size_t offsetFromLastByte = offsetFromStart ^ ArenaMask;
+  size_t index = divideByThingSize(offsetFromLastByte);
+  MOZ_ASSERT(index < arena()->getThingsPerArena());
+  return index;
+}
+
+size_t TenuredCell::divideByThingSize(size_t numerator) const {
+  // Perform division by multiplying by fixed-point representation of reciprocal
+  // and shifting the result.
+  size_t reciprocal = arena()->getReciprocalOfThingSize();
+  return (numerator * reciprocal) >> ReciprocalThingSizeShift;
 }
 
 bool TenuredCell::isMarkedAny() const {
   MOZ_ASSERT(arena()->allocated());
-  return chunk()->bitmap.isMarkedAny(this);
+  return markBits() & MarkBitMaskBothBits;
 }
 
 bool TenuredCell::isMarkedBlack() const {
   MOZ_ASSERT(arena()->allocated());
-  return chunk()->bitmap.isMarkedBlack(this);
+  return markBits() & MarkBitMaskBlack;
 }
 
 bool TenuredCell::isMarkedGray() const {
   MOZ_ASSERT(arena()->allocated());
-  return chunk()->bitmap.isMarkedGray(this);
+  return (markBits() & MarkBitMaskBothBits) == MarkBitMaskGrayOrBlack;
 }
 
-bool TenuredCell::markIfUnmarked(MarkColor color /* = Black */) const {
-  return chunk()->bitmap.markIfUnmarked(this, color);
+bool TenuredCell::markIfUnmarked(MarkColor color /* = Black */) {
+  uint8_t& markBits = markBitsRef();
+  if (markBits & MarkBitMaskBlack) {
+    return false;
+  }
+
+  if (color == MarkColor::Black) {
+    markBits |= MarkBitMaskBlack;
+    return true;
+  }
+
+  if (markBits & MarkBitMaskGrayOrBlack) {
+    return false;
+  }
+
+  markBits |= MarkBitMaskGrayOrBlack;
+  return true;
 }
 
-void TenuredCell::markBlack() const { chunk()->bitmap.markBlack(this); }
+void TenuredCell::markBlack() { markIfUnmarked(MarkColor::Black); }
 
 void TenuredCell::copyMarkBitsFrom(const TenuredCell* src) {
-  ChunkBitmap& bitmap = chunk()->bitmap;
-  bitmap.copyMarkBit(this, src, ColorBit::BlackBit);
-  bitmap.copyMarkBit(this, src, ColorBit::GrayOrBlackBit);
+  markBitsRef() = src->markBits();
 }
 
-void TenuredCell::unmark() { chunk()->bitmap.unmark(this); }
+void TenuredCell::unmark() { markBitsRef() = 0; }
 
 inline Arena* TenuredCell::arena() const {
   MOZ_ASSERT(isTenured());
@@ -351,7 +470,7 @@ JS::TraceKind TenuredCell::getTraceKind() const {
 
 JS::Zone* TenuredCell::zone() const {
   JS::Zone* zone = arena()->zone;
-  MOZ_ASSERT(CurrentThreadCanAccessZone(zone));
+  MOZ_ASSERT(CurrentThreadIsGCMarking() || CurrentThreadCanAccessZone(zone));
   return zone;
 }
 
@@ -541,7 +660,7 @@ class CellWithLengthAndFlags : public BaseCell {
   static constexpr size_t offsetOfLength() {
     return offsetof(CellWithLengthAndFlags, length_);
   }
-#elif MOZ_LITTLE_ENDIAN
+#elif MOZ_LITTLE_ENDIAN()
   static constexpr size_t offsetOfFlags() {
     return offsetof(CellWithLengthAndFlags, flags_);
   }

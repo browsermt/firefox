@@ -686,13 +686,13 @@ class ADBDevice(ADBCommand):
         boot_completed = False
         while not boot_completed and (time.time() - start_time) <= float(timeout):
             try:
-                self.shell_output("/system/bin/ls", timeout=timeout)
+                self.shell_output("/system/bin/ls /system/bin/ls", timeout=timeout)
                 boot_completed = True
                 self._ls = "/system/bin/ls"
             except ADBError as e1:
                 self._logger.info("detect /system/bin/ls {}".format(e1))
                 try:
-                    self.shell_output("/system/xbin/ls", timeout=timeout)
+                    self.shell_output("/system/xbin/ls /system/xbin/ls", timeout=timeout)
                     boot_completed = True
                     self._ls = "/system/xbin/ls"
                 except ADBError as e2:
@@ -715,7 +715,7 @@ class ADBDevice(ADBCommand):
                 self._ls += " -1A"
             except ADBError as e:
                 self._logger.info("detect ls -1A: {}".format(e))
-                if 'No such file or directory' not in e.message:
+                if 'No such file or directory' not in str(e):
                     boot_completed = True
                     self._ls += " -a"
             if not boot_completed:
@@ -733,10 +733,10 @@ class ADBDevice(ADBCommand):
                 boot_completed = True
                 self._have_cp = True
             except ADBError as e:
-                if 'not found' in e.message:
+                if 'not found' in str(e):
                     self._have_cp = False
                     boot_completed = True
-                elif 'known option' in e.message:
+                elif 'known option' in str(e):
                     self._have_cp = True
                     boot_completed = True
             if not boot_completed:
@@ -755,7 +755,7 @@ class ADBDevice(ADBCommand):
                 self._chmod_R = True
         except ADBError as e:
             self._logger.debug("Check chmod -R: {}".format(e))
-            match = re_recurse.search(e.message)
+            match = re_recurse.search(str(e))
             if match:
                 self._chmod_R = True
         self._logger.info("Native chmod -R support: {}".format(self._chmod_R))
@@ -793,10 +793,10 @@ class ADBDevice(ADBCommand):
                     boot_completed = True
                     self._have_pidof = True
                 except ADBError as e:
-                    if 'not found' in e.message:
+                    if 'not found' in str(e):
                         self._have_pidof = False
                         boot_completed = True
-                    elif 'known option' in e.message:
+                    elif 'known option' in str(e):
                         self._have_pidof = True
                         boot_completed = True
                 if not boot_completed:
@@ -2486,7 +2486,7 @@ class ADBDevice(ADBCommand):
             if self.exists(path, timeout=timeout, root=root):
                 raise ADBError('rm("%s") failed to remove path.' % path)
         except ADBError as e:
-            if not force and 'No such file or directory' in e.message:
+            if not force and 'No such file or directory' in str(e):
                 raise
 
     def rmdir(self, path, timeout=None, root=False):
@@ -2572,7 +2572,7 @@ class ADBDevice(ADBCommand):
             self._logger.debug('get_process_list: %s' % ret)
             return ret
         finally:
-            if adb_process and isinstance(adb_process.stdout_file, file):
+            if adb_process and isinstance(adb_process.stdout_file, io.IOBase):
                 adb_process.stdout_file.close()
 
     def kill(self, pids, sig=None, attempts=3, wait=5,
@@ -2607,7 +2607,7 @@ class ADBDevice(ADBCommand):
             try:
                 self.shell_output(' '.join(args), timeout=timeout, root=root)
             except ADBError as e:
-                if 'No such process' not in e.message:
+                if 'No such process' not in str(e):
                     raise
             pid_set = set(pid_list)
             current_pid_set = set([str(proc[0]) for proc in
@@ -2765,7 +2765,7 @@ class ADBDevice(ADBCommand):
             # Do not create parent directories since cp does not.
             self.mkdir(destination_dir, timeout=timeout, root=root)
         except ADBError as e:
-            if 'File exists' not in e.message:
+            if 'File exists' not in str(e):
                 raise
 
         for i in self.list_files(source, timeout=timeout, root=root):
@@ -2823,6 +2823,26 @@ class ADBDevice(ADBCommand):
         self.command_output(["reboot"], timeout=timeout)
         self._initialize_boot_state(timeout=timeout)
         return self.is_device_ready(timeout=timeout)
+
+    def get_sysinfo(self, timeout=None):
+        """
+        Returns a detailed dictionary of information strings about the device.
+
+        :param timeout: optional integer specifying the maximum time in
+            seconds for any spawned adb process to complete before
+            throwing an ADBTimeoutError.
+            This timeout is per adb call. The total time spent
+            may exceed this value. If it is not specified, the value
+            set in the ADB constructor is used.
+
+        :raises: * ADBTimeoutError
+        """
+        results = {"info": self.get_info(timeout=timeout)}
+        for service in ("meminfo", "cpuinfo", "dbinfo", "procstats", "usagestats",
+                        "battery", "batterystats", "diskstats"):
+            results[service] = self.shell_output("dumpsys %s" % service,
+                                                 timeout=timeout)
+        return results
 
     def get_info(self, directive=None, timeout=None):
         """
@@ -3047,7 +3067,7 @@ class ADBDevice(ADBCommand):
                             break
             except ADBError as e:
                 success = False
-                failure = e.message
+                failure = str(e)
 
             if not success:
                 self._logger.debug('Attempt %s of %s device not ready: %s' % (
@@ -3077,7 +3097,7 @@ class ADBDevice(ADBCommand):
         except ADBError as e:
             # Executing this via adb shell errors, but not interactively.
             # Any other exitcode is a real error.
-            if 'exitcode: 137' not in e.message:
+            if 'exitcode: 137' not in str(e):
                 raise
             self._logger.warning('Unable to set power stayon true: %s' % e)
 
@@ -3100,6 +3120,8 @@ class ADBDevice(ADBCommand):
                     'android.permission.CAMERA',
                     'android.permission.RECORD_AUDIO',
                 ]
+                if self.version >= version_codes.P:
+                    permissions.append('android.permission.FOREGROUND_SERVICE')
                 self._logger.info("Granting important runtime permissions to %s" % app_name)
                 for permission in permissions:
                     self.shell_output('pm grant %s %s' % (app_name, permission))

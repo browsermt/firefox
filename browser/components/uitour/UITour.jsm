@@ -26,6 +26,11 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
+  "fxAccounts",
+  "resource://gre/modules/FxAccounts.jsm"
+);
+ChromeUtils.defineModuleGetter(
+  this,
   "FxAccounts",
   "resource://gre/modules/FxAccounts.jsm"
 );
@@ -156,6 +161,7 @@ var UITour = {
     ["help", { query: "#appMenu-help-button" }],
     ["home", { query: "#home-button" }],
     ["library", { query: "#appMenu-library-button" }],
+    ["logins", { query: "#appMenu-logins-button" }],
     [
       "pocket",
       {
@@ -192,27 +198,6 @@ var UITour = {
           return searchbar.querySelector(".searchbar-search-button");
         },
         widgetName: "search-container",
-      },
-    ],
-    [
-      "searchPrefsLink",
-      {
-        query: aDocument => {
-          let element = null;
-          let popup = aDocument.getElementById("PopupSearchAutoComplete");
-          if (popup.state != "open") {
-            return null;
-          }
-          element = aDocument.getAnonymousElementByAttribute(
-            popup,
-            "anonid",
-            "search-settings"
-          );
-          if (!element || !UITour.isElementVisible(element)) {
-            return null;
-          }
-          return element;
-        },
       },
     ],
     [
@@ -331,8 +316,8 @@ var UITour = {
     );
   },
 
-  onPageEvent(aMessage, aEvent) {
-    let browser = aMessage.target;
+  onPageEvent(aEvent, aBrowser) {
+    let browser = aBrowser;
     let window = browser.ownerGlobal;
 
     // Does the window have tabs? We need to make sure since windowless browsers do
@@ -343,9 +328,7 @@ var UITour = {
       window = Services.wm.getMostRecentWindow("navigator:browser");
     }
 
-    let messageManager = browser.messageManager;
-
-    log.debug("onPageEvent:", aEvent.detail, aMessage);
+    log.debug("onPageEvent:", aEvent.detail);
 
     if (typeof aEvent.detail != "object") {
       log.warn("Malformed event - detail not an object");
@@ -416,7 +399,7 @@ var UITour = {
             }
 
             let buttons = [];
-            if (Array.isArray(data.buttons) && data.buttons.length > 0) {
+            if (Array.isArray(data.buttons) && data.buttons.length) {
               for (let buttonData of data.buttons) {
                 if (
                   typeof buttonData == "object" &&
@@ -427,7 +410,7 @@ var UITour = {
                   let button = {
                     label: buttonData.label,
                     callback: event => {
-                      this.sendPageCallback(messageManager, callback);
+                      this.sendPageCallback(browser, callback);
                     },
                   };
 
@@ -454,19 +437,12 @@ var UITour = {
             let infoOptions = {};
             if (typeof data.closeButtonCallbackID == "string") {
               infoOptions.closeButtonCallback = () => {
-                this.sendPageCallback(
-                  messageManager,
-                  data.closeButtonCallbackID
-                );
+                this.sendPageCallback(browser, data.closeButtonCallbackID);
               };
             }
             if (typeof data.targetCallbackID == "string") {
               infoOptions.targetCallback = details => {
-                this.sendPageCallback(
-                  messageManager,
-                  data.targetCallbackID,
-                  details
-                );
+                this.sendPageCallback(browser, data.targetCallbackID, details);
               };
             }
 
@@ -493,7 +469,7 @@ var UITour = {
         this.noautohideMenus.add(data.name);
         this.showMenu(window, data.name, () => {
           if (typeof data.showCallbackID == "string") {
-            this.sendPageCallback(messageManager, data.showCallbackID);
+            this.sendPageCallback(browser, data.showCallbackID);
           }
         });
         break;
@@ -517,7 +493,7 @@ var UITour = {
         }
 
         this.getConfiguration(
-          messageManager,
+          browser,
           window,
           data.configuration,
           data.callbackID
@@ -549,7 +525,7 @@ var UITour = {
           .then(() => {
             return data.email
               ? FxAccounts.config.promiseEmailURI(data.email, "uitour")
-              : FxAccounts.config.promiseSignUpURI("uitour");
+              : FxAccounts.config.promiseConnectAccountURI("uitour");
           })
           .then(uri => {
             const url = new URL(uri);
@@ -605,7 +581,7 @@ var UITour = {
         let targetPromise = this.getTarget(window, data.name);
         targetPromise
           .then(target => {
-            this.addNavBarWidget(target, messageManager, data.callbackID);
+            this.addNavBarWidget(target, browser, data.callbackID);
           })
           .catch(log.error);
         break;
@@ -636,7 +612,7 @@ var UITour = {
             "browser.uitour.treatment." + name
           );
         } catch (ex) {}
-        this.sendPageCallback(messageManager, data.callbackID, { value });
+        this.sendPageCallback(browser, data.callbackID, { value });
         break;
       }
 
@@ -657,14 +633,14 @@ var UITour = {
             let searchbar = target.node;
 
             if (searchbar.textbox.open) {
-              this.sendPageCallback(messageManager, data.callbackID);
+              this.sendPageCallback(browser, data.callbackID);
             } else {
               let onPopupShown = () => {
                 searchbar.textbox.popup.removeEventListener(
                   "popupshown",
                   onPopupShown
                 );
-                this.sendPageCallback(messageManager, data.callbackID);
+                this.sendPageCallback(browser, data.callbackID);
               };
 
               searchbar.textbox.popup.addEventListener(
@@ -680,7 +656,7 @@ var UITour = {
 
       case "ping": {
         if (typeof data.callbackID == "string") {
-          this.sendPageCallback(messageManager, data.callbackID);
+          this.sendPageCallback(browser, data.callbackID);
         }
         break;
       }
@@ -848,7 +824,7 @@ var UITour = {
           typeof name != "string" ||
           typeof value != "string" ||
           !name.startsWith("utm_") ||
-          value.length == 0 ||
+          !value.length ||
           !reSimpleString.test(name)
         ) {
           log.warn("_populateCampaignParams: invalid campaign param specified");
@@ -959,10 +935,13 @@ var UITour = {
     return null;
   },
 
-  sendPageCallback(aMessageManager, aCallbackID, aData = {}) {
+  sendPageCallback(aBrowser, aCallbackID, aData = {}) {
     let detail = { data: aData, callbackID: aCallbackID };
     log.debug("sendPageCallback", detail);
-    aMessageManager.sendAsyncMessage("UITour:SendPageCallback", detail);
+    let contextToVisit = aBrowser.browsingContext;
+    let global = contextToVisit.currentWindowGlobal;
+    let actor = global.getActor("UITour");
+    actor.sendAsyncMessage("UITour:SendPageCallback", detail);
   },
 
   isElementVisible(aElement) {
@@ -1046,8 +1025,9 @@ var UITour = {
    * @param {ChromeWindow} aWindow the chrome window
    * @param {bool} aShouldOpen true means we should open the menu, otherwise false
    * @param {String} aMenuName "appMenu" or "pageActionPanel"
+   * @param {Object} aOptions Extra config arguments, example `autohide: true`.
    */
-  _setMenuStateForAnnotation(aWindow, aShouldOpen, aMenuName) {
+  _setMenuStateForAnnotation(aWindow, aShouldOpen, aMenuName, aOptions = {}) {
     log.debug("_setMenuStateForAnnotation: Menu is ", aMenuName);
     log.debug(
       "_setMenuStateForAnnotation: Menu is expected to be:",
@@ -1070,7 +1050,7 @@ var UITour = {
     if (aShouldOpen) {
       log.debug("_setMenuStateForAnnotation: Opening the menu");
       promise = new Promise(resolve => {
-        this.showMenu(aWindow, aMenuName, resolve);
+        this.showMenu(aWindow, aMenuName, resolve, aOptions);
       });
     } else if (!this.noautohideMenus.has(aMenuName)) {
       // If the menu was opened explictly by api user through `Mozilla.UITour.showMenu`,
@@ -1090,8 +1070,9 @@ var UITour = {
    *
    * @param {ChromeWindow} aChromeWindow The chrome window
    * @param {Object} aTarget The target on which we show highlight or show info.
+   * @param {Object} options Extra config arguments, example `autohide: true`.
    */
-  async _ensureTarget(aChromeWindow, aTarget) {
+  async _ensureTarget(aChromeWindow, aTarget, aOptions = {}) {
     let shouldOpenAppMenu = false;
     let shouldOpenPageActionPanel = false;
     if (this.targetIsInAppMenu(aTarget)) {
@@ -1143,7 +1124,8 @@ var UITour = {
       promise = this._setMenuStateForAnnotation(
         aChromeWindow,
         true,
-        menuToOpen
+        menuToOpen,
+        aOptions
       );
     }
     return promise;
@@ -1181,9 +1163,10 @@ var UITour = {
    *                      window.
    * @param aTarget    The element to highlight.
    * @param aEffect    (optional) The effect to use from UITour.highlightEffects or "none".
+   * @param aOptions   (optional) Extra config arguments, example `autohide: true`.
    * @see UITour.highlightEffects
    */
-  async showHighlight(aChromeWindow, aTarget, aEffect = "none") {
+  async showHighlight(aChromeWindow, aTarget, aEffect = "none", aOptions = {}) {
     let showHighlightElement = aAnchorEl => {
       let highlighter = aChromeWindow.document.getElementById(
         "UITourHighlight"
@@ -1265,7 +1248,7 @@ var UITour = {
     };
 
     try {
-      await this._ensureTarget(aChromeWindow, aTarget);
+      await this._ensureTarget(aChromeWindow, aTarget, aOptions);
       let anchorEl = await this._correctAnchor(aChromeWindow, aTarget);
       showHighlightElement(anchorEl);
     } catch (e) {
@@ -1451,7 +1434,7 @@ var UITour = {
     this._setMenuStateForAnnotation(aWindow, false, "pageActionPanel");
   },
 
-  showMenu(aWindow, aMenuName, aOpenCallback = null) {
+  showMenu(aWindow, aMenuName, aOpenCallback = null, aOptions = {}) {
     log.debug("showMenu:", aMenuName);
     function openMenuButton(aMenuBtn) {
       if (!aMenuBtn || !aMenuBtn.hasMenu() || aMenuBtn.open) {
@@ -1482,7 +1465,9 @@ var UITour = {
         menu.show = () => aWindow.BrowserPageActions.showPanel();
       }
 
-      menu.node.setAttribute("noautohide", "true");
+      if (!aOptions.autohide) {
+        menu.node.setAttribute("noautohide", "true");
+      }
       // If the popup is already opened, don't recreate the widget as it may cause a flicker.
       if (menu.node.state != "open") {
         this.recreatePopup(menu.node);
@@ -1656,20 +1641,20 @@ var UITour = {
     aPanel.hidden = false;
   },
 
-  getConfiguration(aMessageManager, aWindow, aConfiguration, aCallbackID) {
+  getConfiguration(aBrowser, aWindow, aConfiguration, aCallbackID) {
     switch (aConfiguration) {
       case "appinfo":
-        this.getAppInfo(aMessageManager, aWindow, aCallbackID);
+        this.getAppInfo(aBrowser, aWindow, aCallbackID);
         break;
       case "availableTargets":
-        this.getAvailableTargets(aMessageManager, aWindow, aCallbackID);
+        this.getAvailableTargets(aBrowser, aWindow, aCallbackID);
         break;
       case "search":
       case "selectedSearchEngine":
         Services.search
           .getVisibleEngines()
           .then(engines => {
-            this.sendPageCallback(aMessageManager, aCallbackID, {
+            this.sendPageCallback(aBrowser, aCallbackID, {
               searchEngineIdentifier: Services.search.defaultEngine.identifier,
               engines: engines
                 .filter(engine => engine.identifier)
@@ -1677,14 +1662,21 @@ var UITour = {
             });
           })
           .catch(() => {
-            this.sendPageCallback(aMessageManager, aCallbackID, {
+            this.sendPageCallback(aBrowser, aCallbackID, {
               engines: [],
               searchEngineIdentifier: "",
             });
           });
         break;
+      case "fxa":
+        this.getFxA(aBrowser, aCallbackID);
+        break;
+
+      // NOTE: 'sync' is deprecated and should be removed in Firefox 73 (because
+      // by then, all consumers will have upgraded to use 'fxa' in that version
+      // and later.)
       case "sync":
-        this.sendPageCallback(aMessageManager, aCallbackID, {
+        this.sendPageCallback(aBrowser, aCallbackID, {
           setup: Services.prefs.prefHasUserValue("services.sync.username"),
           desktopDevices: Services.prefs.getIntPref(
             "services.sync.clients.devices.desktop",
@@ -1702,7 +1694,7 @@ var UITour = {
         break;
       case "canReset":
         this.sendPageCallback(
-          aMessageManager,
+          aBrowser,
           aCallbackID,
           ResetProfile.resetSupported()
         );
@@ -1735,7 +1727,89 @@ var UITour = {
     }
   },
 
-  getAppInfo(aMessageManager, aWindow, aCallbackID) {
+  getFxA(aBrowser, aCallbackID) {
+    (async () => {
+      let setup = !!(await fxAccounts.getSignedInUser());
+      let result = { setup };
+      if (!setup) {
+        this.sendPageCallback(aBrowser, aCallbackID, result);
+        return;
+      }
+      // We are signed in so need to build a richer result.
+      let devices = fxAccounts.device.recentDeviceList;
+      // A recent device list is fine, but if we don't even have that we should
+      // wait for it to be fetched.
+      if (!devices) {
+        try {
+          await fxAccounts.device.refreshDeviceList();
+        } catch (ex) {
+          log.warn("failed to fetch device list", ex);
+        }
+        devices = fxAccounts.device.recentDeviceList;
+      }
+      if (devices) {
+        // A falsey `devices` should be impossible, so we omit `devices` from
+        // the result object so the consuming page can try to differentiate
+        // between "no additional devices" and "something's wrong"
+        result.numOtherDevices = Math.max(0, devices.length - 1);
+        result.numDevicesByType = devices
+          .filter(d => !d.isCurrentDevice)
+          .reduce((accum, d) => {
+            let type = d.type || "unknown";
+            accum[type] = (accum[type] || 0) + 1;
+            return accum;
+          }, {});
+      }
+
+      // Each of the "browser services" - currently only "sync" is supported
+      result.browserServices = {};
+      let hasSync = Services.prefs.prefHasUserValue("services.sync.username");
+      if (hasSync) {
+        result.browserServices.sync = {
+          // We always include 'setup' for b/w compatibility.
+          setup: true,
+          desktopDevices: Services.prefs.getIntPref(
+            "services.sync.clients.devices.desktop",
+            0
+          ),
+          mobileDevices: Services.prefs.getIntPref(
+            "services.sync.clients.devices.mobile",
+            0
+          ),
+          totalDevices: Services.prefs.getIntPref(
+            "services.sync.numClients",
+            0
+          ),
+        };
+      }
+      try {
+        // Each of the "account services", which we turn into a map keyed by ID.
+        let attachedClients = await fxAccounts.listAttachedOAuthClients();
+        result.accountServices = attachedClients
+          .filter(c => !!c.id)
+          .reduce((accum, c) => {
+            accum[c.id] = {
+              id: c.id,
+              lastAccessedWeeksAgo: c.lastAccessedDaysAgo
+                ? Math.floor(c.lastAccessedDaysAgo / 7)
+                : null,
+            };
+            return accum;
+          }, {});
+      } catch (ex) {
+        log.warn("Failed to build the attached clients list", ex);
+      }
+      // We check the account state last because it's possible any of the above
+      // calls transitioned it from good -> bad.
+      result.accountStateOK = await fxAccounts.hasLocalSession();
+      this.sendPageCallback(aBrowser, aCallbackID, result);
+    })().catch(err => {
+      log.error(err);
+      this.sendPageCallback(aBrowser, aCallbackID, {});
+    });
+  },
+
+  getAppInfo(aBrowser, aWindow, aCallbackID) {
     (async () => {
       let appinfo = { version: Services.appinfo.version };
 
@@ -1791,14 +1865,14 @@ var UITour = {
       appinfo.profileCreatedWeeksAgo = createdWeeksAgo;
       appinfo.profileResetWeeksAgo = resetWeeksAgo;
 
-      this.sendPageCallback(aMessageManager, aCallbackID, appinfo);
+      this.sendPageCallback(aBrowser, aCallbackID, appinfo);
     })().catch(err => {
       log.error(err);
-      this.sendPageCallback(aMessageManager, aCallbackID, {});
+      this.sendPageCallback(aBrowser, aCallbackID, {});
     });
   },
 
-  getAvailableTargets(aMessageManager, aChromeWindow, aCallbackID) {
+  getAvailableTargets(aBrowser, aChromeWindow, aCallbackID) {
     (async () => {
       let window = aChromeWindow;
       let data = this.availableTargetsCache.get(window);
@@ -1807,7 +1881,7 @@ var UITour = {
           "getAvailableTargets: Using cached targets list",
           data.targets.join(",")
         );
-        this.sendPageCallback(aMessageManager, aCallbackID, data);
+        this.sendPageCallback(aBrowser, aCallbackID, data);
         return;
       }
 
@@ -1828,16 +1902,16 @@ var UITour = {
         targets: targetNames,
       };
       this.availableTargetsCache.set(window, data);
-      this.sendPageCallback(aMessageManager, aCallbackID, data);
+      this.sendPageCallback(aBrowser, aCallbackID, data);
     })().catch(err => {
       log.error(err);
-      this.sendPageCallback(aMessageManager, aCallbackID, {
+      this.sendPageCallback(aBrowser, aCallbackID, {
         targets: [],
       });
     });
   },
 
-  addNavBarWidget(aTarget, aMessageManager, aCallbackID) {
+  addNavBarWidget(aTarget, aBrowser, aCallbackID) {
     if (aTarget.node) {
       log.error(
         "addNavBarWidget: can't add a widget already present:",
@@ -1861,7 +1935,7 @@ var UITour = {
       aTarget.widgetName,
       CustomizableUI.AREA_NAVBAR
     );
-    this.sendPageCallback(aMessageManager, aCallbackID);
+    this.sendPageCallback(aBrowser, aCallbackID);
   },
 
   _addAnnotationPanelMutationObserver(aPanelEl) {
@@ -1931,19 +2005,14 @@ var UITour = {
       }
 
       for (let browser of openTourBrowsers) {
-        let messageManager = browser.messageManager;
-        if (!messageManager) {
-          log.error(
-            "notify: Trying to notify a browser without a messageManager",
-            browser
-          );
-          continue;
-        }
         let detail = {
           event: eventName,
           params,
         };
-        messageManager.sendAsyncMessage("UITour:SendPageNotification", detail);
+        let contextToVisit = browser.browsingContext;
+        let global = contextToVisit.currentWindowGlobal;
+        let actor = global.getActor("UITour");
+        actor.sendAsyncMessage("UITour:SendPageNotification", detail);
       }
     }
   },

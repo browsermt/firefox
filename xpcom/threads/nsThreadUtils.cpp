@@ -518,6 +518,31 @@ nsCString nsThreadPoolNaming::GetNextThreadName(const nsACString& aPoolName) {
   return name;
 }
 
+nsresult NS_DispatchBackgroundTask(already_AddRefed<nsIRunnable> aEvent,
+                                   uint32_t aDispatchFlags) {
+  nsCOMPtr<nsIRunnable> event(aEvent);
+  return nsThreadManager::get().DispatchToBackgroundThread(event,
+                                                           aDispatchFlags);
+}
+
+nsresult NS_DispatchBackgroundTask(nsIRunnable* aEvent,
+                                   uint32_t aDispatchFlags) {
+  return nsThreadManager::get().DispatchToBackgroundThread(aEvent,
+                                                           aDispatchFlags);
+}
+
+nsresult NS_CreateBackgroundTaskQueue(const char* aName,
+                                      nsISerialEventTarget** aTarget) {
+  nsCOMPtr<nsISerialEventTarget> target =
+      nsThreadManager::get().CreateBackgroundTaskQueue(aName);
+  if (!target) {
+    return NS_ERROR_FAILURE;
+  }
+
+  target.forget(aTarget);
+  return NS_OK;
+}
+
 // nsAutoLowPriorityIO
 nsAutoLowPriorityIO::nsAutoLowPriorityIO() {
 #if defined(XP_WIN)
@@ -601,8 +626,8 @@ size_t GetNumberOfProcessors() {
 }  // namespace mozilla
 
 bool nsIEventTarget::IsOnCurrentThread() {
-  if (mVirtualThread) {
-    return mVirtualThread == GetCurrentVirtualThread();
+  if (mThread) {
+    return mThread == PR_GetCurrentThread();
   }
   return IsOnCurrentThreadInfallible();
 }

@@ -72,7 +72,7 @@ function convertToList(results, source) {
     for (const column of results[line]) {
       positions.push({
         line: Number(line),
-        column: column,
+        column,
         sourceId: id,
         sourceUrl: url,
       });
@@ -161,7 +161,7 @@ async function _setBreakpointPositions(cx, sourceId, line, thunkArgs) {
 
     const actorColumns = await Promise.all(
       getSourceActorsForSource(getState(), generatedSource.id).map(actor =>
-        dispatch(loadSourceActorBreakpointColumns({ id: actor.id, line }))
+        dispatch(loadSourceActorBreakpointColumns({ id: actor.id, line, cx }))
       )
     );
 
@@ -186,7 +186,7 @@ async function _setBreakpointPositions(cx, sourceId, line, thunkArgs) {
   dispatch({
     type: "ADD_BREAKPOINT_POSITIONS",
     cx,
-    source: source,
+    source,
     positions,
   });
 }
@@ -205,7 +205,7 @@ function generatedSourceActorKey(state, sourceId) {
 }
 
 export const setBreakpointPositions: MemoizedAction<
-  { cx: Context, sourceId: string, line?: number },
+  {| cx: Context, sourceId: string, line?: number |},
   ?BreakpointPositions
 > = memoizeableAction("setBreakpointPositions", {
   getValue: ({ sourceId, line }, { getState }) => {

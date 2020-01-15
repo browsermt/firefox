@@ -52,6 +52,7 @@ var navigateTo = async function(inspector, url) {
   const markuploaded = inspector.once("markuploaded");
   const onNewRoot = inspector.once("new-root");
   const onUpdated = inspector.once("inspector-updated");
+  const onReloaded = inspector.once("reloaded");
 
   info("Navigating to: " + url);
   const target = inspector.toolbox.target;
@@ -65,6 +66,9 @@ var navigateTo = async function(inspector, url) {
 
   info("Waiting for inspector to update after new-root event.");
   await onUpdated;
+
+  info("Waiting for inspector updates after page reload");
+  await onReloaded;
 };
 
 /**
@@ -79,10 +83,20 @@ var startPicker = async function(toolbox, skipFocus) {
   if (!skipFocus) {
     // By default make sure the content window is focused since the picker may not focus
     // the content window by default.
-    await ContentTask.spawn(gBrowser.selectedBrowser, null, async function() {
+    await SpecialPowers.spawn(gBrowser.selectedBrowser, [], async function() {
       content.focus();
     });
   }
+};
+
+/**
+ * Start the eye dropper tool.
+ * @param {Toolbox} toolbox
+ */
+var startEyeDropper = async function(toolbox) {
+  info("Start the eye dropper tool");
+  toolbox.win.focus();
+  await toolbox.getPanel("inspector").showEyeDropper();
 };
 
 /**
@@ -226,6 +240,24 @@ var getNodeFrontInFrame = async function(selector, frameSelector, inspector) {
 };
 
 /**
+ * Get the NodeFront for the shadowRoot of a shadow host.
+ *
+ * @param {String|NodeFront} hostSelector
+ *        Selector or front of the element to which the shadow root is attached.
+ * @param {InspectorPanel} inspector
+ *        The instance of InspectorPanel currently loaded in the toolbox
+ * @return {Promise} Resolves the node front when the inspector is updated with the new
+ *         node.
+ */
+var getShadowRoot = async function(hostSelector, inspector) {
+  const hostFront = await getNodeFront(hostSelector, inspector);
+  const { nodes } = await inspector.walker.children(hostFront);
+
+  // Find the shadow root in the children of the host element.
+  return nodes.filter(node => node.isShadowRoot)[0];
+};
+
+/**
  * Get the NodeFront for a node that matches a given css selector inside a shadow root.
  *
  * @param {String} selector
@@ -242,11 +274,7 @@ var getNodeFrontInShadowDom = async function(
   hostSelector,
   inspector
 ) {
-  const hostFront = await getNodeFront(hostSelector, inspector);
-  const { nodes } = await inspector.walker.children(hostFront);
-
-  // Find the shadow root in the children of the host element.
-  const shadowRoot = nodes.filter(node => node.isShadowRoot)[0];
+  const shadowRoot = await getShadowRoot(hostSelector, inspector);
   if (!shadowRoot) {
     throw new Error(
       "Could not find a shadow root under selector: " + hostSelector
@@ -508,7 +536,8 @@ const getHighlighterHelperFor = type =>
 
         return {
           getComputedStyle: async function(options = {}) {
-            return inspector.pageStyle.getComputed(highlightedNode, options);
+            const pageStyle = highlightedNode.inspectorFront.pageStyle;
+            return pageStyle.getComputed(highlightedNode, options);
           },
         };
       },
@@ -741,6 +770,35 @@ var waitForTab = async function() {
   info("The tab load completed");
   return tab;
 };
+
+/**
+ * Wait for a predicate to return a result.
+ *
+ * @param {Function} condition
+ *        Invoked once in a while until it returns a truthy value. This should be an
+ *        idempotent function, since we have to run it a second time after it returns
+ *        true in order to return the value.
+ * @param {String} message [optional]
+ *        A message to output if the condition fails.
+ * @param {Number} interval [optional]
+ *        How often the predicate is invoked, in milliseconds.
+ * @return {Object}
+ *         A promise that is resolved with the result of the condition.
+ */
+async function waitFor(
+  condition,
+  message = "waitFor",
+  interval = 10,
+  maxTries = 500
+) {
+  await BrowserTestUtils.waitForCondition(
+    condition,
+    message,
+    interval,
+    maxTries
+  );
+  return condition();
+}
 
 /**
  * Simulate the key input for the given input in the window.

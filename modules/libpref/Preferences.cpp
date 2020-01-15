@@ -54,11 +54,8 @@
 #include "nsDataHashtable.h"
 #include "nsDirectoryServiceDefs.h"
 #include "nsHashKeys.h"
-#include "nsICategoryManager.h"
 #include "nsIConsoleService.h"
-#include "nsIDirectoryService.h"
 #include "nsIFile.h"
-#include "nsIInputStream.h"
 #include "nsIMemoryReporter.h"
 #include "nsIObserver.h"
 #include "nsIObserverService.h"
@@ -69,7 +66,6 @@
 #include "nsISafeOutputStream.h"
 #include "nsISimpleEnumerator.h"
 #include "nsIStringBundle.h"
-#include "nsIStringEnumerator.h"
 #include "nsISupportsImpl.h"
 #include "nsISupportsPrimitives.h"
 #include "nsIZipReader.h"
@@ -1199,7 +1195,7 @@ class CallbackNode {
 
 using PrefsHashTable = HashSet<UniquePtr<Pref>, PrefHasher>;
 
-static PrefsHashTable* gHashTable;
+static PrefsHashTable* gHashTable = nullptr;
 
 #ifdef DEBUG
 // This defines the type used to store our `once` mirrors checker. We can't use
@@ -1226,7 +1222,7 @@ static CallbackNode* gLastPriorityNode = nullptr;
 
 #ifdef ACCESS_COUNTS
 using AccessCountsHashTable = nsDataHashtable<nsCStringHashKey, uint32_t>;
-static AccessCountsHashTable* gAccessCounts;
+static AccessCountsHashTable* gAccessCounts = nullptr;
 
 static void AddAccessCount(const nsACString& aPrefName) {
   // FIXME: Servo reads preferences from background threads in unsafe ways (bug
@@ -2734,10 +2730,10 @@ nsPrefBranch::RemoveObserverImpl(const nsACString& aDomain,
   nsCString prefName;
   GetPrefName(aDomain).get(prefName);
   PrefCallback key(prefName, aObserver, this);
-  nsAutoPtr<PrefCallback> pCallback;
+  mozilla::UniquePtr<PrefCallback> pCallback;
   mObservers.Remove(&key, &pCallback);
   if (pCallback) {
-    rv = Preferences::UnregisterCallback(NotifyObserver, prefName, pCallback,
+    rv = Preferences::UnregisterCallback(NotifyObserver, prefName, pCallback.get(),
                                          Preferences::PrefixMatch);
   }
 
@@ -2797,7 +2793,7 @@ void nsPrefBranch::FreeObserverList() {
   // mFreeingObserverList to keep those calls from touching mObservers.
   mFreeingObserverList = true;
   for (auto iter = mObservers.Iter(); !iter.Done(); iter.Next()) {
-    nsAutoPtr<PrefCallback>& callback = iter.Data();
+    auto callback = iter.UserData();
     Preferences::UnregisterCallback(nsPrefBranch::NotifyObserver,
                                     callback->GetDomain(), callback,
                                     Preferences::PrefixMatch);
@@ -3216,7 +3212,7 @@ PreferenceServiceReporter::CollectReports(
   nsDataHashtable<nsCStringHashKey, uint32_t> prefCounter;
 
   for (auto iter = rootBranch->mObservers.Iter(); !iter.Done(); iter.Next()) {
-    nsAutoPtr<PrefCallback>& callback = iter.Data();
+    auto callback = iter.UserData();
 
     if (callback->IsWeak()) {
       nsCOMPtr<nsIObserver> callbackRef = do_QueryReferent(callback->mWeakRef);
@@ -3668,7 +3664,10 @@ void Preferences::InitializeUserPrefs() {
 
   // Don't set mCurrentFile until we're done so that dirty flags work properly.
   sPreferences->mCurrentFile = prefsFile.forget();
+}
 
+/* static */
+void Preferences::FinishInitializingUserPrefs() {
   sPreferences->NotifyServiceObservers(NS_PREFSERVICE_READ_TOPIC_ID);
 
   // At this point all the prefs files have been read and telemetry has been
@@ -5234,9 +5233,14 @@ static void InitPref_uint32_t(const char* aName, uint32_t aDefaultValue) {
 static void InitPref_float(const char* aName, float aDefaultValue) {
   MOZ_ASSERT(XRE_IsParentProcess());
   PrefValue value;
-  // Convert the value in a locale-independent way.
+  // Convert the value in a locale-independent way, including a trailing ".0"
+  // if necessary to distinguish floating-point from integer prefs when viewing
+  // them in about:config.
   nsAutoCString defaultValue;
   defaultValue.AppendFloat(aDefaultValue);
+  if (!defaultValue.Contains('.') && !defaultValue.Contains('e')) {
+    defaultValue.AppendLiteral(".0");
+  }
   value.mStringVal = defaultValue.get();
   pref_SetPref(aName, PrefType::String, PrefValueKind::Default, value,
                /* isSticky */ false,

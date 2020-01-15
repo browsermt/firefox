@@ -74,10 +74,27 @@ let gUndoData = null;
 
 XPCOMUtils.defineLazyGetter(this, "gAvailableMigratorKeys", function() {
   if (AppConstants.platform == "win") {
-    return ["firefox", "edge", "ie", "chrome", "chromium", "360se", "canary"];
+    return [
+      "firefox",
+      "edge",
+      "ie",
+      "chrome",
+      "chromium-edge-beta",
+      "chrome-beta",
+      "chromium",
+      "360se",
+      "canary",
+    ];
   }
   if (AppConstants.platform == "macosx") {
-    return ["firefox", "safari", "chrome", "chromium", "canary"];
+    return [
+      "firefox",
+      "safari",
+      "chrome",
+      "chromium-edge-beta",
+      "chromium",
+      "canary",
+    ];
   }
   if (AppConstants.XP_UNIX) {
     return ["firefox", "chrome", "chrome-beta", "chrome-dev", "chromium"];
@@ -244,7 +261,7 @@ var MigratorPrototype = {
    */
   migrate: async function MP_migrate(aItems, aStartup, aProfile) {
     let resources = await this._getMaybeCachedResources(aProfile);
-    if (resources.length == 0) {
+    if (!resources.length) {
       throw new Error("migrate called for a non-existent source");
     }
 
@@ -481,11 +498,11 @@ var MigratorPrototype = {
       let profiles = await this.getSourceProfiles();
       if (!profiles) {
         let resources = await this._getMaybeCachedResources("");
-        if (resources && resources.length > 0) {
+        if (resources && resources.length) {
           exists = true;
         }
       } else {
-        exists = profiles.length > 0;
+        exists = !!profiles.length;
       }
     } catch (ex) {
       Cu.reportError(ex);
@@ -594,6 +611,7 @@ var MigrationUtils = Object.freeze({
       /_(canary|chromium|chrome-beta|chrome-dev)$/,
       "_chrome"
     );
+    aKey = aKey.replace(/_(chromium-edge-beta)$/, "_edge");
 
     const OVERRIDES = {
       "4_firefox": "4_firefox_history_and_bookmarks",
@@ -625,6 +643,8 @@ var MigrationUtils = Object.freeze({
         return "sourceNameChromeDev";
       case "chromium":
         return "sourceNameChromium";
+      case "chromium-edge-beta":
+        return "sourceNameEdgeBeta";
       case "firefox":
         return "sourceNameFirefox";
       case "360se":
@@ -772,14 +792,7 @@ var MigrationUtils = Object.freeze({
    * for this source, or null otherwise.
    *
    * @param aKey internal name of the migration source.
-   *             Supported values: ie (windows),
-   *                               edge (windows),
-   *                               safari (mac),
-   *                               canary (mac/windows),
-   *                               chrome (mac/windows/linux),
-   *                               chromium (mac/windows/linux),
-   *                               360se (windows),
-   *                               firefox.
+   *             See `gAvailableMigratorKeys` for supported values by OS.
    *
    * If null is returned,  either no data can be imported
    * for the given migrator, or aMigratorKey is invalid  (e.g. ie on mac,
@@ -821,6 +834,7 @@ var MigrationUtils = Object.freeze({
    */
   getMigratorKeyForDefaultBrowser() {
     // Canary uses the same description as Chrome so we can't distinguish them.
+    // Edge Beta on macOS uses "Microsoft Edge" with no "beta" indication.
     const APP_DESC_TO_KEY = {
       "Internet Explorer": "ie",
       "Microsoft Edge": "edge",
@@ -996,7 +1010,7 @@ var MigrationUtils = Object.freeze({
 
     Services.ww.openWindow(
       aOpener,
-      "chrome://browser/content/migration/migration.xul",
+      "chrome://browser/content/migration/migration.xhtml",
       "_blank",
       features,
       params
@@ -1018,7 +1032,7 @@ var MigrationUtils = Object.freeze({
    *        browser selected, if it could be detected and if there is a
    *        migrator for it, or with the first option selected as a fallback
    *        (The first option is hardcoded to be the most common browser for
-   *         the OS we run on.  See migration.xul).
+   *         the OS we run on.  See migration.xhtml).
    * @param [optional] aProfileToMigrate
    *        If set, the migration wizard will import from the profile indicated.
    * @throws if aMigratorKey is invalid or if it points to a non-existent
@@ -1297,10 +1311,13 @@ var MigrationUtils = Object.freeze({
     edge: 3,
     ie: 4,
     chrome: 5,
+    "chrome-beta": 5,
+    "chrome-dev": 5,
     chromium: 6,
     canary: 7,
     safari: 8,
     "360se": 9,
+    "chromium-edge-beta": 10,
   },
   getSourceIdForTelemetry(sourceName) {
     return this._sourceNameToIdMapping[sourceName] || 0;

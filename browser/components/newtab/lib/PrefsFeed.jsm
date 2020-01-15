@@ -62,6 +62,12 @@ this.PrefsFeed = class PrefsFeed {
       "https://accounts.firefox.com"
     );
 
+    // Get the firefox update channel with values as default, nightly, beta or release
+    values.appUpdateChannel = Services.prefs.getStringPref(
+      "app.update.channel",
+      ""
+    );
+
     // Read the pref for search shortcuts top sites experiment from firefox.js and store it
     // in our interal list of prefs to watch
     let searchTopSiteExperimentPrefValue = Services.prefs.getBoolPref(
@@ -96,6 +102,10 @@ this.PrefsFeed = class PrefsFeed {
       "browser.newtabpage.activity-stream.discoverystream.spocs-endpoint",
       ""
     );
+    let discoveryStreamLangLayoutConfig = Services.prefs.getStringPref(
+      "browser.newtabpage.activity-stream.discoverystream.lang-layout-config",
+      ""
+    );
     values["discoverystream.enabled"] = discoveryStreamEnabled;
     this._prefMap.set("discoverystream.enabled", {
       value: discoveryStreamEnabled,
@@ -109,6 +119,12 @@ this.PrefsFeed = class PrefsFeed {
     values["discoverystream.spocs-endpoint"] = discoveryStreamSpocsEndpoint;
     this._prefMap.set("discoverystream.spocs-endpoint", {
       value: discoveryStreamSpocsEndpoint,
+    });
+    values[
+      "discoverystream.lang-layout-config"
+    ] = discoveryStreamLangLayoutConfig;
+    this._prefMap.set("discoverystream.lang-layout-config", {
+      value: discoveryStreamLangLayoutConfig,
     });
 
     // Set the initial state of all prefs in redux

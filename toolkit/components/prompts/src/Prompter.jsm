@@ -450,7 +450,7 @@ function openModalWindow(domWin, uri, args) {
   // will do that. Similarly for enterModalState / leaveModalState.
 
   Services.ww.openWindow(
-    domWin,
+    domWin && domWin.docShell.rootTreeItem.domWindow,
     uri,
     "_blank",
     "centerscreen,chrome,modal,titlebar",
@@ -680,8 +680,8 @@ ModalPrompter.prototype = {
       return;
     }
 
-    const COMMON_DIALOG = "chrome://global/content/commonDialog.xul";
-    const SELECT_DIALOG = "chrome://global/content/selectDialog.xul";
+    const COMMON_DIALOG = "chrome://global/content/commonDialog.xhtml";
+    const SELECT_DIALOG = "chrome://global/content/selectDialog.xhtml";
 
     let uri = args.promptType == "select" ? SELECT_DIALOG : COMMON_DIALOG;
     let propBag = PromptUtils.objectToPropBag(args);

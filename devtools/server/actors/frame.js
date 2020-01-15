@@ -30,9 +30,10 @@ const FrameActor = ActorClassWithSpec(frameSpec, {
    * @param threadActor ThreadActor
    *        The parent thread actor for this frame.
    */
-  initialize: function(frame, threadActor) {
+  initialize: function(frame, threadActor, depth) {
     this.frame = frame;
     this.threadActor = threadActor;
+    this.depth = depth;
   },
 
   /**
@@ -41,7 +42,7 @@ const FrameActor = ActorClassWithSpec(frameSpec, {
   _frameLifetimePool: null,
   get frameLifetimePool() {
     if (!this._frameLifetimePool) {
-      this._frameLifetimePool = new ActorPool(this.conn);
+      this._frameLifetimePool = new ActorPool(this.conn, "frame");
       this.conn.addActorPool(this._frameLifetimePool);
     }
     return this._frameLifetimePool;
@@ -81,15 +82,17 @@ const FrameActor = ActorClassWithSpec(frameSpec, {
    */
   form: function() {
     const threadActor = this.threadActor;
-    const form = { actor: this.actorID, type: this.frame.type };
+    const form = {
+      actor: this.actorID,
+      type: this.frame.type,
+      asyncCause: this.frame.onStack ? null : "await",
 
-    // NOTE: ignoreFrameEnvironment lets the client explicitly avoid
-    // populating form environments on pause.
-    if (
-      !this.threadActor._options.ignoreFrameEnvironment &&
-      this.frame.environment
-    ) {
-      form.environment = this.getEnvironment();
+      // This should expand with "dead" when we support SavedFrames.
+      state: this.frame.onStack ? "on-stack" : "suspended",
+    };
+
+    if (this.depth) {
+      form.depth = this.depth;
     }
 
     if (this.frame.type != "wasmcall") {
@@ -102,6 +105,7 @@ const FrameActor = ActorClassWithSpec(frameSpec, {
 
     form.displayName = formatDisplayName(this.frame);
     form.arguments = this._args();
+
     if (this.frame.script) {
       const location = this.threadActor.sources.getFrameLocation(this.frame);
       form.where = {
@@ -119,7 +123,7 @@ const FrameActor = ActorClassWithSpec(frameSpec, {
   },
 
   _args: function() {
-    if (!this.frame.arguments) {
+    if (!this.frame.onStack || !this.frame.arguments) {
       return [];
     }
 

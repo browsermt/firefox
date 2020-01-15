@@ -159,6 +159,9 @@ nsresult nsCanvasFrame::CreateAnonymousContent(
                                    nodeInfo.forget(), dom::NOT_FROM_PARSER);
     NS_ENSURE_SUCCESS(rv, rv);
 
+    mPopupgroupContent->SetProperty(nsGkAtoms::docLevelNativeAnonymousContent,
+                                    reinterpret_cast<void*>(true));
+
     aElements.AppendElement(mPopupgroupContent);
 
     nodeInfo = nodeInfoManager->GetNodeInfo(
@@ -175,9 +178,21 @@ nsresult nsCanvasFrame::CreateAnonymousContent(
     mTooltipContent->SetAttr(kNameSpaceID_None, nsGkAtoms::page,
                              NS_LITERAL_STRING("true"), false);
 
+    mTooltipContent->SetProperty(nsGkAtoms::docLevelNativeAnonymousContent,
+                                 reinterpret_cast<void*>(true));
+
     aElements.AppendElement(mTooltipContent);
   }
 
+#ifdef DEBUG
+  for (auto& element : aElements) {
+    MOZ_ASSERT(element.mContent->GetProperty(
+                   nsGkAtoms::docLevelNativeAnonymousContent),
+               "NAC from the canvas frame needs to be document-level, otherwise"
+               " it (1) inherits from the document which is unexpected, and (2)"
+               " StyleChildrenIterator won't be able to find it properly");
+  }
+#endif
   return NS_OK;
 }
 
@@ -247,7 +262,6 @@ void nsCanvasFrame::SetInitialChildList(ChildListID aListID,
                    aChildList.OnlyChild(),
                "Primary child list can have at most one frame in it");
   nsContainerFrame::SetInitialChildList(aListID, aChildList);
-  MaybePropagateRootElementWritingMode();
 }
 
 void nsCanvasFrame::AppendFrames(ChildListID aListID, nsFrameList& aFrameList) {
@@ -264,7 +278,6 @@ void nsCanvasFrame::AppendFrames(ChildListID aListID, nsFrameList& aFrameList) {
   nsFrame::VerifyDirtyBitSet(aFrameList);
 #endif
   nsContainerFrame::AppendFrames(aListID, aFrameList);
-  MaybePropagateRootElementWritingMode();
 }
 
 void nsCanvasFrame::InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
@@ -274,7 +287,6 @@ void nsCanvasFrame::InsertFrames(ChildListID aListID, nsIFrame* aPrevFrame,
   // as appending
   MOZ_ASSERT(!aPrevFrame, "unexpected previous sibling frame");
   AppendFrames(aListID, aFrameList);
-  MaybePropagateRootElementWritingMode();
 }
 
 #ifdef DEBUG
@@ -372,8 +384,8 @@ bool nsDisplayCanvasBackgroundColor::CreateWebRenderCommands(
   LayoutDeviceRect rect =
       LayoutDeviceRect::FromAppUnits(bgClipRect, appUnitsPerDevPixel);
 
-  wr::LayoutRect roundedRect = wr::ToRoundedLayoutRect(rect);
-  aBuilder.PushRect(roundedRect, roundedRect, !BackfaceIsHidden(),
+  wr::LayoutRect r = wr::ToLayoutRect(rect);
+  aBuilder.PushRect(r, r, !BackfaceIsHidden(),
                     wr::ToColorF(ToDeviceColor(mColor)));
   return true;
 }
@@ -488,8 +500,6 @@ void nsCanvasFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
         dependentFrame = nullptr;
       }
     }
-    aLists.BorderBackground()->AppendNewToTop<nsDisplayCanvasBackgroundColor>(
-        aBuilder, this);
 
     if (isThemed) {
       aLists.BorderBackground()
@@ -501,13 +511,27 @@ void nsCanvasFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
       return;
     }
 
+    const nsStyleImageLayers& layers = bg->StyleBackground()->mImage;
+    if (layers.mImageCount == 0 ||
+        layers.mLayers[0].mAttachment != StyleImageLayerAttachment::Fixed) {
+      // Put a scrolled background color item in place. The color of this item
+      // will be filled in during PresShell::AddCanvasBackgroundColorItem.
+      // Do not add this item if there's a fixed background image at the bottom;
+      // in that case, it's better to allow the fixed background image to
+      // combine itself with a non-scrolled background color directly
+      // underneath, rather than interleaving the two with a scrolled background
+      // color. PresShell::AddCanvasBackgroundColorItem makes sure there always
+      // is a non-scrolled background color item at the bottom.
+      aLists.BorderBackground()->AppendNewToTop<nsDisplayCanvasBackgroundColor>(
+          aBuilder, this);
+    }
+
     const ActiveScrolledRoot* asr = aBuilder->CurrentActiveScrolledRoot();
 
     bool needBlendContainer = false;
     nsDisplayListBuilder::AutoContainerASRTracker contASRTracker(aBuilder);
 
     // Create separate items for each background layer.
-    const nsStyleImageLayers& layers = bg->StyleBackground()->mImage;
     NS_FOR_VISIBLE_IMAGE_LAYERS_BACK_TO_FRONT(i, layers) {
       if (layers.mLayers[i].mImage.IsEmpty()) {
         continue;
@@ -830,15 +854,6 @@ nsresult nsCanvasFrame::GetContentForEvent(WidgetEvent* aEvent,
   }
 
   return rv;
-}
-
-void nsCanvasFrame::MaybePropagateRootElementWritingMode() {
-  nsIFrame* child = PrincipalChildList().FirstChild();
-  if (child && child->GetContent() &&
-      child->GetContent() == PresContext()->Document()->GetRootElement()) {
-    nsIFrame* childPrimary = child->GetContent()->GetPrimaryFrame();
-    PropagateRootElementWritingMode(childPrimary->GetWritingMode());
-  }
 }
 
 #ifdef DEBUG_FRAME_DUMP

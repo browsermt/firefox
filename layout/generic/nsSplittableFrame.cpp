@@ -11,6 +11,7 @@
 
 #include "nsSplittableFrame.h"
 #include "nsContainerFrame.h"
+#include "nsFieldSetFrame.h"
 #include "nsIFrameInlines.h"
 
 using namespace mozilla;
@@ -185,6 +186,7 @@ void nsSplittableFrame::RemoveFromFlow(nsIFrame* aFrame) {
 
 nscoord nsSplittableFrame::ConsumedBSize(WritingMode aWM) const {
   nscoord bSize = 0;
+
   for (nsIFrame* prev = GetPrevContinuation(); prev;
        prev = prev->GetPrevContinuation()) {
     bSize += prev->ContentBSize(aWM);
@@ -204,6 +206,18 @@ nscoord nsSplittableFrame::GetEffectiveComputedBSize(
   }
 
   bSize -= aConsumedBSize;
+
+  // nsFieldSetFrame's inner frames are special since some of their content-box
+  // BSize may be consumed by positioning it below the legend.  So we always
+  // report zero for true overflow containers here.
+  // XXXmats: hmm, can we fix this so that the sizes actually adds up instead?
+  if (IS_TRUE_OVERFLOW_CONTAINER(this) &&
+      Style()->GetPseudoType() == PseudoStyleType::fieldsetContent) {
+    for (nsFieldSetFrame* fieldset = do_QueryFrame(GetParent()); fieldset;
+         fieldset = static_cast<nsFieldSetFrame*>(fieldset->GetPrevInFlow())) {
+      bSize -= fieldset->LegendSpace();
+    }
+  }
 
   // We may have stretched the frame beyond its computed height. Oh well.
   return std::max(0, bSize);
@@ -227,16 +241,15 @@ nsIFrame::LogicalSides nsSplittableFrame::GetLogicalSkipSides(
 
   if (aReflowInput) {
     // We're in the midst of reflow right now, so it's possible that we haven't
-    // created a nif yet. If our content height is going to exceed our available
-    // height, though, then we're going to need a next-in-flow, it just hasn't
-    // been created yet.
-
+    // created a next-in-flow yet. If our content block-size is going to exceed
+    // our available block-size, though, then we're going to need a
+    // next-in-flow, it just hasn't been created yet.
     if (NS_UNCONSTRAINEDSIZE != aReflowInput->AvailableBSize()) {
-      nscoord effectiveCH = this->GetEffectiveComputedBSize(*aReflowInput);
-      if (effectiveCH != NS_UNCONSTRAINEDSIZE &&
-          effectiveCH > aReflowInput->AvailableBSize()) {
-        // Our content height is going to exceed our available height, so we're
-        // going to need a next-in-flow.
+      nscoord effectiveBSize = GetEffectiveComputedBSize(*aReflowInput);
+      if (effectiveBSize != NS_UNCONSTRAINEDSIZE &&
+          effectiveBSize > aReflowInput->AvailableBSize()) {
+        // Our computed block-size is going to exceed our available block-size,
+        // so we're going to need a next-in-flow.
         skip |= eLogicalSideBitsBEnd;
       }
     }
@@ -245,6 +258,12 @@ nsIFrame::LogicalSides nsSplittableFrame::GetLogicalSkipSides(
     if (nif && !IS_TRUE_OVERFLOW_CONTAINER(nif)) {
       skip |= eLogicalSideBitsBEnd;
     }
+  }
+
+  // Always skip block-end side if we have a *later* sibling across column-span
+  // split.
+  if (HasColumnSpanSiblings()) {
+    skip |= eLogicalSideBitsBEnd;
   }
 
   return skip;

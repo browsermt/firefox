@@ -14,7 +14,6 @@
 #include <utility>
 
 #include "nscore.h"
-#include "nsIFactory.h"
 #include "nsISupports.h"
 #include "mozilla/dom/Document.h"
 #include "nsCOMPtr.h"
@@ -27,12 +26,9 @@
 #include "nsIContent.h"
 #include "nsIScriptContext.h"
 #include "nsIScriptGlobalObject.h"
-#include "nsIScriptSecurityManager.h"
 #include "mozilla/dom/Selection.h"
-#include "nsITransferable.h"  // for kUnicodeMime
 #include "nsContentUtils.h"
 #include "nsElementTable.h"
-#include "nsNodeUtils.h"
 #include "nsUnicharUtils.h"
 #include "nsReadableUtils.h"
 #include "nsTArray.h"
@@ -766,7 +762,7 @@ nsresult nsDocumentEncoder::SerializeToStringRecursive(nsINode* aNode,
                       ? maybeFixedNode
                       : aNode;
 
-  for (nsINode* child = nsNodeUtils::GetFirstChildOfTemplateOrNode(node); child;
+  for (nsINode* child = node->GetFirstChildOfTemplateOrNode(); child;
        child = child->GetNextSibling()) {
     rv = SerializeToStringRecursive(child, false, aMaxLength);
     NS_ENSURE_SUCCESS(rv, rv);
@@ -787,12 +783,12 @@ nsresult nsDocumentEncoder::SerializeToStringRecursive(nsINode* aNode,
 nsresult nsDocumentEncoder::SerializeToStringIterative(nsINode* aNode) {
   nsresult rv;
 
-  nsINode* node = nsNodeUtils::GetFirstChildOfTemplateOrNode(aNode);
+  nsINode* node = aNode->GetFirstChildOfTemplateOrNode();
   while (node) {
     nsINode* current = node;
     rv = SerializeNodeStart(*current, 0, -1, current);
     NS_ENSURE_SUCCESS(rv, rv);
-    node = nsNodeUtils::GetFirstChildOfTemplateOrNode(current);
+    node = current->GetFirstChildOfTemplateOrNode();
     while (!node && current && current != aNode) {
       rv = SerializeNodeEnd(*current);
       NS_ENSURE_SUCCESS(rv, rv);
@@ -1005,7 +1001,7 @@ nsresult nsDocumentEncoder::SerializeRangeContextEnd() {
 nsresult nsDocumentEncoder::SerializeRangeToString(nsRange* aRange) {
   if (!aRange || aRange->Collapsed()) return NS_OK;
 
-  mCommonAncestorOfRange = aRange->GetCommonAncestor();
+  mCommonAncestorOfRange = aRange->GetClosestCommonInclusiveAncestor();
 
   if (!mCommonAncestorOfRange) {
     return NS_OK;
@@ -1321,7 +1317,7 @@ nsHTMLCopyEncoder::SetSelection(Selection* aSelection) {
   // selection, then go through the flattened tree and serialize the selected
   // nodes", effectively serializing the composed tree.
   RefPtr<nsRange> range = aSelection->GetRangeAt(0);
-  nsINode* commonParent = range->GetCommonAncestor();
+  nsINode* commonParent = range->GetClosestCommonInclusiveAncestor();
 
   for (nsCOMPtr<nsIContent> selContent(do_QueryInterface(commonParent));
        selContent; selContent = selContent->GetParent()) {
@@ -1476,7 +1472,7 @@ nsresult nsHTMLCopyEncoder::PromoteRange(nsRange* inRange) {
   uint32_t startOffset = inRange->StartOffset();
   nsCOMPtr<nsINode> endNode = inRange->GetEndContainer();
   uint32_t endOffset = inRange->EndOffset();
-  nsCOMPtr<nsINode> common = inRange->GetCommonAncestor();
+  nsCOMPtr<nsINode> common = inRange->GetClosestCommonInclusiveAncestor();
 
   nsCOMPtr<nsINode> opStartNode;
   nsCOMPtr<nsINode> opEndNode;

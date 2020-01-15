@@ -12,20 +12,30 @@ Services.scriptloader.loadSubScript(
   this
 );
 
-var originalEngine;
-
 var arrayBufferIconTested = false;
 var plainURIIconTested = false;
 
 add_task(async function setup() {
-  originalEngine = await Services.search.getDefault();
+  const originalEngine = await Services.search.getDefault();
+  const originalPrivateEngine = await Services.search.getDefaultPrivate();
 
   await SpecialPowers.pushPrefEnv({
-    set: [["browser.newtab.preload", false]],
+    set: [
+      ["browser.newtab.preload", false],
+      ["browser.search.separatePrivateDefault.ui.enabled", true],
+      ["browser.search.separatePrivateDefault", true],
+    ],
   });
 
   await promiseNewEngine("testEngine.xml", {
     setAsCurrent: true,
+    testPath:
+      "chrome://mochitests/content/browser/browser/components/search/test/browser/",
+  });
+
+  await promiseNewEngine("testEngine_diacritics.xml", {
+    setAsCurrent: false,
+    setAsCurrentPrivate: true,
     testPath:
       "chrome://mochitests/content/browser/browser/components/search/test/browser/",
   });
@@ -36,6 +46,7 @@ add_task(async function setup() {
 
   registerCleanupFunction(async () => {
     await Services.search.setDefault(originalEngine);
+    await Services.search.setDefaultPrivate(originalPrivateEngine);
   });
 });
 
@@ -47,7 +58,7 @@ add_task(async function GetState() {
   let msg = await waitForTestMsg(mm, "State");
   checkMsg(msg, {
     type: "State",
-    data: await currentStateObj(),
+    data: await currentStateObj(false),
   });
 
   ok(arrayBufferIconTested, "ArrayBuffer path for the iconData was tested");
@@ -56,22 +67,8 @@ add_task(async function GetState() {
 
 add_task(async function SetDefaultEngine() {
   let { mm } = await addTab();
-  let newDefaultEngine = null;
+  let newDefaultEngine = await Services.search.getEngineByName("FooChromeIcon");
   let oldDefaultEngine = await Services.search.getDefault();
-  let engines = await Services.search.getVisibleEngines();
-  for (let engine of engines) {
-    if (engine != oldDefaultEngine) {
-      newDefaultEngine = engine;
-      break;
-    }
-  }
-  if (!newDefaultEngine) {
-    info(
-      "Couldn't find a non-selected search engine, " +
-        "skipping this part of the test"
-    );
-    return;
-  }
   mm.sendAsyncMessage(TEST_MSG, {
     type: "SetCurrentEngine",
     data: newDefaultEngine.name,
@@ -91,14 +88,28 @@ add_task(async function SetDefaultEngine() {
   let msg = await searchPromise;
   checkMsg(msg, {
     type: "CurrentEngine",
-    data: await defaultEngineObj(newDefaultEngine),
+    data: await constructEngineObj(newDefaultEngine),
   });
 
   await Services.search.setDefault(oldDefaultEngine);
   msg = await waitForTestMsg(mm, "CurrentEngine");
   checkMsg(msg, {
     type: "CurrentEngine",
-    data: await defaultEngineObj(oldDefaultEngine),
+    data: await constructEngineObj(oldDefaultEngine),
+  });
+});
+
+// ContentSearch.jsm doesn't support setting the private engine at this time
+// as it doesn't need to, so we just test updating the default here.
+add_task(async function setDefaultEnginePrivate() {
+  const engine = await Services.search.getEngineByName("FooChromeIcon");
+  const { mm } = await addTab();
+  let msgPromise = waitForTestMsg(mm, "CurrentPrivateEngine");
+  await Services.search.setDefaultPrivate(engine);
+  let msg = await msgPromise;
+  checkMsg(msg, {
+    type: "CurrentPrivateEngine",
+    data: await constructEngineObj(engine),
   });
 });
 
@@ -113,6 +124,23 @@ add_task(async function modifyEngine() {
     data: await currentStateObj(),
   });
   engine.alias = oldAlias;
+  msg = await waitForTestMsg(mm, "CurrentState");
+  checkMsg(msg, {
+    type: "CurrentState",
+    data: await currentStateObj(),
+  });
+});
+
+add_task(async function test_hideEngine() {
+  let { mm } = await addTab();
+  let engine = await Services.search.getEngineByName("Foo \u2661");
+  Services.prefs.setStringPref("browser.search.hiddenOneOffs", engine.name);
+  let msg = await waitForTestMsg(mm, "CurrentState");
+  checkMsg(msg, {
+    type: "CurrentState",
+    data: await currentStateObj(undefined, "Foo \u2661"),
+  });
+  Services.prefs.clearUserPref("browser.search.hiddenOneOffs");
   msg = await waitForTestMsg(mm, "CurrentState");
   checkMsg(msg, {
     type: "CurrentState",
@@ -387,25 +415,30 @@ async function addTab() {
   return { browser: tab.linkedBrowser, mm };
 }
 
-var currentStateObj = async function() {
+var currentStateObj = async function(isPrivateWindowValue, hiddenEngine = "") {
   let state = {
     engines: [],
-    currentEngine: await defaultEngineObj(),
+    currentEngine: await constructEngineObj(await Services.search.getDefault()),
+    currentPrivateEngine: await constructEngineObj(
+      await Services.search.getDefaultPrivate()
+    ),
   };
   for (let engine of await Services.search.getVisibleEngines()) {
     let uri = engine.getIconURLBySize(16, 16);
     state.engines.push({
       name: engine.name,
       iconData: await iconDataFromURI(uri),
-      hidden: false,
+      hidden: engine.name == hiddenEngine,
       identifier: engine.identifier,
     });
+  }
+  if (typeof isPrivateWindowValue == "boolean") {
+    state.isPrivateWindow = isPrivateWindowValue;
   }
   return state;
 };
 
-var defaultEngineObj = async function() {
-  let engine = await Services.search.getDefault();
+async function constructEngineObj(engine) {
   let uriFavicon = engine.getIconURLBySize(16, 16);
   let bundle = Services.strings.createBundle(
     "chrome://global/locale/autocomplete.properties"
@@ -415,7 +448,7 @@ var defaultEngineObj = async function() {
     placeholder: bundle.formatStringFromName("searchWithEngine", [engine.name]),
     iconData: await iconDataFromURI(uriFavicon),
   };
-};
+}
 
 function iconDataFromURI(uri) {
   if (!uri) {

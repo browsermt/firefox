@@ -11,10 +11,7 @@
 #include "nsContentUtils.h"
 #include "nsCSPParser.h"
 #include "nsCSPUtils.h"
-#include "nsIConsoleService.h"
-#include "nsIContentPolicy.h"
 #include "nsIScriptError.h"
-#include "nsIStringBundle.h"
 #include "nsNetUtil.h"
 #include "nsReadableUtils.h"
 #include "nsServiceManagerUtils.h"
@@ -467,6 +464,22 @@ nsCSPBaseSrc* nsCSPParser::keywordSource() {
     }
     return new nsCSPKeywordSrc(CSP_UTF16KeywordToEnum(mCurToken));
   }
+
+  if (CSP_IsKeyword(mCurToken, CSP_UNSAFE_ALLOW_REDIRECTS)) {
+    if (!CSP_IsDirective(mCurDir[0],
+                         nsIContentSecurityPolicy::NAVIGATE_TO_DIRECTIVE)) {
+      // Only allow 'unsafe-allow-redirects' within navigate-to.
+      AutoTArray<nsString, 2> params = {
+          NS_LITERAL_STRING("unsafe-allow-redirects"),
+          NS_LITERAL_STRING("navigate-to")};
+      logWarningErrorToConsole(nsIScriptError::warningFlag,
+                               "IgnoringSourceWithinDirective", params);
+      return nullptr;
+    }
+
+    return new nsCSPKeywordSrc(CSP_UTF16KeywordToEnum(mCurToken));
+  }
+
   return nullptr;
 }
 
@@ -855,6 +868,19 @@ nsCSPDirective* nsCSPParser::directiveName() {
     AutoTArray<nsString, 1> params = {mCurToken};
     logWarningErrorToConsole(nsIScriptError::warningFlag,
                              "notSupportingDirective", params);
+    return nullptr;
+  }
+
+  // Bug 1529068: Implement navigate-to directive.
+  // Once all corner cases are resolved we can remove that special
+  // if-handling here and let the parser just fall through to
+  // return new nsCSPDirective.
+  if (CSP_IsDirective(mCurToken,
+                      nsIContentSecurityPolicy::NAVIGATE_TO_DIRECTIVE) &&
+      !StaticPrefs::security_csp_enableNavigateTo()) {
+    AutoTArray<nsString, 1> params = {mCurToken};
+    logWarningErrorToConsole(nsIScriptError::warningFlag,
+                             "couldNotProcessUnknownDirective", params);
     return nullptr;
   }
 

@@ -11,6 +11,7 @@
 #include "mozilla/Casting.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/MemoryReporting.h"
+#include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 
 #include "jspubtd.h"
@@ -172,9 +173,9 @@ enum {
   JS_TELEMETRY_GC_TIME_BETWEEN_S,
   JS_TELEMETRY_GC_TIME_BETWEEN_SLICES_MS,
   JS_TELEMETRY_GC_SLICE_COUNT,
+  JS_TELEMETRY_GC_EFFECTIVENESS,
   JS_TELEMETRY_PRIVILEGED_PARSER_COMPILE_LAZY_AFTER_MS,
   JS_TELEMETRY_WEB_PARSER_COMPILE_LAZY_AFTER_MS,
-  JS_TELEMETRY_DEPRECATED_ARRAY_GENERICS,
   JS_TELEMETRY_END
 };
 
@@ -197,6 +198,10 @@ typedef void (*JSSetUseCounterCallback)(JSObject* obj, JSUseCounter counter);
 
 extern JS_FRIEND_API void JS_SetSetUseCounterCallback(
     JSContext* cx, JSSetUseCounterCallback callback);
+
+extern JS_FRIEND_API void JS_ReportFirstCompileTime(
+    JS::HandleScript script, mozilla::TimeDuration& parse,
+    mozilla::TimeDuration& emit);
 
 extern JS_FRIEND_API JSPrincipals* JS_GetScriptPrincipals(JSScript* script);
 
@@ -249,13 +254,13 @@ JS_FRIEND_API void RemoveRawValueRoot(JSContext* cx, JS::Value* vp);
 
 JS_FRIEND_API JSAtom* GetPropertyNameFromPC(JSScript* script, jsbytecode* pc);
 
-#if defined(DEBUG) || defined(JS_JITSPEW)
-
 /*
  * Routines to print out values during debugging. These are FRIEND_API to help
  * the debugger find them and to support temporarily hacking js::Dump* calls
  * into other code. Note that there are overloads that do not require the FILE*
  * parameter, which will default to stderr.
+ *
+ * These functions are no-ops unless built with DEBUG or JS_JITSPEW.
  */
 
 extern JS_FRIEND_API void DumpString(JSString* str, FILE* fp);
@@ -291,7 +296,8 @@ extern JS_FRIEND_API void DumpInterpreterFrame(
 extern JS_FRIEND_API bool DumpPC(JSContext* cx);
 extern JS_FRIEND_API bool DumpScript(JSContext* cx, JSScript* scriptArg);
 
-#endif
+// DumpBacktrace(), unlike the other dump functions, always dumps a backtrace --
+// regardless of DEBUG or JS_JITSPEW.
 
 extern JS_FRIEND_API void DumpBacktrace(JSContext* cx, FILE* fp);
 
@@ -437,13 +443,6 @@ typedef enum {
 extern JS_FRIEND_API void DumpHeap(
     JSContext* cx, FILE* fp, DumpHeapNurseryBehaviour nurseryBehaviour,
     mozilla::MallocSizeOf mallocSizeOf = nullptr);
-
-#ifdef JS_OLD_GETTER_SETTER_METHODS
-JS_FRIEND_API bool obj_defineGetter(JSContext* cx, unsigned argc,
-                                    JS::Value* vp);
-JS_FRIEND_API bool obj_defineSetter(JSContext* cx, unsigned argc,
-                                    JS::Value* vp);
-#endif
 
 extern JS_FRIEND_API bool IsSystemRealm(JS::Realm* realm);
 
@@ -751,10 +750,6 @@ static_assert((uint64_t(MaxStringLength) + 1) * sizeof(char16_t) <= INT32_MAX,
               "size of null-terminated JSString char buffer must fit in "
               "INT32_MAX");
 
-MOZ_ALWAYS_INLINE size_t GetFlatStringLength(JSFlatString* s) {
-  return reinterpret_cast<JS::shadow::String*>(s)->length();
-}
-
 MOZ_ALWAYS_INLINE size_t GetLinearStringLength(JSLinearString* s) {
   return reinterpret_cast<JS::shadow::String*>(s)->length();
 }
@@ -798,16 +793,17 @@ MOZ_ALWAYS_INLINE const char16_t* GetTwoByteLinearStringChars(
   return s->nonInlineCharsTwoByte;
 }
 
+MOZ_ALWAYS_INLINE char16_t GetLinearStringCharAt(JSLinearString* linear,
+                                                 size_t index) {
+  MOZ_ASSERT(index < GetLinearStringLength(linear));
+  JS::AutoCheckCannotGC nogc;
+  return LinearStringHasLatin1Chars(linear)
+             ? GetLatin1LinearStringChars(nogc, linear)[index]
+             : GetTwoByteLinearStringChars(nogc, linear)[index];
+}
+
 MOZ_ALWAYS_INLINE JSLinearString* AtomToLinearString(JSAtom* atom) {
   return reinterpret_cast<JSLinearString*>(atom);
-}
-
-MOZ_ALWAYS_INLINE JSFlatString* AtomToFlatString(JSAtom* atom) {
-  return reinterpret_cast<JSFlatString*>(atom);
-}
-
-MOZ_ALWAYS_INLINE JSLinearString* FlatStringToLinearString(JSFlatString* s) {
-  return reinterpret_cast<JSLinearString*>(s);
 }
 
 MOZ_ALWAYS_INLINE const JS::Latin1Char* GetLatin1AtomChars(
@@ -820,9 +816,9 @@ MOZ_ALWAYS_INLINE const char16_t* GetTwoByteAtomChars(
   return GetTwoByteLinearStringChars(nogc, AtomToLinearString(atom));
 }
 
-MOZ_ALWAYS_INLINE bool IsExternalString(JSString* str,
-                                        const JSStringFinalizer** fin,
-                                        const char16_t** chars) {
+MOZ_ALWAYS_INLINE bool IsExternalString(
+    JSString* str, const JSExternalStringCallbacks** callbacks,
+    const char16_t** chars) {
   using JS::shadow::String;
   String* s = reinterpret_cast<String*>(str);
 
@@ -831,7 +827,7 @@ MOZ_ALWAYS_INLINE bool IsExternalString(JSString* str,
   }
 
   MOZ_ASSERT(JS_IsExternalString(str));
-  *fin = s->externalFinalizer;
+  *callbacks = s->externalCallbacks;
   *chars = s->nonInlineCharsTwoByte;
   return true;
 }
@@ -895,10 +891,6 @@ inline bool CopyStringChars(JSContext* cx, CharType* dest, JSString* s,
 
   CopyLinearStringChars(dest, linear, len, start);
   return true;
-}
-
-inline void CopyFlatStringChars(char16_t* dest, JSFlatString* s, size_t len) {
-  CopyLinearStringChars(dest, FlatStringToLinearString(s), len);
 }
 
 /**
@@ -1097,14 +1089,18 @@ JS_FRIEND_API JSString* GetPCCountScriptSummary(JSContext* cx, size_t script);
 JS_FRIEND_API JSString* GetPCCountScriptContents(JSContext* cx, size_t script);
 
 /**
- * Generate lcov trace file content for the current compartment, and allocate a
- * new buffer and return the content in it, the size of the newly allocated
- * content within the buffer would be set to the length out-param.
+ * Generate lcov trace file content for the current realm, and allocate a new
+ * buffer and return the content in it, the size of the newly allocated content
+ * within the buffer would be set to the length out-param. The 'All' variant
+ * will collect data for all realms in the runtime.
  *
- * In case of out-of-memory, this function returns nullptr and does not set any
- * value to the length out-param.
+ * In case of out-of-memory, this function returns nullptr. The length
+ * out-param is undefined on failure.
  */
-JS_FRIEND_API char* GetCodeCoverageSummary(JSContext* cx, size_t* length);
+JS_FRIEND_API JS::UniqueChars GetCodeCoverageSummary(JSContext* cx,
+                                                     size_t* length);
+JS_FRIEND_API JS::UniqueChars GetCodeCoverageSummaryAll(JSContext* cx,
+                                                        size_t* length);
 
 typedef bool (*DOMInstanceClassHasProtoAtDepth)(const JSClass* instanceClass,
                                                 uint32_t protoID,
@@ -1127,8 +1123,8 @@ extern JS_FRIEND_API JSObject* GetTestingFunctions(JSContext* cx);
  * Get an error type name from a JSExnType constant.
  * Returns nullptr for invalid arguments and JSEXN_INTERNALERR
  */
-extern JS_FRIEND_API JSFlatString* GetErrorTypeName(JSContext* cx,
-                                                    int16_t exnType);
+extern JS_FRIEND_API JSLinearString* GetErrorTypeName(JSContext* cx,
+                                                      int16_t exnType);
 
 extern JS_FRIEND_API RegExpShared* RegExpToSharedNonInline(
     JSContext* cx, JS::HandleObject regexp);
@@ -1365,14 +1361,7 @@ struct MOZ_STACK_CLASS JS_FRIEND_API ErrorReport {
   // Or we may need to synthesize a JSErrorReport one of our own.
   JSErrorReport ownedReport;
 
-  // And we have a string to maybe keep alive that has pointers into
-  // it from ownedReport.
-  JS::RootedString str;
-
-  // And keep its chars alive too.
-  JS::AutoStableStringChars strChars;
-
-  // And we need to root our exception value.
+  // Root our exception value to keep a possibly borrowed |reportp| alive.
   JS::RootedObject exnObject;
 
   // And for our filename.
@@ -1757,9 +1746,6 @@ extern JS_FRIEND_API JSObject* JS_GetObjectAsArrayBufferView(
  */
 extern JS_FRIEND_API js::Scalar::Type JS_GetArrayBufferViewType(JSObject* obj);
 
-extern JS_FRIEND_API js::Scalar::Type JS_GetSharedArrayBufferViewType(
-    JSObject* obj);
-
 /**
  * Return the number of elements in a typed array.
  *
@@ -1787,13 +1773,6 @@ extern JS_FRIEND_API uint32_t JS_GetTypedArrayByteOffset(JSObject* obj);
  * a typed array, and the unwrapping will succeed.
  */
 extern JS_FRIEND_API uint32_t JS_GetTypedArrayByteLength(JSObject* obj);
-
-/**
- * Check whether obj supports JS_ArrayBufferView* APIs. Note that this may
- * return false if a security wrapper is encountered that denies the
- * unwrapping.
- */
-extern JS_FRIEND_API bool JS_IsArrayBufferViewObject(JSObject* obj);
 
 /**
  * More generic name for JS_GetTypedArrayByteLength to cover DataViews as well
@@ -2193,7 +2172,7 @@ static MOZ_ALWAYS_INLINE shadow::Function* FunctionObjectToShadowFunction(
 }
 
 /* Statically asserted in JSFunction.h. */
-static const unsigned JS_FUNCTION_INTERPRETED_BITS = 0x0201;
+static const unsigned JS_FUNCTION_INTERPRETED_BITS = 0x0060;
 
 // Return whether the given function object is native.
 static MOZ_ALWAYS_INLINE bool FunctionObjectIsNative(JSObject* fun) {
@@ -2497,8 +2476,10 @@ extern JS_FRIEND_API JSObject* GetJSMEnvironmentOfScriptedCaller(JSContext* cx);
 // other embedding such as a Gecko FrameScript. Caller can check compartment.
 extern JS_FRIEND_API bool IsJSMEnvironment(JSObject* obj);
 
+extern JS_FRIEND_API bool IsSavedFrame(JSObject* obj);
+
 // Matches the condition in js/src/jit/ProcessExecutableMemory.cpp
-#if defined(XP_WIN) && defined(HAVE_64BIT_BUILD)
+#if defined(XP_WIN)
 // Parameters use void* types to avoid #including windows.h. The return value of
 // this function is returned from the exception handler.
 typedef long (*JitExceptionHandler)(void* exceptionRecord,  // PEXECTION_RECORD
@@ -2604,9 +2585,10 @@ MOZ_ALWAYS_INLINE JSObject* ToWindowProxyIfWindow(JSObject* obj) {
  */
 extern JS_FRIEND_API JSObject* ToWindowIfWindowProxy(JSObject* obj);
 
-#if ENABLE_INTL_API
 // Create and add the Intl.MozDateTimeFormat constructor function to the
 // provided object.
+// If JS was built without JS_HAS_INTL_API, this function will throw an
+// exception.
 //
 // This custom date/time formatter constructor gives users the ability
 // to specify a custom format pattern. This pattern is passed *directly*
@@ -2621,9 +2603,15 @@ extern bool AddMozDateTimeFormatConstructor(JSContext* cx,
                                             JS::Handle<JSObject*> intl);
 
 // Create and add the Intl.Locale constructor function to the provided object.
-// This function throws if called more than once per realm/global object.
+// If JS was built without JS_HAS_INTL_API, this function will throw an
+// exception.
 extern bool AddLocaleConstructor(JSContext* cx, JS::Handle<JSObject*> intl);
-#endif  // ENABLE_INTL_API
+
+// Create and add the Intl.ListFormat constructor function to the provided
+// object.
+// If JS was built without JS_HAS_INTL_API, this function will throw an
+// exception.
+extern bool AddListFormatConstructor(JSContext* cx, JS::Handle<JSObject*> intl);
 
 class MOZ_STACK_CLASS JS_FRIEND_API AutoAssertNoContentJS {
  public:

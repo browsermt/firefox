@@ -215,6 +215,7 @@ EXPORTS.mozilla.layers += [
     'ipc/UiCompositorControllerParent.h',
     'ipc/VideoBridgeChild.h',
     'ipc/VideoBridgeParent.h',
+    'ipc/VideoBridgeUtils.h',
     'LayerAttributes.h',
     'LayerMetricsWrapper.h',
     'LayersHelpers.h',
@@ -229,6 +230,7 @@ EXPORTS.mozilla.layers += [
     'mlgpu/ShaderDefinitionsMLGPU.h',
     'mlgpu/UtilityMLGPU.h',
     'NativeLayer.h',
+    'OOPCanvasRenderer.h',
     'opengl/CompositingRenderTargetOGL.h',
     'opengl/CompositorOGL.h',
     'opengl/MacIOSurfaceTextureClientOGL.h',
@@ -245,6 +247,7 @@ EXPORTS.mozilla.layers += [
     'ShareableCanvasRenderer.h',
     'SourceSurfaceSharedData.h',
     'SourceSurfaceVolatileData.h',
+    'SurfacePool.h',
     'SyncObject.h',
     'TextureSourceProvider.h',
     'TextureWrapperImage.h',
@@ -292,10 +295,20 @@ if CONFIG['MOZ_X11']:
         'opengl/X11TextureSourceOGL.cpp',
     ]
 
+if CONFIG['MOZ_WAYLAND']:
+    EXPORTS.mozilla.layers += [
+        'opengl/WaylandDMABUFTextureClientOGL.h',
+        'opengl/WaylandDMABUFTextureHostOGL.h',
+    ]
+    SOURCES += [
+        'opengl/WaylandDMABUFTextureClientOGL.cpp',
+        'opengl/WaylandDMABUFTextureHostOGL.cpp',
+    ]
+
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
     EXPORTS.mozilla.layers += [
         'NativeLayerCA.h',
-        'opengl/GLManager.h',
+        'SurfacePoolCA.h',
         'TextureSync.h',
     ]
     EXPORTS += [
@@ -304,7 +317,7 @@ if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':
     ]
     UNIFIED_SOURCES += [
         'NativeLayerCA.mm',
-        'opengl/GLManager.cpp',
+        'SurfacePoolCA.mm',
         'TextureSync.cpp',
     ]
     SOURCES += [
@@ -399,7 +412,6 @@ UNIFIED_SOURCES += [
     'client/ImageClient.cpp',
     'client/MultiTiledContentClient.cpp',
     'client/SingleTiledContentClient.cpp',
-    'client/TextureClient.cpp',
     'client/TextureClientPool.cpp',
     'client/TextureClientRecycleAllocator.cpp',
     'client/TextureClientSharedSurface.cpp',
@@ -533,6 +545,7 @@ UNIFIED_SOURCES += [
 SOURCES += [
     'basic/BasicCompositor.cpp',
     'basic/BasicImageLayer.cpp',
+    'client/TextureClient.cpp',
     'ImageContainer.cpp',
     'PersistentBufferProvider.cpp',
     'protobuf/LayerScopePacket.pb.cc',
@@ -557,6 +570,7 @@ IPDL_SOURCES += [
     'ipc/PAPZInputBridge.ipdl',
     'ipc/PCanvas.ipdl',
     'ipc/PCompositorBridge.ipdl',
+    'ipc/PCompositorBridgeTypes.ipdlh',
     'ipc/PCompositorManager.ipdl',
     'ipc/PImageBridge.ipdl',
     'ipc/PLayerTransaction.ipdl',
@@ -570,17 +584,10 @@ IPDL_SOURCES += [
 include('/ipc/chromium/chromium-config.mozbuild')
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
-  GENERATED_FILES = [
-      'CompositorD3D11Shaders.h',
-      'MLGShaders.h',
-  ]
-
-  d3d11_shaders = GENERATED_FILES['CompositorD3D11Shaders.h']
-  d3d11_shaders.script = 'd3d11/genshaders.py'
-  d3d11_shaders.inputs = ['d3d11/shaders.manifest']
-  mlg_shaders = GENERATED_FILES['MLGShaders.h']
-  mlg_shaders.script = 'd3d11/genshaders.py'
-  mlg_shaders.inputs = ['d3d11/mlgshaders/shaders.manifest']
+  GeneratedFile('CompositorD3D11Shaders.h', script='d3d11/genshaders.py',
+                inputs=['d3d11/shaders.manifest'])
+  GeneratedFile('MLGShaders.h', script='d3d11/genshaders.py',
+                inputs=['d3d11/mlgshaders/shaders.manifest'])
 
 LOCAL_INCLUDES += [
     '/docshell/base',  # for nsDocShell.h

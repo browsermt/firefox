@@ -14,7 +14,6 @@ from taskgraph.util.keyed_by import evaluate_keyed_by
 from taskgraph.util.schema import taskref_or_string
 from taskgraph.util.scriptworker import (
     get_signing_cert_scope_per_platform,
-    get_worker_type_for_scope,
 )
 from taskgraph.transforms.task import task_description_schema
 from voluptuous import Required, Optional
@@ -157,7 +156,7 @@ def make_task_description(config, jobs):
         signing_cert_scope = get_signing_cert_scope_per_platform(
             build_platform, is_nightly, config
         )
-        worker_type_alias = get_worker_type_for_scope(config, signing_cert_scope)
+        worker_type_alias = 'linux-signing' if is_nightly else 'linux-depsigning'
         mac_behavior = None
         task = {
             'label': label,
@@ -176,12 +175,18 @@ def make_task_description(config, jobs):
         }
 
         if 'macosx' in build_platform:
-            assert worker_type_alias.startswith("linux-"), \
+            worker_type_alias_map = {
+                'linux-depsigning': 'mac-depsigning',
+                'linux-signing': 'mac-signing',
+            }
+
+            assert worker_type_alias in worker_type_alias_map, \
                 (
                     "Make sure to adjust the below worker_type_alias logic for "
                     "mac if you change the signing workerType aliases!"
+                    " ({} not found in mapping)".format(worker_type_alias)
                 )
-            worker_type_alias = worker_type_alias.replace("linux-", "mac-")
+            worker_type_alias = worker_type_alias_map[worker_type_alias]
             mac_behavior = evaluate_keyed_by(
                 config.graph_config['mac-notarization']['mac-behavior'],
                 'mac behavior',

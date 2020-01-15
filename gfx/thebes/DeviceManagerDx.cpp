@@ -23,12 +23,13 @@
 #include "mozilla/layers/MLGDeviceD3D11.h"
 #include "mozilla/layers/PaintThread.h"
 #include "nsExceptionHandler.h"
-#include "nsIGfxInfo.h"
 #include "nsPrintfCString.h"
 #include "nsString.h"
 
+#undef _WIN32_WINNT
+#define _WIN32_WINNT _WIN32_WINNT_WINBLUE
 #undef NTDDI_VERSION
-#define NTDDI_VERSION NTDDI_WIN8
+#define NTDDI_VERSION NTDDI_WINBLUE
 
 #include <d3d11.h>
 #include <dcomp.h>
@@ -47,9 +48,8 @@ StaticAutoPtr<DeviceManagerDx> DeviceManagerDx::sInstance;
 // be used within InitializeD3D11.
 decltype(D3D11CreateDevice)* sD3D11CreateDeviceFn = nullptr;
 
-typedef HRESULT(WINAPI* PFN_DCOMPOSITION_CREATE_DEVICE)(
-    IDXGIDevice* dxgiDevice, REFIID iid, void** dcompositionDevice);
-PFN_DCOMPOSITION_CREATE_DEVICE sDcompCreateDeviceFn = nullptr;
+// It should only be used within CreateDirectCompositionDevice.
+decltype(DCompositionCreateDevice2)* sDcompCreateDevice2Fn = nullptr;
 
 // We don't have access to the DirectDrawCreateEx type in gfxWindowsPlatform.h,
 // since it doesn't include ddraw.h, so we use a static here. It should only
@@ -110,7 +110,7 @@ bool DeviceManagerDx::LoadDcomp() {
   MOZ_ASSERT(gfxVars::UseWebRenderANGLE());
   MOZ_ASSERT(gfxVars::UseWebRenderDCompWin());
 
-  if (sDcompCreateDeviceFn) {
+  if (sDcompCreateDevice2Fn) {
     return true;
   }
 
@@ -119,9 +119,9 @@ bool DeviceManagerDx::LoadDcomp() {
     return false;
   }
 
-  sDcompCreateDeviceFn = reinterpret_cast<PFN_DCOMPOSITION_CREATE_DEVICE>(
-      ::GetProcAddress(module, "DCompositionCreateDevice"));
-  if (!sDcompCreateDeviceFn) {
+  sDcompCreateDevice2Fn = (decltype(DCompositionCreateDevice2)*)GetProcAddress(
+      module, "DCompositionCreateDevice2");
+  if (!sDcompCreateDevice2Fn) {
     return false;
   }
 
@@ -327,15 +327,22 @@ void DeviceManagerDx::CreateDirectCompositionDevice() {
   }
 
   HRESULT hr;
-  RefPtr<IDCompositionDevice> compositionDevice;
+  RefPtr<IDCompositionDesktopDevice> desktopDevice;
   MOZ_SEH_TRY {
-    hr = sDcompCreateDeviceFn(
-        dxgiDevice,
-        IID_PPV_ARGS((IDCompositionDevice**)getter_AddRefs(compositionDevice)));
+    hr = sDcompCreateDevice2Fn(
+        dxgiDevice.get(),
+        IID_PPV_ARGS(
+            (IDCompositionDesktopDevice**)getter_AddRefs(desktopDevice)));
   }
   MOZ_SEH_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { return; }
 
   if (!SUCCEEDED(hr)) {
+    return;
+  }
+
+  RefPtr<IDCompositionDevice2> compositionDevice;
+  if (desktopDevice->QueryInterface(IID_PPV_ARGS(
+          (IDCompositionDevice2**)getter_AddRefs(compositionDevice))) != S_OK) {
     return;
   }
 
@@ -916,6 +923,7 @@ void DeviceManagerDx::ResetDevices() {
   mContentDevice = nullptr;
   mCanvasDevice = nullptr;
   mImageDevice = nullptr;
+  mDirectCompositionDevice = nullptr;
   mDeviceStatus = Nothing();
   mDeviceResetReason = Nothing();
   Factory::SetDirect3D11Device(nullptr);
@@ -938,6 +946,7 @@ bool DeviceManagerDx::MaybeResetAndReacquireDevices() {
   bool createCompositorDevice = !!mCompositorDevice;
   bool createContentDevice = !!mContentDevice;
   bool createCanvasDevice = !!mCanvasDevice;
+  bool createDirectCompositionDevice = !!mDirectCompositionDevice;
 
   ResetDevices();
 
@@ -950,6 +959,9 @@ bool DeviceManagerDx::MaybeResetAndReacquireDevices() {
   }
   if (createCanvasDevice) {
     CreateCanvasDevice();
+  }
+  if (createDirectCompositionDevice) {
+    CreateDirectCompositionDevice();
   }
 
   return true;
@@ -1131,7 +1143,7 @@ RefPtr<ID3D11Device> DeviceManagerDx::GetCanvasDevice() {
   return mCanvasDevice;
 }
 
-RefPtr<IDCompositionDevice> DeviceManagerDx::GetDirectCompositionDevice() {
+RefPtr<IDCompositionDevice2> DeviceManagerDx::GetDirectCompositionDevice() {
   MutexAutoLock lock(mDeviceLock);
   return mDirectCompositionDevice;
 }

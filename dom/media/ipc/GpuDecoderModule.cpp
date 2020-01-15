@@ -72,9 +72,7 @@ already_AddRefed<MediaDataDecoder> GpuDecoderModule::CreateVideoDecoder(
     return nullptr;
   }
 
-  RefPtr<RemoteMediaDataDecoder> object = new RemoteMediaDataDecoder(
-      child, RemoteDecoderManagerChild::GetManagerThread(),
-      RemoteDecoderManagerChild::GetManagerAbstractThread());
+  RefPtr<RemoteMediaDataDecoder> object = new RemoteMediaDataDecoder(child);
 
   return object.forget();
 }

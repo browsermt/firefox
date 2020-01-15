@@ -56,8 +56,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "nsCOMPtr.h"
 #include "nsComponentManagerUtils.h"
 #include "nsError.h"
-#include "nsIEventTarget.h"
-#include "nsIUUIDGenerator.h"
 #include "nsNetCID.h"
 #include "nsComponentManagerUtils.h"
 #include "nsServiceManagerUtils.h"
@@ -256,8 +254,8 @@ nsresult NrIceTurnServer::ToNicerTurnStruct(nr_ice_turn_server* server) const {
   // C++03 23.2.4, Paragraph 1 stipulates that the elements
   // in std::vector must be contiguous, and can therefore be
   // used as input to functions expecting C arrays.
-  int r = r_data_create(&server->password, const_cast<UCHAR*>(&password_[0]),
-                        password_.size());
+  const UCHAR* data = password_.empty() ? nullptr : &password_[0];
+  int r = r_data_create(&server->password, data, password_.size());
   if (r) {
     RFREE(server->username);
     return NS_ERROR_OUT_OF_MEMORY;
@@ -280,7 +278,6 @@ NrIceCtx::NrIceCtx(const std::string& name, Policy policy)
       policy_(policy),
       nat_(nullptr),
       proxy_config_(nullptr),
-      proxy_only_(false),
       obfuscate_host_addresses_(false) {}
 
 /* static */
@@ -444,7 +441,8 @@ void NrIceCtx::trickle_cb(void* arg, nr_ice_ctx* ice_ctx,
   // Format the candidate.
   char candidate_str[NR_ICE_MAX_ATTRIBUTE_SIZE];
   int r = nr_ice_format_candidate_attribute(candidate, candidate_str,
-                                            sizeof(candidate_str));
+                                            sizeof(candidate_str),
+                                            ctx->obfuscate_host_addresses_);
   MOZ_ASSERT(!r);
   if (r) return;
 
@@ -847,12 +845,12 @@ nsresult NrIceCtx::SetResolver(nr_resolver* resolver) {
   return NS_OK;
 }
 
-nsresult NrIceCtx::SetProxyServer(NrSocketProxyConfig&& config) {
+nsresult NrIceCtx::SetProxyConfig(NrSocketProxyConfig&& config) {
   proxy_config_.reset(new NrSocketProxyConfig(std::move(config)));
   return NS_OK;
 }
 
-void NrIceCtx::SetCtxFlags(bool default_route_only, bool proxy_only) {
+void NrIceCtx::SetCtxFlags(bool default_route_only) {
   ASSERT_ON_THREAD(sts_target_);
 
   if (default_route_only) {
@@ -860,15 +858,9 @@ void NrIceCtx::SetCtxFlags(bool default_route_only, bool proxy_only) {
   } else {
     nr_ice_ctx_remove_flags(ctx_, NR_ICE_CTX_FLAGS_ONLY_DEFAULT_ADDRS);
   }
-
-  if (proxy_only) {
-    nr_ice_ctx_add_flags(ctx_, NR_ICE_CTX_FLAGS_ONLY_PROXY);
-  } else {
-    nr_ice_ctx_remove_flags(ctx_, NR_ICE_CTX_FLAGS_ONLY_PROXY);
-  }
 }
 
-nsresult NrIceCtx::StartGathering(bool default_route_only, bool proxy_only,
+nsresult NrIceCtx::StartGathering(bool default_route_only,
                                   bool obfuscate_host_addresses) {
   ASSERT_ON_THREAD(sts_target_);
 
@@ -876,9 +868,7 @@ nsresult NrIceCtx::StartGathering(bool default_route_only, bool proxy_only,
 
   SetGatheringState(ICE_CTX_GATHER_STARTED);
 
-  SetCtxFlags(default_route_only, proxy_only);
-
-  proxy_only_ = proxy_only;
+  SetCtxFlags(default_route_only);
 
   // This might start gathering for the first time, or again after
   // renegotiation, or might do nothing at all if gathering has already
@@ -1051,10 +1041,9 @@ void NrIceCtx::GenerateObfuscatedAddress(nr_ice_candidate* candidate,
                                          std::string* mdns_address,
                                          std::string* actual_address) {
   if (candidate->type == HOST && obfuscate_host_addresses_) {
-    int r;
     char addr[64];
-    if ((r = nr_transport_addr_get_addrstring(&candidate->addr, addr,
-                                              sizeof(addr)))) {
+    if (nr_transport_addr_get_addrstring(&candidate->addr, addr,
+                                         sizeof(addr))) {
       return;
     }
 
@@ -1098,21 +1087,12 @@ int nr_socket_local_create(void* obj, nr_transport_addr* addr,
 
   if (obj) {
     config = static_cast<NrIceCtx*>(obj)->GetProxyConfig();
-    bool ctx_proxy_only = static_cast<NrIceCtx*>(obj)->proxy_only();
-
-    if (ctx_proxy_only && !config) {
-      ABORT(R_FAILED);
-    }
   }
 
   r = NrSocketBase::CreateSocket(addr, &sock, config);
   if (r) {
     ABORT(r);
   }
-  // TODO(bug 1569183): This will start out false, and may become true once the
-  // socket class figures out whether a proxy needs to be used (this may be as
-  // late as when it establishes a connection).
-  addr->is_proxied = sock->IsProxied();
 
   r = nr_socket_create_int(static_cast<void*>(sock), sock->vtbl(), sockp);
   if (r) ABORT(r);

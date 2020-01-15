@@ -50,6 +50,13 @@ XPCOMUtils.defineLazyGetter(
   () => ExtensionParent.StartupCache
 );
 
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "treatWarningsAsErrors",
+  "extensions.webextensions.warnings-as-errors",
+  false
+);
+
 var EXPORTED_SYMBOLS = ["SchemaRoot", "Schemas"];
 
 const KEY_CONTENT_SCHEMAS = "extensions-framework/schemas/content";
@@ -1056,6 +1063,10 @@ const FORMATS = {
   contentSecurityPolicy(string, context) {
     let error = contentPolicyService.validateAddonCSP(string);
     if (error != null) {
+      // The SyntaxError raised below is not reported as part of the "choices" error message,
+      // we log the CSP validation error explicitly here to make it easier for the addon developers
+      // to see and fix the extension CSP.
+      context.logError(`Error processing ${context.currentTarget}: ${error}`);
       throw new SyntaxError(error);
     }
     return string;
@@ -1193,7 +1204,31 @@ class Entry {
       }
     }
 
-    context.logError(context.makeError(message, { warning: true }));
+    this.logWarning(context, message);
+  }
+
+  /**
+   * @param {Context} context
+   * @param {string} warningMessage
+   */
+  logWarning(context, warningMessage) {
+    let error = context.makeError(warningMessage, { warning: true });
+    context.logError(error);
+
+    if (treatWarningsAsErrors) {
+      // This pref is false by default, and true by default in tests to
+      // discourage the use of deprecated APIs in our unit tests.
+      // If a warning is an expected part of a test, temporarily set the pref
+      // to false, e.g. with the ExtensionTestUtils.failOnSchemaWarnings helper.
+      Services.console.logStringMessage(
+        "Treating warning as error because the preference " +
+          "extensions.webextensions.warnings-as-errors is set to true"
+      );
+      if (typeof error === "string") {
+        error = new Error(error);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1874,7 +1909,7 @@ class ObjectType extends Type {
 
     if (error) {
       if (onError == "warn") {
-        context.logError(forceString(error.error));
+        this.logWarning(context, forceString(error.error));
       } else if (onError != "ignore") {
         throw error;
       }
@@ -2172,7 +2207,7 @@ class ArrayType extends Type {
       );
       if (element.error) {
         if (this.onError == "warn") {
-          context.logError(forceString(element.error));
+          this.logWarning(context, forceString(element.error));
         } else if (this.onError != "ignore") {
           return element;
         }
@@ -3160,7 +3195,7 @@ class SchemaRoots extends Namespaces {
       return results[0];
     }
 
-    if (results.length > 0) {
+    if (results.length) {
       return new Namespaces(this.root, name, name.split("."), results);
     }
     return null;

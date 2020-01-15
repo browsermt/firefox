@@ -109,7 +109,8 @@ add_task(async function testContentBlockingMessage() {
   ]);
 
   info("Re-disable the warningGroup feature pref");
-  await toggleWarningGroupPreference(hud, false);
+  await toggleWarningGroupPreference(hud);
+  console.log("toggle successful");
   warningGroupMessage1 = await waitFor(() =>
     findMessage(hud, CONTENT_BLOCKING_GROUP_LABEL)
   );
@@ -139,7 +140,7 @@ add_task(async function testContentBlockingMessage() {
   await waitFor(() => findMessage(hud, "Navigated to"));
 
   info("Disable the warningGroup feature pref again");
-  await toggleWarningGroupPreference(hud, false);
+  await toggleWarningGroupPreference(hud);
 
   info("Add one warning message and one simple message");
   await waitFor(() => findMessage(hud, `${BLOCKED_URL}?4`));
@@ -163,7 +164,7 @@ add_task(async function testContentBlockingMessage() {
   info(
     "Enable the warningGroup feature pref to check that the group is still expanded"
   );
-  await toggleWarningGroupPreference(hud, false);
+  await toggleWarningGroupPreference(hud);
   await waitFor(() => findMessage(hud, CONTENT_BLOCKING_GROUP_LABEL));
 
   checkConsoleOutputForWarningGroup(hud, [
@@ -206,7 +207,7 @@ add_task(async function testContentBlockingMessage() {
   info(
     "Disable the warningGroup pref and check all warning messages are visible"
   );
-  await toggleWarningGroupPreference(hud, false);
+  await toggleWarningGroupPreference(hud);
   await waitFor(() => findMessage(hud, `${BLOCKED_URL}?6`));
 
   checkConsoleOutputForWarningGroup(hud, [
@@ -233,7 +234,7 @@ let cpt = 0;
  */
 function emitContentBlockedMessage(hud) {
   const url = `${BLOCKED_URL}?${++cpt}`;
-  ContentTask.spawn(gBrowser.selectedBrowser, url, function(innerURL) {
+  SpecialPowers.spawn(gBrowser.selectedBrowser, [url], function(innerURL) {
     content.wrappedJSObject.loadImage(innerURL);
   });
 }
@@ -246,7 +247,7 @@ function emitContentBlockedMessage(hud) {
  */
 function logString(hud, str) {
   const onMessage = waitForMessage(hud, str);
-  ContentTask.spawn(gBrowser.selectedBrowser, str, function(arg) {
+  SpecialPowers.spawn(gBrowser.selectedBrowser, [str], function(arg) {
     content.console.log(arg);
   });
   return onMessage;
@@ -260,39 +261,18 @@ function waitForBadgeNumber(message, expectedNumber) {
   );
 }
 
-/**
- *
- * @param {WebConsole} hud
- * @param {Boolean} fromUI: By default, we change the pref by going to the settings panel
- *                          and clicking the checkbox. If fromUI is set to false, we'll
- *                          change the pref through Services.prefs to speed-up things.
- */
-async function toggleWarningGroupPreference(hud, fromUI = true) {
-  if (!fromUI) {
-    await pushPref(
-      WARNING_GROUP_PREF,
-      !Services.prefs.getBoolPref(WARNING_GROUP_PREF)
-    );
-    return;
-  }
-
+async function toggleWarningGroupPreference(hud) {
   info("Open the settings panel");
   const observer = new PrefObserver("");
-  const toolbox = hud.toolbox;
-  const { panelDoc, panelWin } = await toolbox.selectTool("options");
 
   info("Change warning preference");
   const prefChanged = observer.once(WARNING_GROUP_PREF, () => {});
-  const checkbox = panelDoc.getElementById("webconsole-warning-groups");
 
-  // We use executeSoon here to ensure that the element is in view and clickable.
-  checkbox.scrollIntoView();
-  executeSoon(() => EventUtils.synthesizeMouseAtCenter(checkbox, {}, panelWin));
+  await toggleConsoleSetting(
+    hud,
+    ".webconsole-console-settings-menu-item-warning-groups"
+  );
 
   await prefChanged;
   observer.destroy();
-
-  // Switch back to the console as it won't update when it is in background
-  info("Go back to console");
-  await toolbox.selectTool("webconsole");
 }

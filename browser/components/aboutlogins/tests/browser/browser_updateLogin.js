@@ -15,7 +15,7 @@ add_task(async function setup() {
 
 add_task(async function test_show_logins() {
   let browser = gBrowser.selectedBrowser;
-  await ContentTask.spawn(browser, TEST_LOGIN1.guid, async loginGuid => {
+  await SpecialPowers.spawn(browser, [TEST_LOGIN1.guid], async loginGuid => {
     let loginList = Cu.waiveXrays(content.document.querySelector("login-list"));
     let loginFound = await ContentTaskUtils.waitForCondition(() => {
       return (
@@ -29,9 +29,9 @@ add_task(async function test_show_logins() {
 
 add_task(async function test_login_item() {
   let browser = gBrowser.selectedBrowser;
-  await ContentTask.spawn(
+  await SpecialPowers.spawn(
     browser,
-    LoginHelper.loginToVanillaObject(TEST_LOGIN1),
+    [LoginHelper.loginToVanillaObject(TEST_LOGIN1)],
     async login => {
       let loginList = Cu.waiveXrays(
         content.document.querySelector("login-list")
@@ -55,9 +55,8 @@ add_task(async function test_login_item() {
       let usernameInput = loginItem.shadowRoot.querySelector(
         "input[name='username']"
       );
-      let passwordInput = loginItem.shadowRoot.querySelector(
-        "input[name='password']"
-      );
+      let passwordInput = loginItem._passwordInput;
+      let passwordDisplayInput = loginItem._passwordDisplayInput;
 
       let editButton = loginItem.shadowRoot.querySelector(".edit-button");
 
@@ -106,11 +105,25 @@ add_task(async function test_login_item() {
         );
         is(
           passwordInput.value,
-          " ".repeat(login.password.length),
+          login.password,
           "Password change should be reverted"
         );
         is(
+          passwordDisplayInput.value,
+          " ".repeat(login.password.length),
+          "Password change should be reverted for display"
+        );
+        ok(
+          !passwordInput.hasAttribute("value"),
+          "Password shouldn't be exposed in @value"
+        );
+        is(
           passwordInput.style.width,
+          login.password.length + "ch",
+          "Password field width shouldn't have changed"
+        );
+        is(
+          passwordDisplayInput.style.width,
           login.password.length + "ch",
           "Password field width shouldn't have changed"
         );
@@ -140,8 +153,6 @@ add_task(async function test_login_item() {
       usernameInput.value += "-saveme";
       passwordInput.value += "-saveme";
 
-      // Cache the value since it will change upon leaving edit mode.
-      let passwordInputValue = passwordInput.value;
       ok(loginItem.dataset.editing, "LoginItem should be in 'edit' mode");
 
       let saveChangesButton = loginItem.shadowRoot.querySelector(
@@ -155,7 +166,7 @@ add_task(async function test_login_item() {
         return (
           updatedLogin &&
           updatedLogin.username == usernameInput.value &&
-          updatedLogin.password == passwordInputValue
+          updatedLogin.password == passwordInput.value
         );
       }, "Waiting for corresponding login in login list to update");
 
@@ -171,6 +182,11 @@ add_task(async function test_login_item() {
         passwordInput.style.width,
         passwordInput.value.length + "ch",
         "Password field width should be correctly updated"
+      );
+      is(
+        passwordDisplayInput.style.width,
+        passwordDisplayInput.value.length + "ch",
+        "Password display field width should be correctly updated"
       );
 
       editButton.click();

@@ -4,10 +4,11 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 %endif
 
+%filter substitution
+
 #identity-box {
-  padding-inline-start: 6px;
-  padding-inline-end: 6px;
-  margin-inline-end: 4px;
+  padding-inline: @identityBoxPaddingInline@;
+  margin-inline-end: @identityBoxMarginInlineEnd@;
 }
 
 #identity-box,
@@ -25,6 +26,7 @@
   padding-inline-start: 8px;
 }
 
+#urlbar.searchButton > #urlbar-input-container > #identity-box[pageproxystate="invalid"],
 #identity-box[pageproxystate="invalid"] > #permissions-granted-icon,
 #identity-box[pageproxystate="invalid"] > #blocked-permissions-container,
 #identity-box[pageproxystate="invalid"] > #notification-popup-box,
@@ -33,10 +35,8 @@
   display: none;
 }
 
-#identity-box[pageproxystate="invalid"] {
+#urlbar:not(.searchButton) > #urlbar-input-container > #identity-box[pageproxystate="invalid"] {
   pointer-events: none;
-  /* This would make the spaces around the glass icon balanced. */
-  margin-inline-end: 2px;
   -moz-user-focus: ignore;
 }
 
@@ -140,7 +140,7 @@
   list-style-image: url(chrome://branding/content/identity-icons-brand.svg);
 }
 
-#identity-box[pageproxystate="invalid"] > #identity-icon {
+#urlbar:not(.searchButton) > #urlbar-input-container > #identity-box[pageproxystate="invalid"] > #identity-icon {
   list-style-image: url(chrome://browser/skin/search-glass.svg);
   fill-opacity: .4;
 }
@@ -169,7 +169,8 @@
 #identity-box[pageproxystate="valid"].weakCipher > #identity-icon,
 #identity-box[pageproxystate="valid"].mixedDisplayContent > #identity-icon,
 #identity-box[pageproxystate="valid"].mixedDisplayContentLoadedActiveBlocked > #identity-icon,
-#identity-box[pageproxystate="valid"].certUserOverridden > #identity-icon {
+#identity-box[pageproxystate="valid"].certUserOverridden > #identity-icon,
+#identity-box[pageproxystate="valid"].certErrorPage > #identity-icon {
   list-style-image: url(chrome://browser/skin/connection-mixed-passive-loaded.svg);
   fill: unset;
 }
@@ -223,8 +224,7 @@
 /* TRACKING PROTECTION ICON */
 
 #tracking-protection-icon-container {
-  padding-inline-start: 6px;
-  padding-inline-end: 6px;
+  padding-inline: @identityBoxPaddingInline@;
   /* Separator */
   border-inline-end: 1px solid var(--urlbar-separator-color);
   border-image: linear-gradient(transparent 15%, var(--urlbar-separator-color) 15%, var(--urlbar-separator-color) 85%, transparent 85%);
@@ -250,6 +250,7 @@
 }
 
 #tracking-protection-icon-box > #tracking-protection-icon-animatable-box {
+  display: block;
   position: absolute;
   overflow: hidden;
   width: 16px;
@@ -257,6 +258,9 @@
 }
 
 #tracking-protection-icon-box:not([hasException])[active] #tracking-protection-icon-animatable-image {
+  /* Overrides the default 'display: -moz-box' to prevent icon shifting issue
+     with scaled text, see Bug 1591049 */
+  display: block;
   background-image: url(chrome://browser/skin/tracking-protection-animation.svg);
   transform: translateX(-256px);
   width: 272px;
@@ -264,16 +268,6 @@
   height: 16px;
   min-height: 16px;
   -moz-context-properties: fill, fill-opacity;
-}
-
-#tracking-protection-icon-box[hasException]::before {
-  background: url(chrome://browser/skin/badge-blue.svg);
-  content: "";
-  position: absolute;
-  bottom: 15px;
-  right: 0;
-  height: 14px;
-  width: 14px;
 }
 
 #tracking-protection-icon-box[hasException]:-moz-locale-dir(rtl)::before {

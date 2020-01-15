@@ -21,7 +21,7 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   // Wait for WS connection to be established + send messages
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.openConnection(1);
   });
 
@@ -32,7 +32,7 @@ add_task(async function() {
   EventUtils.sendMouseEvent({ type: "mousedown" }, requests[0]);
 
   // Wait for all sent/received messages to be displayed in DevTools
-  wait = waitForDOM(
+  const wait = waitForDOM(
     document,
     "#messages-panel .ws-frames-list-table .ws-frame-list-item",
     2
@@ -74,7 +74,7 @@ add_task(async function() {
   );
 
   // Close WS connection
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.closeConnection();
   });
 

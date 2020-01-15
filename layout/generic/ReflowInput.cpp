@@ -772,7 +772,7 @@ void ReflowInput::InitDynamicReflowRoot() {
   if (mFrame->IsFrameOfType(nsIFrame::eLineParticipant) ||
       nsStyleDisplay::IsRubyDisplayType(display) ||
       mFrameType == NS_CSS_FRAME_TYPE_INTERNAL_TABLE ||
-      display == StyleDisplay::Table || display == StyleDisplay::InlineTable ||
+      nsStyleDisplay::DisplayInside(display) == StyleDisplayInside::Table ||
       (mFrame->GetParent() && mFrame->GetParent()->IsXULBoxFrame())) {
     // We have a display type where 'width' and 'height' don't actually
     // set the width or height (i.e., the size depends on content).
@@ -1328,7 +1328,7 @@ void ReflowInput::CalculateHypotheticalPosition(
   // the element had been in the flow
   nscoord boxISize;
   bool knowBoxISize = false;
-  if ((StyleDisplay::Inline == mStyleDisplay->mOriginalDisplay) &&
+  if (mStyleDisplay->IsOriginalDisplayInlineOutside() &&
       !NS_FRAME_IS_REPLACED(mFrameType)) {
     // For non-replaced inline-level elements the 'inline size' property
     // doesn't apply, so we don't know what the inline size would have
@@ -2130,16 +2130,16 @@ LogicalSize ReflowInput::ComputeContainingBlockRectangle(
           aContainingBlockRI->ComputedLogicalPadding().BStartEnd(wm);
     }
   } else {
-    auto IsQuirky = [&](const StyleSize& aSize) -> bool {
-      return aSize.ConvertsToPercentage() &&
-             !aSize.AsLengthPercentage().was_calc;
+    auto IsQuirky = [](const StyleSize& aSize) -> bool {
+      return aSize.ConvertsToPercentage();
     };
     // an element in quirks mode gets a containing block based on looking for a
-    // parent with a non-auto height if the element has a percent height
-    // Note: We don't emulate this quirk for percents in calc() or in
-    // vertical writing modes.
+    // parent with a non-auto height if the element has a percent height.
+    // Note: We don't emulate this quirk for percents in calc(), or in vertical
+    // writing modes, or if the containing block is a flex or grid item.
     if (!wm.IsVertical() && NS_UNCONSTRAINEDSIZE == cbSize.BSize(wm)) {
       if (eCompatibility_NavQuirks == aPresContext->CompatibilityMode() &&
+          !aContainingBlockRI->mFrame->IsFlexOrGridItem() &&
           (IsQuirky(mStylePosition->mHeight) ||
            (mFrame->IsTableWrapperFrame() &&
             IsQuirky(mFrame->PrincipalChildList()
@@ -2183,6 +2183,11 @@ void ReflowInput::InitConstraints(
     nsPresContext* aPresContext, const Maybe<LogicalSize>& aContainingBlockSize,
     const nsMargin* aBorder, const nsMargin* aPadding,
     LayoutFrameType aFrameType) {
+  MOZ_ASSERT(
+      !IsFloating() || (mStyleDisplay->mDisplay != StyleDisplay::MozBox &&
+                        mStyleDisplay->mDisplay != StyleDisplay::MozInlineBox),
+      "Please don't try to float a -moz-box or a -moz-inline-box");
+
   WritingMode wm = GetWritingMode();
   LogicalSize cbSize = aContainingBlockSize.valueOr(
       LogicalSize(mWritingMode, NS_UNCONSTRAINEDSIZE, NS_UNCONSTRAINEDSIZE));
@@ -2271,7 +2276,8 @@ void ReflowInput::InitConstraints(
           // in quirks mode, get the cb height using the special quirk method
           if (!wm.IsVertical() &&
               eCompatibility_NavQuirks == aPresContext->CompatibilityMode()) {
-            if (!cbri->mFrame->IsTableCellFrame()) {
+            if (!cbri->mFrame->IsTableCellFrame() &&
+                !cbri->mFrame->IsFlexOrGridItem()) {
               cbSize.BSize(wm) = CalcQuirkContainingBlockHeight(cbri);
               if (cbSize.BSize(wm) == NS_UNCONSTRAINEDSIZE) {
                 isAutoBSize = true;
@@ -2379,10 +2385,15 @@ void ReflowInput::InitConstraints(
     } else {
       AutoMaybeDisableFontInflation an(mFrame);
 
-      bool isBlock = NS_CSS_FRAME_TYPE_BLOCK == NS_FRAME_GET_TYPE(mFrameType);
+      // Note: all flex and grid items are block-level, even if they have
+      // e.g. 'display:-moz-box' (which doesn't get NS_CSS_FRAME_TYPE_BLOCK).
+      const bool isBlockLevel =
+          NS_CSS_FRAME_TYPE_BLOCK == NS_FRAME_GET_TYPE(mFrameType) ||
+          mFrame->IsFlexOrGridItem();
       typedef nsIFrame::ComputeSizeFlags ComputeSizeFlags;
-      ComputeSizeFlags computeSizeFlags =
-          isBlock ? ComputeSizeFlags::eDefault : ComputeSizeFlags::eShrinkWrap;
+      ComputeSizeFlags computeSizeFlags = isBlockLevel
+                                              ? ComputeSizeFlags::eDefault
+                                              : ComputeSizeFlags::eShrinkWrap;
       if (mFlags.mIClampMarginBoxMinSize) {
         computeSizeFlags = ComputeSizeFlags(
             computeSizeFlags | ComputeSizeFlags::eIClampMarginBoxMinSize);
@@ -2430,7 +2441,7 @@ void ReflowInput::InitConstraints(
         // Make sure legend frames with display:block and width:auto still
         // shrink-wrap.
         // Also shrink-wrap blocks that are orthogonal to their container.
-        if (isBlock &&
+        if (isBlockLevel &&
             ((aFrameType == LayoutFrameType::Legend &&
               mFrame->Style()->GetPseudoType() !=
                   PseudoStyleType::scrolledContent) ||
@@ -2481,7 +2492,7 @@ void ReflowInput::InitConstraints(
 
       // Exclude inline tables, side captions, outside ::markers, flex and grid
       // items from block margin calculations.
-      if (isBlock && !IsSideCaption(mFrame, mStyleDisplay, cbwm) &&
+      if (isBlockLevel && !IsSideCaption(mFrame, mStyleDisplay, cbwm) &&
           mStyleDisplay->mDisplay != StyleDisplay::InlineTable &&
           !alignCB->IsFlexOrGridContainer() &&
           !(mFrame->Style()->GetPseudoType() == PseudoStyleType::marker &&
@@ -2653,8 +2664,9 @@ void ReflowInput::CalculateBlockSideMargins(LayoutFrameType aFrameType) {
   nscoord computedISizeCBWM = ComputedSize(cbWM).ISize(cbWM);
   if (computedISizeCBWM == NS_UNCONSTRAINEDSIZE) {
     // For orthogonal flows, where we found a parent orthogonal-limit
-    // for AvailableISize() in Init(), we'll use the same here as well.
-    computedISizeCBWM = availISizeCBWM;
+    // for AvailableISize() in Init(), we don't have meaningful sizes to
+    // adjust.  Act like the sum is already correct (below).
+    return;
   }
 
   LAYOUT_WARN_IF_FALSE(NS_UNCONSTRAINEDSIZE != computedISizeCBWM &&

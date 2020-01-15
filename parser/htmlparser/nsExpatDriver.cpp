@@ -25,6 +25,8 @@
 #include "nsXPCOMCIDInternal.h"
 #include "nsUnicharInputStream.h"
 #include "nsContentUtils.h"
+#include "mozilla/BasePrincipal.h"
+#include "mozilla/IntegerTypeTraits.h"
 #include "mozilla/NullPrincipal.h"
 
 #include "mozilla/Logging.h"
@@ -39,6 +41,10 @@ using mozilla::dom::Document;
 static const char16_t kUTF16[] = {'U', 'T', 'F', '-', '1', '6', '\0'};
 
 static mozilla::LazyLogModule gExpatDriverLog("expatdriver");
+
+// Use the same maximum tree depth as Chromium (see
+// https://chromium.googlesource.com/chromium/src/+/f464165c1dedff1c955d3c051c5a9a1c6a0e8f6b/third_party/WebKit/Source/core/xml/parser/XMLDocumentParser.cpp#85).
+static const uint16_t sMaxXMLTreeDepth = 5000;
 
 /***************************** EXPAT CALL BACKS ******************************/
 // The callback handlers that get called from the expat parser.
@@ -245,6 +251,7 @@ nsExpatDriver::nsExpatDriver()
       mIsFinalChunk(false),
       mInternalState(NS_OK),
       mExpatBuffered(0),
+      mTagDepth(0),
       mCatalogData(nullptr),
       mInnerWindowID(0) {}
 
@@ -272,6 +279,16 @@ void nsExpatDriver::HandleStartElement(void* aUserData, const char16_t* aName,
   }
 
   if (self->mSink) {
+    // We store the tagdepth in a PRUint16, so make sure the limit fits in a
+    // PRUint16.
+    static_assert(sMaxXMLTreeDepth <=
+                  std::numeric_limits<decltype(nsExpatDriver::mTagDepth)>::max());
+
+    if (++self->mTagDepth > sMaxXMLTreeDepth) {
+      self->MaybeStopParser(NS_ERROR_HTMLPARSER_HIERARCHYTOODEEP);
+      return;
+    }
+
     nsresult rv = self->mSink->HandleStartElement(
         aName, aAtts, attrArrayLength,
         XML_GetCurrentLineNumber(self->mExpatParser),
@@ -325,6 +342,7 @@ void nsExpatDriver::HandleEndElement(void* aUserData, const char16_t* aName) {
 
   if (self->mSink && self->mInternalState != NS_ERROR_HTMLPARSER_STOPPARSING) {
     nsresult rv = self->mSink->HandleEndElement(aName);
+    --self->mTagDepth;
     self->MaybeStopParser(rv);
   }
 }
@@ -638,33 +656,37 @@ nsresult nsExpatDriver::OpenInputStreamFromExternalDTD(const char16_t* aFPIStr,
                        nsContentUtils::GetSystemPrincipal(),
                        nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_DATA_IS_NULL,
                        nsIContentPolicy::TYPE_DTD);
+    NS_ENSURE_SUCCESS(rv, rv);
   } else {
     NS_ASSERTION(
         mSink == nsCOMPtr<nsIExpatSink>(do_QueryInterface(mOriginalSink)),
         "In nsExpatDriver::OpenInputStreamFromExternalDTD: "
         "mOriginalSink not the same object as mSink?");
     nsContentPolicyType policyType = nsIContentPolicy::TYPE_INTERNAL_DTD;
-    nsCOMPtr<nsIPrincipal> loadingPrincipal;
     if (mOriginalSink) {
       nsCOMPtr<Document> doc;
       doc = do_QueryInterface(mOriginalSink->GetTarget());
       if (doc) {
-        loadingPrincipal = doc->NodePrincipal();
         if (doc->SkipDTDSecurityChecks()) {
           policyType = nsIContentPolicy::TYPE_INTERNAL_FORCE_ALLOWED_DTD;
         }
+        rv = NS_NewChannel(getter_AddRefs(channel), uri, doc,
+                           nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_DATA_INHERITS |
+                               nsILoadInfo::SEC_ALLOW_CHROME,
+                           policyType);
+        NS_ENSURE_SUCCESS(rv, rv);
       }
     }
-    if (!loadingPrincipal) {
-      loadingPrincipal =
+    if (!channel) {
+      nsCOMPtr<nsIPrincipal> nullPrincipal =
           mozilla::NullPrincipal::CreateWithoutOriginAttributes();
+      rv = NS_NewChannel(getter_AddRefs(channel), uri, nullPrincipal,
+                         nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_DATA_INHERITS |
+                             nsILoadInfo::SEC_ALLOW_CHROME,
+                         policyType);
+      NS_ENSURE_SUCCESS(rv, rv);
     }
-    rv = NS_NewChannel(getter_AddRefs(channel), uri, loadingPrincipal,
-                       nsILoadInfo::SEC_ALLOW_CROSS_ORIGIN_DATA_INHERITS |
-                           nsILoadInfo::SEC_ALLOW_CHROME,
-                       policyType);
   }
-  NS_ENSURE_SUCCESS(rv, rv);
 
   nsAutoCString absURL;
   rv = uri->GetSpec(absURL);
@@ -679,12 +701,13 @@ static nsresult CreateErrorText(const char16_t* aDescription,
                                 const char16_t* aSourceURL,
                                 const uint32_t aLineNumber,
                                 const uint32_t aColNumber,
-                                nsString& aErrorString) {
+                                nsString& aErrorString, bool spoofEnglish) {
   aErrorString.Truncate();
 
   nsAutoString msg;
   nsresult rv = nsParserMsgUtils::GetLocalizedStringByName(
-      XMLPARSER_PROPERTIES, "XMLParsingError", msg);
+      spoofEnglish ? XMLPARSER_PROPERTIES_en_US : XMLPARSER_PROPERTIES,
+      "XMLParsingError", msg);
   NS_ENSURE_SUCCESS(rv, rv);
 
   // XML Parsing Error: %1$S\nLocation: %2$S\nLine Number %3$u, Column %4$u:
@@ -725,8 +748,15 @@ nsresult nsExpatDriver::HandleError() {
   // Map Expat error code to an error string
   // XXX Deal with error returns.
   nsAutoString description;
-  nsParserMsgUtils::GetLocalizedStringByID(XMLPARSER_PROPERTIES, code,
-                                           description);
+  nsCOMPtr<Document> doc;
+  if (mOriginalSink) {
+    doc = do_QueryInterface(mOriginalSink->GetTarget());
+  }
+  bool spoofEnglish =
+      nsContentUtils::SpoofLocaleEnglish() && (!doc || !doc->AllowsL10n());
+  nsParserMsgUtils::GetLocalizedStringByID(
+      spoofEnglish ? XMLPARSER_PROPERTIES_en_US : XMLPARSER_PROPERTIES, code,
+      description);
 
   if (code == XML_ERROR_TAG_MISMATCH) {
     /**
@@ -762,8 +792,9 @@ nsresult nsExpatDriver::HandleError() {
     tagName.Append(nameStart, (nameEnd ? nameEnd : pos) - nameStart);
 
     nsAutoString msg;
-    nsParserMsgUtils::GetLocalizedStringByName(XMLPARSER_PROPERTIES, "Expected",
-                                               msg);
+    nsParserMsgUtils::GetLocalizedStringByName(
+        spoofEnglish ? XMLPARSER_PROPERTIES_en_US : XMLPARSER_PROPERTIES,
+        "Expected", msg);
 
     // . Expected: </%S>.
     nsAutoString message;
@@ -777,7 +808,7 @@ nsresult nsExpatDriver::HandleError() {
 
   nsAutoString errorText;
   CreateErrorText(description.get(), XML_GetBase(mExpatParser), lineNumber,
-                  colNumber, errorText);
+                  colNumber, errorText, spoofEnglish);
 
   nsAutoString sourceText(mLastLine);
   AppendErrorPointer(colNumber, mLastLine.get(), sourceText);

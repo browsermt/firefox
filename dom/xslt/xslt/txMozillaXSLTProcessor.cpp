@@ -6,11 +6,8 @@
 #include "txMozillaXSLTProcessor.h"
 #include "nsContentCID.h"
 #include "nsError.h"
-#include "nsIChannel.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/Document.h"
-#include "nsIIOService.h"
-#include "nsILoadGroup.h"
 #include "nsIStringBundle.h"
 #include "nsIURI.h"
 #include "nsMemory.h"
@@ -27,7 +24,6 @@
 #include "jsapi.h"
 #include "txExprParser.h"
 #include "nsErrorService.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsJSUtils.h"
 #include "nsIXPConnect.h"
 #include "nsVariant.h"
@@ -1099,7 +1095,7 @@ DocGroup* txMozillaXSLTProcessor::GetDocGroup() const {
 
 /* static */
 already_AddRefed<txMozillaXSLTProcessor> txMozillaXSLTProcessor::Constructor(
-    const GlobalObject& aGlobal, mozilla::ErrorResult& aRv) {
+    const GlobalObject& aGlobal) {
   RefPtr<txMozillaXSLTProcessor> processor =
       new txMozillaXSLTProcessor(aGlobal.GetAsSupports());
   return processor.forget();

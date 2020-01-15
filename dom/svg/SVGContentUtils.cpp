@@ -239,7 +239,7 @@ static DashState GetStrokeDashData(
   // We can only return eNoStroke if the value of stroke-linecap isn't
   // adding caps to zero length dashes.
   if (totalLengthOfDashes <= 0 &&
-      aStyleSVG->mStrokeLinecap == NS_STYLE_STROKE_LINECAP_BUTT) {
+      aStyleSVG->mStrokeLinecap == StyleStrokeLinecap::Butt) {
     return eNoStroke;
   }
 
@@ -304,13 +304,13 @@ void SVGContentUtils::GetStrokeOptions(AutoStrokeOptions* aStrokeOptions,
       aStrokeOptions->mLineCap = CapStyle::BUTT;
     } else {
       switch (styleSVG->mStrokeLinecap) {
-        case NS_STYLE_STROKE_LINECAP_BUTT:
+        case StyleStrokeLinecap::Butt:
           aStrokeOptions->mLineCap = CapStyle::BUTT;
           break;
-        case NS_STYLE_STROKE_LINECAP_ROUND:
+        case StyleStrokeLinecap::Round:
           aStrokeOptions->mLineCap = CapStyle::ROUND;
           break;
-        case NS_STYLE_STROKE_LINECAP_SQUARE:
+        case StyleStrokeLinecap::Square:
           aStrokeOptions->mLineCap = CapStyle::SQUARE;
           break;
       }
@@ -809,10 +809,13 @@ float SVGContentUtils::CoordToFloat(SVGElement* aContent,
     SVGViewportElement* ctx = aContent->GetCtx();
     return CSSCoord(ctx ? ctx->GetLength(SVGContentUtils::XY) : 0.0f);
   });
-  if (aLength.clamping_mode == StyleAllowedNumericType::NonNegative) {
-    result = std::max(result, 0.0f);
-  } else {
-    MOZ_ASSERT(aLength.clamping_mode == StyleAllowedNumericType::All);
+  if (aLength.IsCalc()) {
+    auto& calc = aLength.AsCalc();
+    if (calc.clamping_mode == StyleAllowedNumericType::NonNegative) {
+      result = std::max(result, 0.0f);
+    } else {
+      MOZ_ASSERT(calc.clamping_mode == StyleAllowedNumericType::All);
+    }
   }
   return result;
 }
@@ -830,7 +833,7 @@ already_AddRefed<gfx::Path> SVGContentUtils::GetPath(
   RefPtr<PathBuilder> builder =
       drawTarget->CreatePathBuilder(FillRule::FILL_WINDING);
 
-  return pathData.BuildPath(builder, NS_STYLE_STROKE_LINECAP_BUTT, 1);
+  return pathData.BuildPath(builder, StyleStrokeLinecap::Butt, 1);
 }
 
 bool SVGContentUtils::ShapeTypeHasNoCorners(const nsIContent* aContent) {

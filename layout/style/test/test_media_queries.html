@@ -40,7 +40,7 @@ function run() {
 
   function query_applies(q) {
     style.setAttribute("media", q);
-    return body_cs.getPropertyValue("text-decoration") == "underline";
+    return body_cs.getPropertyValue("text-decoration-line") == "underline";
   }
 
   function should_apply(q) {
@@ -145,7 +145,8 @@ function run() {
     var ser2 = style.sheet.media.mediaText;
     is(ser2, ser1, "parse+serialize of '" + q + "' should be idempotent");
     if (test_application) {
-      let applies = body_cs.getPropertyValue("text-decoration") == "underline";
+      let applies = body_cs.getPropertyValue("text-decoration-line") ==
+                    "underline";
       is(applies, expected_to_apply,
          "Media query '" + q + "' should " + (expected_to_apply ? "" : "NOT ") +
          "apply after serialize + reparse");
@@ -171,7 +172,7 @@ function run() {
                      "serialization");
       if (test_application) {
         let applies = clonewin.getComputedStyle(clonedoc.body).
-                        textDecoration == "underline";
+                        textDecorationLine == "underline";
         is(applies, expected_to_apply,
            "Media query '" + q + "' should " + (expected_to_apply ? "" : "NOT ") +
            "apply after cloning");
@@ -717,7 +718,6 @@ function run() {
   expression_should_not_be_parseable("-moz-gtk-csd-maximize-button");
   expression_should_not_be_parseable("-moz-gtk-csd-close-button");
   expression_should_not_be_parseable("-moz-gtk-csd-reversed-placement");
-  expression_should_be_parseable("-moz-touch-enabled");
 
   expression_should_not_be_parseable("-moz-scrollbar-start-backward: 0");
   expression_should_not_be_parseable("-moz-scrollbar-start-forward: 0");
@@ -740,7 +740,6 @@ function run() {
   expression_should_not_be_parseable("-moz-gtk-csd-maximize-button: 0");
   expression_should_not_be_parseable("-moz-gtk-csd-close-button: 0");
   expression_should_not_be_parseable("-moz-gtk-csd-reversed-placement: 0");
-  expression_should_be_parseable("-moz-touch-enabled: 0");
 
   expression_should_not_be_parseable("-moz-scrollbar-start-backward: 1");
   expression_should_not_be_parseable("-moz-scrollbar-start-forward: 1");
@@ -763,7 +762,6 @@ function run() {
   expression_should_not_be_parseable("-moz-gtk-csd-maximize-button: 1");
   expression_should_not_be_parseable("-moz-gtk-csd-close-button: 1");
   expression_should_not_be_parseable("-moz-gtk-csd-reversed-placement: 1");
-  expression_should_be_parseable("-moz-touch-enabled: 1");
 
   expression_should_not_be_parseable("-moz-scrollbar-start-backward: -1");
   expression_should_not_be_parseable("-moz-scrollbar-start-forward: -1");
@@ -816,6 +814,15 @@ function run() {
   expression_should_not_be_parseable("-moz-os-version: windows-win8");
   expression_should_not_be_parseable("-moz-os-version: windows-win10");
   expression_should_not_be_parseable("-moz-os-version: ");
+
+  {
+    let should_be_parseable_if_enabled = SpecialPowers.getBoolPref('layout.css.moz-touch-enabled.enabled')
+      ? expression_should_be_parseable
+      : expression_should_not_be_parseable;
+    should_be_parseable_if_enabled("-moz-touch-enabled");
+    should_be_parseable_if_enabled("-moz-touch-enabled: 0");
+    should_be_parseable_if_enabled("-moz-touch-enabled: 1");
+  }
 
   // OpenType SVG media features
   query_should_not_be_parseable("(-moz-is-glyph)");

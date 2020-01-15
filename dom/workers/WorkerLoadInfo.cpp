@@ -89,6 +89,7 @@ WorkerLoadInfoData::WorkerLoadInfoData()
       mReportCSPViolations(false),
       mXHRParamsAllowed(false),
       mPrincipalIsSystem(false),
+      mPrincipalIsAddonOrExpandedAddon(false),
       mWatchedByDevtools(false),
       mStorageAccess(StorageAccess::eDeny),
       mFirstPartyStorageAccessGranted(false),
@@ -103,7 +104,9 @@ nsresult WorkerLoadInfo::SetPrincipalsAndCSPOnMainThread(
 
   mPrincipal = aPrincipal;
   mStoragePrincipal = aStoragePrincipal;
-  mPrincipalIsSystem = nsContentUtils::IsSystemPrincipal(aPrincipal);
+  mPrincipalIsSystem = aPrincipal->IsSystemPrincipal();
+  mPrincipalIsAddonOrExpandedAddon =
+      aPrincipal->GetIsAddonOrExpandedAddonPrincipal();
 
   mCSP = aCsp;
 
@@ -190,8 +193,8 @@ nsresult WorkerLoadInfo::GetPrincipalsAndLoadGroupFromChannel(
   // mPrincipalIsSystem to true in WorkerPrivate::GetLoadInfo()). Otherwise
   // this channel principal must be same origin with the load principal (we
   // check again here in case redirects changed the location of the script).
-  if (nsContentUtils::IsSystemPrincipal(mLoadingPrincipal)) {
-    if (!nsContentUtils::IsSystemPrincipal(channelPrincipal)) {
+  if (mLoadingPrincipal->IsSystemPrincipal()) {
+    if (!channelPrincipal->IsSystemPrincipal()) {
       nsCOMPtr<nsIURI> finalURI;
       rv = NS_GetFinalChannelURI(aChannel, getter_AddRefs(finalURI));
       NS_ENSURE_SUCCESS(rv, rv);

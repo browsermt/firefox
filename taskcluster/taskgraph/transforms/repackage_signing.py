@@ -14,7 +14,6 @@ from taskgraph.transforms.base import TransformSequence
 from taskgraph.util.attributes import copy_attributes_from_dependent_job
 from taskgraph.util.scriptworker import (
     get_signing_cert_scope_per_platform,
-    get_worker_type_for_scope,
 )
 from taskgraph.transforms.task import task_description_schema
 from voluptuous import Required, Optional
@@ -28,9 +27,9 @@ repackage_signing_description_schema = schema.extend({
 })
 
 SIGNING_FORMATS = {
-    "target.installer.exe": ["sha2signcode"],
-    "target.stub-installer.exe": ["sha2signcodestub"],
-    "target.installer.msi": ["sha2signcode"],
+    "target.installer.exe": ["autograph_authenticode"],
+    "target.stub-installer.exe": ["autograph_authenticode_stub"],
+    "target.installer.msi": ["autograph_authenticode"],
 }
 
 transforms = TransformSequence()
@@ -108,7 +107,7 @@ def make_repackage_signing_description(config, jobs):
         task = {
             'label': label,
             'description': description,
-            'worker-type': get_worker_type_for_scope(config, signing_cert_scope),
+            'worker-type': 'linux-signing',
             'worker': {'implementation': 'scriptworker-signing',
                        'upstream-artifacts': upstream_artifacts,
                        'max-run-time': 3600},

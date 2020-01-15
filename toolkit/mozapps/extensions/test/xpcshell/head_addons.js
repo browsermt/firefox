@@ -15,7 +15,6 @@ if (!_TEST_FILE[0].includes("toolkit/mozapps/extensions/test/xpcshell/")) {
 const PREF_EM_CHECK_UPDATE_SECURITY = "extensions.checkUpdateSecurity";
 const PREF_EM_STRICT_COMPATIBILITY = "extensions.strictCompatibility";
 const PREF_GETADDONS_BYIDS = "extensions.getAddons.get.url";
-const PREF_COMPAT_OVERRIDES = "extensions.getAddons.compatOverides.url";
 const PREF_XPI_SIGNATURES_REQUIRED = "xpinstall.signatures.required";
 
 const PREF_DISABLE_SECURITY =
@@ -784,6 +783,7 @@ class EventChecker {
   constructor(options) {
     this.expectedEvents = options.addonEvents || {};
     this.expectedInstalls = options.installEvents || null;
+    this.ignorePlugins = options.ignorePlugins || false;
 
     this.finished = new Promise(resolve => {
       this.resolveFinished = resolve;
@@ -874,7 +874,7 @@ class EventChecker {
     }
 
     let events = this.expectedEvents[aId];
-    Assert.ok(events.length > 0, `Should be expecting events for ${aId}`);
+    Assert.ok(!!events.length, `Should be expecting events for ${aId}`);
 
     return events.shift();
   }
@@ -986,6 +986,15 @@ class EventChecker {
 
   // Install listener events.
   checkInstall(event, install, details = {}) {
+    // Lazy initialization of the plugin host means we can get spurious
+    // install events for plugins. If we're not looking for plugin
+    // installs, ignore them completely. If we *are* looking for plugin
+    // installs, the onus is on the individual test to ensure it waits
+    // for the plugin host to have done its initial work.
+    if (this.ignorePlugins && install.type == "plugin") {
+      info(`Ignoring install event for plugin ${install.id}`);
+      return undefined;
+    }
     info(`Got install event "${event}"`);
 
     let expected = this.expectedInstalls.shift();
@@ -1084,6 +1093,10 @@ class EventChecker {
   }
 
   onExternalInstall(addon, existingAddon, requiresRestart) {
+    if (this.ignorePlugins && addon.type == "plugin") {
+      info(`Ignoring install event for plugin ${addon.id}`);
+      return undefined;
+    }
     let expected = this.expectedInstalls.shift();
     Assert.ok(expected, "Should be expecting install event");
 

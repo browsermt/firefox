@@ -48,7 +48,6 @@
 #include "nsInterfaceHashtable.h"
 #include "nsIObjectInputStream.h"
 #include "nsIObjectOutputStream.h"
-#include "nsISimpleEnumerator.h"
 #include "nsNetUtil.h"
 #include "nsRefPtrHashtable.h"
 #include "ReportInternalError.h"
@@ -264,6 +263,11 @@ const uint32_t kShadowMaxWALSize = 512 * 1024;
 const uint32_t kShadowJournalSizeLimit = kShadowMaxWALSize * 3;
 
 /**
+ * Automatically kill database actors if LocalStorage shutdown takes this long.
+ */
+#define SHUTDOWN_FORCE_KILL_TIMEOUT_MS 5000
+
+/**
  * Automatically crash the browser if LocalStorage shutdown takes this long.
  * We've chosen a value that is longer than the value for QuotaManager shutdown
  * timer which is currently set to 30 seconds.  We've also chosen a value that
@@ -275,7 +279,7 @@ const uint32_t kShadowJournalSizeLimit = kShadowMaxWALSize * 3;
  * value is less than 60 seconds which is used by nsTerminator to crash a hung
  * main process.
  */
-#define SHUTDOWN_TIMEOUT_MS 50000
+#define SHUTDOWN_FORCE_CRASH_TIMEOUT_MS 45000
 
 bool IsOnConnectionThread();
 
@@ -1402,7 +1406,7 @@ class Connection final {
   class CachedStatement;
 
  private:
-  class InitOriginHelper;
+  class InitStorageAndOriginHelper;
 
   class FlushOp;
   class CloseOp;
@@ -1548,16 +1552,16 @@ class Connection::CachedStatement final {
 };
 
 /**
- * Helper to invoke EnsureOriginIsInitialized on the QuotaManager IO thread from
- * the LocalStorage connection thread when creating a database connection on
- * demand. This is necessary because we attempt to defer the creation of the
- * origin directory and the database until absolutely needed, but the directory
- * creation and origin initialization must happen on the QM IO thread for
- * invariant reasons. (We can't just use a mutex because there could be logic on
- * the IO thread that also wants to deal with the same origin, so we need to
- * queue a runnable and wait our turn.)
+ * Helper to invoke EnsureStorageAndOriginIsInitialized on the QuotaManager IO
+ * thread from the LocalStorage connection thread when creating a database
+ * connection on demand. This is necessary because we attempt to defer the
+ * creation of the origin directory and the database until absolutely needed,
+ * but the directory creation and origin initialization must happen on the QM
+ * IO thread for invariant reasons. (We can't just use a mutex because there
+ * could be logic on the IO thread that also wants to deal with the same
+ * origin, so we need to queue a runnable and wait our turn.)
  */
-class Connection::InitOriginHelper final : public Runnable {
+class Connection::InitStorageAndOriginHelper final : public Runnable {
   mozilla::Monitor mMonitor;
   const nsCString mSuffix;
   const nsCString mGroup;
@@ -1567,10 +1571,11 @@ class Connection::InitOriginHelper final : public Runnable {
   bool mWaiting;
 
  public:
-  InitOriginHelper(const nsACString& aSuffix, const nsACString& aGroup,
-                   const nsACString& aOrigin)
-      : Runnable("dom::localstorage::Connection::InitOriginHelper"),
-        mMonitor("InitOriginHelper::mMonitor"),
+  InitStorageAndOriginHelper(const nsACString& aSuffix,
+                             const nsACString& aGroup,
+                             const nsACString& aOrigin)
+      : Runnable("dom::localstorage::Connection::InitStorageAndOriginHelper"),
+        mMonitor("InitStorageAndOriginHelper::mMonitor"),
         mSuffix(aSuffix),
         mGroup(aGroup),
         mOrigin(aOrigin),
@@ -1582,7 +1587,7 @@ class Connection::InitOriginHelper final : public Runnable {
   nsresult BlockAndReturnOriginDirectoryPath(nsAString& aOriginDirectoryPath);
 
  private:
-  ~InitOriginHelper() {}
+  ~InitStorageAndOriginHelper() {}
 
   nsresult RunOnIOThread();
 
@@ -1805,6 +1810,8 @@ class Datastore final
 
   void NoteChangedObserverArray(const nsTArray<Observer*>& aObservers);
 
+  void Stringify(nsACString& aResult) const;
+
   NS_INLINE_DECL_REFCOUNTING(Datastore)
 
  private:
@@ -1960,6 +1967,10 @@ class Database final
   }
 
   void RequestAllowToClose();
+
+  void ForceKill();
+
+  void Stringify(nsACString& aResult) const;
 
   NS_INLINE_DECL_REFCOUNTING(mozilla::dom::Database)
 
@@ -2261,9 +2272,13 @@ class LSRequestBase : public DatastoreOperationBase,
                 const LSRequestParams& aParams,
                 const Maybe<ContentParentId>& aContentParentId);
 
-  void StringifyState(nsCString& aResult) const;
-
   void Dispatch();
+
+  void StringifyState(nsACString& aResult) const;
+
+  virtual void Stringify(nsACString& aResult) const;
+
+  virtual void Log();
 
  protected:
   ~LSRequestBase() override;
@@ -2275,10 +2290,6 @@ class LSRequestBase : public DatastoreOperationBase,
   virtual void GetResponse(LSRequestResponse& aResponse) = 0;
 
   virtual void Cleanup() {}
-
-  void LogState();
-
-  virtual void LogNestedState() {}
 
  private:
   bool VerifyRequestParams();
@@ -2414,8 +2425,6 @@ class PrepareDatastoreOp
     return mOrigin;
   }
 
-  void StringifyNestedState(nsCString& aResult) const;
-
   bool RequestedDirectoryLock() const {
     AssertIsOnOwningThread();
 
@@ -2427,6 +2436,12 @@ class PrepareDatastoreOp
 
     mInvalidated = true;
   }
+
+  void StringifyNestedState(nsACString& aResult) const;
+
+  void Stringify(nsACString& aResult) const override;
+
+  void Log() override;
 
  private:
   ~PrepareDatastoreOp() override;
@@ -2476,8 +2491,6 @@ class PrepareDatastoreOp
   void ConnectionClosedCallback();
 
   void CleanupMetadata();
-
-  void LogNestedState() override;
 
   NS_DECL_ISUPPORTS_INHERITED
 
@@ -3143,23 +3156,48 @@ void ClientValidationPrefChangedCallback(const char* aPrefName,
 }
 
 template <typename P>
-void RequestAllowToCloseIf(P aPredicate) {
+void CollectDatabases(P aPredicate, nsTArray<RefPtr<Database>>& aDatabases) {
   AssertIsOnBackgroundThread();
 
   if (!gLiveDatabases) {
     return;
   }
 
-  nsTArray<RefPtr<Database>> databases;
-
-  for (Database* database : *gLiveDatabases) {
+  for (const auto& database : *gLiveDatabases) {
     if (aPredicate(database)) {
-      databases.AppendElement(database);
+      aDatabases.AppendElement(database);
     }
   }
+}
 
-  for (Database* database : databases) {
+template <typename P>
+void RequestAllowToCloseIf(P aPredicate) {
+  AssertIsOnBackgroundThread();
+
+  nsTArray<RefPtr<Database>> databases;
+
+  CollectDatabases(aPredicate, databases);
+
+  for (const auto& database : databases) {
+    MOZ_ASSERT(database);
+
     database->RequestAllowToClose();
+  }
+
+  databases.Clear();
+}
+
+void ForceKillDatabases() {
+  AssertIsOnBackgroundThread();
+
+  nsTArray<RefPtr<Database>> databases;
+
+  CollectDatabases([](const Database* const) { return true; }, databases);
+
+  for (const auto& database : databases) {
+    MOZ_ASSERT(database);
+
+    database->ForceKill();
   }
 
   databases.Clear();
@@ -3314,7 +3352,7 @@ bool RecvPBackgroundLSDatabaseConstructor(PBackgroundLSDatabaseParent* aActor,
   // registered as a subprotocol).
   // ActorDestroy will be called if we fail here.
 
-  nsAutoPtr<PreparedDatastore> preparedDatastore;
+  mozilla::UniquePtr<PreparedDatastore> preparedDatastore;
   gPreparedDatastores->Remove(aDatastoreId, &preparedDatastore);
   MOZ_ASSERT(preparedDatastore);
 
@@ -3613,7 +3651,7 @@ void DatastoreWriteOptimizer::ApplyAndReset(
     LSItemInfo& item = aOrderedItems[index];
 
     if (auto entry = mWriteInfos.Lookup(item.key())) {
-      WriteInfo* writeInfo = entry.Data();
+      WriteInfo* writeInfo = entry.Data().get();
 
       switch (writeInfo->GetType()) {
         case WriteInfo::DeleteItem:
@@ -3628,7 +3666,7 @@ void DatastoreWriteOptimizer::ApplyAndReset(
             // about the UpdateWithMove flag.
 
             aOrderedItems.RemoveElementAt(index);
-            entry.Data() = new InsertItemInfo(updateItemInfo->SerialNumber(),
+            entry.Data() = MakeUnique<InsertItemInfo>(updateItemInfo->SerialNumber(),
                                               updateItemInfo->GetKey(),
                                               updateItemInfo->GetValue());
           } else {
@@ -3686,7 +3724,7 @@ nsresult ConnectionWriteOptimizer::Perform(Connection* aConnection,
   }
 
   for (auto iter = mWriteInfos.ConstIter(); !iter.Done(); iter.Next()) {
-    WriteInfo* writeInfo = iter.Data();
+    WriteInfo* writeInfo = iter.Data().get();
 
     switch (writeInfo->GetType()) {
       case WriteInfo::InsertItem:
@@ -4227,8 +4265,8 @@ nsresult Connection::EnsureStorageConnection() {
     return NS_OK;
   }
 
-  RefPtr<InitOriginHelper> helper =
-      new InitOriginHelper(mSuffix, mGroup, mOrigin);
+  RefPtr<InitStorageAndOriginHelper> helper =
+      new InitStorageAndOriginHelper(mSuffix, mGroup, mOrigin);
 
   nsString originDirectoryPath;
   rv = helper->BlockAndReturnOriginDirectoryPath(originDirectoryPath);
@@ -4514,7 +4552,8 @@ void Connection::CachedStatement::Assign(
   }
 }
 
-nsresult Connection::InitOriginHelper::BlockAndReturnOriginDirectoryPath(
+nsresult
+Connection::InitStorageAndOriginHelper::BlockAndReturnOriginDirectoryPath(
     nsAString& aOriginDirectoryPath) {
   AssertIsOnConnectionThread();
 
@@ -4537,16 +4576,16 @@ nsresult Connection::InitOriginHelper::BlockAndReturnOriginDirectoryPath(
   return NS_OK;
 }
 
-nsresult Connection::InitOriginHelper::RunOnIOThread() {
+nsresult Connection::InitStorageAndOriginHelper::RunOnIOThread() {
   AssertIsOnIOThread();
 
   QuotaManager* quotaManager = QuotaManager::Get();
   MOZ_ASSERT(quotaManager);
 
   nsCOMPtr<nsIFile> directoryEntry;
-  nsresult rv = quotaManager->EnsureOriginIsInitialized(
+  nsresult rv = quotaManager->EnsureStorageAndOriginIsInitialized(
       PERSISTENCE_TYPE_DEFAULT, mSuffix, mGroup, mOrigin,
-      getter_AddRefs(directoryEntry));
+      mozilla::dom::quota::Client::LS, getter_AddRefs(directoryEntry));
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }
@@ -4560,7 +4599,7 @@ nsresult Connection::InitOriginHelper::RunOnIOThread() {
 }
 
 NS_IMETHODIMP
-Connection::InitOriginHelper::Run() {
+Connection::InitStorageAndOriginHelper::Run() {
   AssertIsOnIOThread();
 
   nsresult rv = RunOnIOThread();
@@ -5402,6 +5441,49 @@ void Datastore::NoteChangedObserverArray(
   }
 }
 
+void Datastore::Stringify(nsACString& aResult) const {
+  AssertIsOnBackgroundThread();
+
+  aResult.AppendLiteral("DirectoryLock:");
+  aResult.AppendInt(!!mDirectoryLock);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Connection:");
+  aResult.AppendInt(!!mConnection);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("QuotaObject:");
+  aResult.AppendInt(!!mQuotaObject);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("PrepareDatastoreOps:");
+  aResult.AppendInt(mPrepareDatastoreOps.Count());
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("PreparedDatastores:");
+  aResult.AppendInt(mPreparedDatastores.Count());
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Databases:");
+  aResult.AppendInt(mDatabases.Count());
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("ActiveDatabases:");
+  aResult.AppendInt(mActiveDatabases.Count());
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Origin:");
+  aResult.Append(AnonymizedOriginString(mOrigin));
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("PrivateBrowsingId:");
+  aResult.AppendInt(mPrivateBrowsingId);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Closed:");
+  aResult.AppendInt(mClosed);
+}
+
 bool Datastore::UpdateUsage(int64_t aDelta) {
   AssertIsOnBackgroundThread();
 
@@ -5515,11 +5597,8 @@ void Datastore::NotifySnapshots(Database* aDatabase, const nsAString& aKey,
 void PreparedDatastore::Destroy() {
   AssertIsOnBackgroundThread();
   MOZ_ASSERT(gPreparedDatastores);
-  MOZ_ASSERT(gPreparedDatastores->Get(mDatastoreId));
-
-  nsAutoPtr<PreparedDatastore> preparedDatastore;
-  gPreparedDatastores->Remove(mDatastoreId, &preparedDatastore);
-  MOZ_ASSERT(preparedDatastore);
+  DebugOnly<bool> removed = gPreparedDatastores->Remove(mDatastoreId);
+  MOZ_ASSERT(removed);
 }
 
 // static
@@ -5624,6 +5703,48 @@ void Database::RequestAllowToClose() {
     // registered snapshot.
     AllowToClose();
   }
+}
+
+void Database::ForceKill() {
+  AssertIsOnBackgroundThread();
+
+  if (mActorDestroyed) {
+    MOZ_ASSERT(mAllowedToClose);
+    return;
+  }
+
+  Unused << PBackgroundLSDatabaseParent::Send__delete__(this);
+}
+
+void Database::Stringify(nsACString& aResult) const {
+  AssertIsOnBackgroundThread();
+
+  aResult.AppendLiteral("SnapshotRegistered:");
+  aResult.AppendInt(!!mSnapshot);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("OtherProcessActor:");
+  aResult.AppendInt(BackgroundParent::IsOtherProcessActor(Manager()));
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Origin:");
+  aResult.Append(AnonymizedOriginString(mOrigin));
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("PrivateBrowsingId:");
+  aResult.AppendInt(mPrivateBrowsingId);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("AllowedToClose:");
+  aResult.AppendInt(mAllowedToClose);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("ActorDestroyed:");
+  aResult.AppendInt(mActorDestroyed);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("RequestedAllowToClose:");
+  aResult.AppendInt(mRequestedAllowToClose);
 }
 
 void Database::AllowToClose() {
@@ -6327,43 +6448,6 @@ LSRequestBase::~LSRequestBase() {
                 mState == State::Initial || mState == State::Completed);
 }
 
-void LSRequestBase::StringifyState(nsCString& aResult) const {
-  AssertIsOnOwningThread();
-
-  switch (mState) {
-    case State::Initial:
-      aResult.AssignLiteral("Initial");
-      return;
-
-    case State::StartingRequest:
-      aResult.AssignLiteral("StartingRequest");
-      return;
-
-    case State::Nesting:
-      aResult.AssignLiteral("Nesting");
-      return;
-
-    case State::SendingReadyMessage:
-      aResult.AssignLiteral("SendingReadyMessage");
-      return;
-
-    case State::WaitingForFinish:
-      aResult.AssignLiteral("WaitingForFinish");
-      return;
-
-    case State::SendingResults:
-      aResult.AssignLiteral("SendingResults");
-      return;
-
-    case State::Completed:
-      aResult.AssignLiteral("Completed");
-      return;
-
-    default:
-      MOZ_CRASH("Bad state!");
-  }
-}
-
 void LSRequestBase::Dispatch() {
   AssertIsOnOwningThread();
 
@@ -6372,9 +6456,51 @@ void LSRequestBase::Dispatch() {
   MOZ_ALWAYS_SUCCEEDS(NS_DispatchToCurrentThread(this));
 }
 
-nsresult LSRequestBase::NestedRun() { return NS_OK; }
+void LSRequestBase::StringifyState(nsACString& aResult) const {
+  AssertIsOnOwningThread();
 
-void LSRequestBase::LogState() {
+  switch (mState) {
+    case State::Initial:
+      aResult.AppendLiteral("Initial");
+      return;
+
+    case State::StartingRequest:
+      aResult.AppendLiteral("StartingRequest");
+      return;
+
+    case State::Nesting:
+      aResult.AppendLiteral("Nesting");
+      return;
+
+    case State::SendingReadyMessage:
+      aResult.AppendLiteral("SendingReadyMessage");
+      return;
+
+    case State::WaitingForFinish:
+      aResult.AppendLiteral("WaitingForFinish");
+      return;
+
+    case State::SendingResults:
+      aResult.AppendLiteral("SendingResults");
+      return;
+
+    case State::Completed:
+      aResult.AppendLiteral("Completed");
+      return;
+
+    default:
+      MOZ_CRASH("Bad state!");
+  }
+}
+
+void LSRequestBase::Stringify(nsACString& aResult) const {
+  AssertIsOnOwningThread();
+
+  aResult.AppendLiteral("State:");
+  StringifyState(aResult);
+}
+
+void LSRequestBase::Log() {
   AssertIsOnOwningThread();
 
   if (!LS_LOG_TEST()) {
@@ -6387,15 +6513,9 @@ void LSRequestBase::LogState() {
   StringifyState(state);
 
   LS_LOG(("  mState: %s", state.get()));
-
-  switch (mState) {
-    case State::Nesting:
-      LogNestedState();
-      break;
-
-    default:;
-  }
 }
+
+nsresult LSRequestBase::NestedRun() { return NS_OK; }
 
 bool LSRequestBase::VerifyRequestParams() {
   AssertIsOnBackgroundThread();
@@ -6571,6 +6691,14 @@ void LSRequestBase::SendResults() {
 
     if (NS_SUCCEEDED(ResultCode())) {
       GetResponse(response);
+
+      MOZ_ASSERT(response.type() != LSRequestResponse::T__None);
+
+      if (response.type() == LSRequestResponse::Tnsresult) {
+        MOZ_ASSERT(NS_FAILED(response.get_nsresult()));
+
+        SetFailureCode(response.get_nsresult());
+      }
     } else {
       response = ResultCode();
     }
@@ -6652,7 +6780,7 @@ void LSRequestBase::ActorDestroy(ActorDestroyReason aWhy) {
 mozilla::ipc::IPCResult LSRequestBase::RecvCancel() {
   AssertIsOnOwningThread();
 
-  LogState();
+  Log();
 
   const char* crashOnCancel = PR_GetEnv("LSNG_CRASH_ON_CANCEL");
   if (crashOnCancel) {
@@ -6713,52 +6841,112 @@ PrepareDatastoreOp::~PrepareDatastoreOp() {
   MOZ_ASSERT(!mLoadDataOp);
 }
 
-void PrepareDatastoreOp::StringifyNestedState(nsCString& aResult) const {
+void PrepareDatastoreOp::StringifyNestedState(nsACString& aResult) const {
   AssertIsOnOwningThread();
 
   switch (mNestedState) {
     case NestedState::BeforeNesting:
-      aResult.AssignLiteral("BeforeNesting");
+      aResult.AppendLiteral("BeforeNesting");
       return;
 
     case NestedState::CheckExistingOperations:
-      aResult.AssignLiteral("CheckExistingOperations");
+      aResult.AppendLiteral("CheckExistingOperations");
       return;
 
     case NestedState::CheckClosingDatastore:
-      aResult.AssignLiteral("CheckClosingDatastore");
+      aResult.AppendLiteral("CheckClosingDatastore");
       return;
 
     case NestedState::PreparationPending:
-      aResult.AssignLiteral("PreparationPending");
+      aResult.AppendLiteral("PreparationPending");
       return;
 
     case NestedState::QuotaManagerPending:
-      aResult.AssignLiteral("QuotaManagerPending");
+      aResult.AppendLiteral("QuotaManagerPending");
       return;
 
     case NestedState::DirectoryOpenPending:
-      aResult.AssignLiteral("DirectoryOpenPending");
+      aResult.AppendLiteral("DirectoryOpenPending");
       return;
 
     case NestedState::DatabaseWorkOpen:
-      aResult.AssignLiteral("DatabaseWorkOpen");
+      aResult.AppendLiteral("DatabaseWorkOpen");
       return;
 
     case NestedState::BeginLoadData:
-      aResult.AssignLiteral("BeginLoadData");
+      aResult.AppendLiteral("BeginLoadData");
       return;
 
     case NestedState::DatabaseWorkLoadData:
-      aResult.AssignLiteral("DatabaseWorkLoadData");
+      aResult.AppendLiteral("DatabaseWorkLoadData");
       return;
 
     case NestedState::AfterNesting:
-      aResult.AssignLiteral("AfterNesting");
+      aResult.AppendLiteral("AfterNesting");
       return;
 
     default:
       MOZ_CRASH("Bad state!");
+  }
+}
+
+void PrepareDatastoreOp::Stringify(nsACString& aResult) const {
+  AssertIsOnOwningThread();
+
+  LSRequestBase::Stringify(aResult);
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("Origin:");
+  aResult.Append(AnonymizedOriginString(mOrigin));
+  aResult.Append(kQuotaGenericDelimiter);
+
+  aResult.AppendLiteral("NestedState:");
+  StringifyNestedState(aResult);
+}
+
+void PrepareDatastoreOp::Log() {
+  AssertIsOnOwningThread();
+
+  LSRequestBase::Log();
+
+  if (!LS_LOG_TEST()) {
+    return;
+  }
+
+  nsCString nestedState;
+  StringifyNestedState(nestedState);
+
+  LS_LOG(("  mNestedState: %s", nestedState.get()));
+
+  switch (mNestedState) {
+    case NestedState::CheckClosingDatastore: {
+      for (uint32_t index = gPrepareDatastoreOps->Length(); index > 0;
+           index--) {
+        PrepareDatastoreOp* existingOp = (*gPrepareDatastoreOps)[index - 1];
+
+        if (existingOp->mDelayedOp == this) {
+          LS_LOG(("  mDelayedBy: [%p]", existingOp));
+
+          existingOp->Log();
+
+          break;
+        }
+      }
+
+      break;
+    }
+
+    case NestedState::DirectoryOpenPending: {
+      MOZ_ASSERT(mPendingDirectoryLock);
+
+      LS_LOG(("  mPendingDirectoryLock: [%p]", mPendingDirectoryLock.get()));
+
+      mPendingDirectoryLock->Log();
+
+      break;
+    }
+
+    default:;
   }
 }
 
@@ -7108,9 +7296,9 @@ nsresult PrepareDatastoreOp::DatabaseWork() {
   // would fail otherwise.
   nsCOMPtr<nsIFile> directoryEntry;
   if (hasDataForMigration) {
-    rv = quotaManager->EnsureOriginIsInitialized(
+    rv = quotaManager->EnsureStorageAndOriginIsInitialized(
         PERSISTENCE_TYPE_DEFAULT, mSuffix, mGroup, mOrigin,
-        getter_AddRefs(directoryEntry));
+        mozilla::dom::quota::Client::LS, getter_AddRefs(directoryEntry));
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
     }
@@ -7211,7 +7399,9 @@ nsresult PrepareDatastoreOp::DatabaseWork() {
   if (removedUsageFile) {
     if (!quotaObject) {
       quotaObject = GetQuotaObject();
-      MOZ_ASSERT(quotaObject);
+      if (!quotaObject) {
+        return NS_ERROR_FAILURE;
+      }
     }
 
     MOZ_ALWAYS_TRUE(quotaObject->MaybeUpdateSize(0, /* aTruncate */ true));
@@ -7244,7 +7434,9 @@ nsresult PrepareDatastoreOp::DatabaseWork() {
 
     if (!quotaObject) {
       quotaObject = GetQuotaObject();
-      MOZ_ASSERT(quotaObject);
+      if (!quotaObject) {
+        return NS_ERROR_FAILURE;
+      }
     }
 
     if (!quotaObject->MaybeUpdateSize(newUsage, /* aTruncate */ true)) {
@@ -7512,7 +7704,11 @@ already_AddRefed<QuotaObject> PrepareDatastoreOp::GetQuotaObject() {
   RefPtr<QuotaObject> quotaObject = quotaManager->GetQuotaObject(
       PERSISTENCE_TYPE_DEFAULT, mGroup, mOrigin,
       mozilla::dom::quota::Client::LS, mDatabaseFilePath, mUsage);
-  MOZ_ASSERT(quotaObject);
+
+  if (!quotaObject) {
+    LS_WARNING("Failed to get quota object for group (%s) and origin (%s)!",
+               mGroup.get(), mOrigin.get());
+  }
 
   return quotaObject.forget();
 }
@@ -7666,7 +7862,10 @@ void PrepareDatastoreOp::GetResponse(LSRequestResponse& aResponse) {
       }
 
       quotaObject = GetQuotaObject();
-      MOZ_ASSERT(quotaObject);
+      if (!quotaObject) {
+        aResponse = NS_ERROR_FAILURE;
+        return;
+      }
     }
 
     mDatastore = new Datastore(mGroup, mOrigin, mPrivateBrowsingId, mUsage,
@@ -7717,20 +7916,16 @@ void PrepareDatastoreOp::Cleanup() {
   AssertIsOnOwningThread();
 
   if (mDatastore) {
-    MOZ_ASSERT(mDatastoreId > 0);
     MOZ_ASSERT(!mDirectoryLock);
     MOZ_ASSERT(!mConnection);
 
-    if (NS_FAILED(ResultCode())) {
+    if (NS_FAILED(ResultCode()) && mDatastoreId > 0) {
       // Just in case we failed to send datastoreId to the child, we need to
       // destroy prepared datastore, otherwise it won't be destroyed until the
       // timer fires (after 20 seconds).
       MOZ_ASSERT(gPreparedDatastores);
-      MOZ_ASSERT(gPreparedDatastores->Get(mDatastoreId));
-
-      nsAutoPtr<PreparedDatastore> preparedDatastore;
-      gPreparedDatastores->Remove(mDatastoreId, &preparedDatastore);
-      MOZ_ASSERT(preparedDatastore);
+      DebugOnly<bool> removed = gPreparedDatastores->Remove(mDatastoreId);
+      MOZ_ASSERT(removed);
     }
 
     // Make sure to release the datastore on this thread.
@@ -7793,46 +7988,6 @@ void PrepareDatastoreOp::CleanupMetadata() {
 
   if (gPrepareDatastoreOps->IsEmpty()) {
     gPrepareDatastoreOps = nullptr;
-  }
-}
-
-void PrepareDatastoreOp::LogNestedState() {
-  AssertIsOnOwningThread();
-
-  nsCString nestedState;
-  StringifyNestedState(nestedState);
-
-  LS_LOG(("  mNestedState: %s", nestedState.get()));
-
-  switch (mNestedState) {
-    case NestedState::CheckClosingDatastore: {
-      for (uint32_t index = gPrepareDatastoreOps->Length(); index > 0;
-           index--) {
-        PrepareDatastoreOp* existingOp = (*gPrepareDatastoreOps)[index - 1];
-
-        if (existingOp->mDelayedOp == this) {
-          LS_LOG(("  mDelayedBy: [%p]", existingOp));
-
-          existingOp->LogState();
-
-          break;
-        }
-      }
-
-      break;
-    }
-
-    case NestedState::DirectoryOpenPending: {
-      MOZ_ASSERT(mPendingDirectoryLock);
-
-      LS_LOG(("  mPendingDirectoryLock: [%p]", mPendingDirectoryLock.get()));
-
-      mPendingDirectoryLock->LogState();
-
-      break;
-    }
-
-    default:;
   }
 }
 
@@ -7913,25 +8068,11 @@ nsresult PrepareDatastoreOp::LoadDataOp::DoDatastoreWork() {
       return rv;
     }
 
-    nsCString buffer;
-    rv = stmt->GetUTF8String(1, buffer);
+    LSValue value;
+    rv = value.InitFromStatement(stmt, 1);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
     }
-
-    int32_t utf16Length;
-    rv = stmt->GetInt32(2, &utf16Length);
-    if (NS_WARN_IF(NS_FAILED(rv))) {
-      return rv;
-    }
-
-    int32_t compressed;
-    rv = stmt->GetInt32(3, &compressed);
-    if (NS_WARN_IF(NS_FAILED(rv))) {
-      return rv;
-    }
-
-    LSValue value(buffer, utf16Length, compressed);
 
     mPrepareDatastoreOp->mValues.Put(key, value);
     auto item = mPrepareDatastoreOp->mOrderedItems.AppendElement();
@@ -8013,11 +8154,15 @@ PrepareDatastoreOp::CompressFunction::OnFunctionCall(
   }
 
   nsCString compressed;
-  if (!SnappyCompress(value, compressed)) {
-    compressed = value;
+  if (NS_WARN_IF(!SnappyCompress(value, compressed))) {
+    return NS_ERROR_FAILURE;
   }
 
-  nsCOMPtr<nsIVariant> result = new storage::UTF8TextVariant(compressed);
+  if (!compressed.IsVoid()) {
+    value = compressed;
+  }
+
+  nsCOMPtr<nsIVariant> result = new storage::UTF8TextVariant(value);
 
   result.forget(aResult);
   return NS_OK;
@@ -8051,7 +8196,11 @@ PrepareDatastoreOp::CompressibleFunction::OnFunctionCall(
   }
 
   nsCString compressed;
-  bool compressible = SnappyCompress(value, compressed);
+  if (NS_WARN_IF(!SnappyCompress(value, compressed))) {
+    return NS_ERROR_FAILURE;
+  }
+
+  bool compressible = !compressed.IsVoid();
 
   nsCOMPtr<nsIVariant> result = new storage::IntegerVariant(compressible);
 
@@ -8457,7 +8606,7 @@ bool ArchivedOriginScope::HasMatches(
 
     bool operator()(const Prefix& aPrefix) {
       for (auto iter = mHashtable->ConstIter(); !iter.Done(); iter.Next()) {
-        ArchivedOriginInfo* archivedOriginInfo = iter.Data();
+        const auto& archivedOriginInfo = iter.Data();
 
         if (archivedOriginInfo->mOriginNoSuffix == aPrefix.OriginNoSuffix()) {
           return true;
@@ -8469,7 +8618,7 @@ bool ArchivedOriginScope::HasMatches(
 
     bool operator()(const Pattern& aPattern) {
       for (auto iter = mHashtable->ConstIter(); !iter.Done(); iter.Next()) {
-        ArchivedOriginInfo* archivedOriginInfo = iter.Data();
+        const auto& archivedOriginInfo = iter.Data();
 
         if (aPattern.GetPattern().Matches(
                 archivedOriginInfo->mOriginAttributes)) {
@@ -8506,7 +8655,7 @@ void ArchivedOriginScope::RemoveMatches(
 
     void operator()(const Prefix& aPrefix) {
       for (auto iter = mHashtable->Iter(); !iter.Done(); iter.Next()) {
-        ArchivedOriginInfo* archivedOriginInfo = iter.Data();
+        const auto& archivedOriginInfo = iter.Data();
 
         if (archivedOriginInfo->mOriginNoSuffix == aPrefix.OriginNoSuffix()) {
           iter.Remove();
@@ -8516,7 +8665,7 @@ void ArchivedOriginScope::RemoveMatches(
 
     void operator()(const Pattern& aPattern) {
       for (auto iter = mHashtable->Iter(); !iter.Done(); iter.Next()) {
-        ArchivedOriginInfo* archivedOriginInfo = iter.Data();
+        const auto& archivedOriginInfo = iter.Data();
 
         if (aPattern.GetPattern().Matches(
                 archivedOriginInfo->mOriginAttributes)) {
@@ -9058,7 +9207,7 @@ void QuotaClient::AbortOperations(const nsACString& aOrigin) {
   if (gPreparedDatastores) {
     for (auto iter = gPreparedDatastores->ConstIter(); !iter.Done();
          iter.Next()) {
-      PreparedDatastore* preparedDatastore = iter.Data();
+      const auto& preparedDatastore = iter.Data();
       MOZ_ASSERT(preparedDatastore);
 
       if (aOrigin.IsVoid() || preparedDatastore->Origin() == aOrigin) {
@@ -9118,12 +9267,19 @@ void QuotaClient::ShutdownWorkThreads() {
 
   MOZ_ALWAYS_SUCCEEDS(timer->InitWithNamedFuncCallback(
       [](nsITimer* aTimer, void* aClosure) {
-        auto quotaClient = static_cast<QuotaClient*>(aClosure);
+        ForceKillDatabases();
 
-        quotaClient->ShutdownTimedOut();
+        MOZ_ALWAYS_SUCCEEDS(aTimer->InitWithNamedFuncCallback(
+            [](nsITimer* aTimer, void* aClosure) {
+              auto quotaClient = static_cast<QuotaClient*>(aClosure);
+
+              quotaClient->ShutdownTimedOut();
+            },
+            aClosure, SHUTDOWN_FORCE_CRASH_TIMEOUT_MS, nsITimer::TYPE_ONE_SHOT,
+            "localstorage::QuotaClient::ShutdownWorkThreads::ForceCrashTimer"));
       },
-      this, SHUTDOWN_TIMEOUT_MS, nsITimer::TYPE_ONE_SHOT,
-      "localstorage::QuotaClient::ShutdownWorkThreads::SpinEventLoopTimer"));
+      this, SHUTDOWN_FORCE_KILL_TIMEOUT_MS, nsITimer::TYPE_ONE_SHOT,
+      "localstorage::QuotaClient::ShutdownWorkThreads::ForceKillTimer"));
 
   // This should release any local storage related quota objects or directory
   // locks.
@@ -9149,61 +9305,66 @@ void QuotaClient::ShutdownTimedOut() {
   nsCString data;
 
   if (gPrepareDatastoreOps) {
-    data.Append("gPrepareDatastoreOps: ");
+    data.Append("PrepareDatastoreOperations: ");
     data.AppendInt(static_cast<uint32_t>(gPrepareDatastoreOps->Length()));
+    data.Append(" (");
 
     nsTHashtable<nsCStringHashKey> ids;
-    for (uint32_t index = 0; index < gPrepareDatastoreOps->Length(); index++) {
-      CheckedUnsafePtr<PrepareDatastoreOp>& prepareDatastoreOp =
-          (*gPrepareDatastoreOps)[index];
 
-      nsCString origin;
-      if (prepareDatastoreOp->OriginIsKnown()) {
-        origin = prepareDatastoreOp->Origin();
-        SanitizeOrigin(origin);
-      }
+    for (const auto& prepareDatastoreOp : *gPrepareDatastoreOps) {
+      MOZ_ASSERT(prepareDatastoreOp);
 
-      nsCString state;
-      prepareDatastoreOp->StringifyState(state);
-
-      nsCString nestedState;
-      prepareDatastoreOp->StringifyNestedState(nestedState);
-
-      NS_NAMED_LITERAL_CSTRING(delimiter, "*");
-
-      nsCString id = origin + delimiter + state + delimiter + nestedState;
+      nsCString id;
+      prepareDatastoreOp->Stringify(id);
 
       ids.PutEntry(id);
     }
 
-    data.Append(" (");
-
-    bool first = true;
-    for (auto iter = ids.ConstIter(); !iter.Done(); iter.Next()) {
-      if (first) {
-        first = false;
-      } else {
-        data.Append(", ");
-      }
-
-      const nsACString& id = iter.Get()->GetKey();
-
-      data.Append(id);
-    }
+    StringifyTableKeys(ids, data);
 
     data.Append(")\n");
   }
 
   if (gDatastores) {
-    data.Append("gDatastores: ");
+    data.Append("Datastores: ");
     data.AppendInt(gDatastores->Count());
-    data.Append("\n");
+    data.Append(" (");
+
+    nsTHashtable<nsCStringHashKey> ids;
+
+    for (const auto& entry : *gDatastores) {
+      MOZ_ASSERT(entry.GetData());
+
+      nsCString id;
+      entry.GetData()->Stringify(id);
+
+      ids.PutEntry(id);
+    }
+
+    StringifyTableKeys(ids, data);
+
+    data.Append(")\n");
   }
 
   if (gLiveDatabases) {
-    data.Append("gLiveDatabases: ");
+    data.Append("LiveDatabases: ");
     data.AppendInt(static_cast<uint32_t>(gLiveDatabases->Length()));
-    data.Append("\n");
+    data.Append(" (");
+
+    nsTHashtable<nsCStringHashKey> ids;
+
+    for (const auto& database : *gLiveDatabases) {
+      MOZ_ASSERT(database);
+
+      nsCString id;
+      database->Stringify(id);
+
+      ids.PutEntry(id);
+    }
+
+    StringifyTableKeys(ids, data);
+
+    data.Append(")\n");
   }
 
   CrashReporter::AnnotateCrashReport(

@@ -28,6 +28,7 @@ UNSUPPORTED_FEATURES = set([
     "class-static-methods-private",
     "regexp-dotall",
     "regexp-lookbehind",
+    "regexp-match-indices",
     "regexp-named-groups",
     "regexp-unicode-property-escapes",
     "export-star-as-namespace-from-module",
@@ -35,21 +36,23 @@ UNSUPPORTED_FEATURES = set([
     "Intl.DateTimeFormat-datetimestyle",
     "Intl.DateTimeFormat-dayPeriod",
     "Intl.DateTimeFormat-formatRange",
-    "Intl.ListFormat",
+    "Intl.DisplayNames",
     "Intl.Segmenter",
-    "WeakRef",
-    "FinalizationGroup",
     "optional-chaining",
     "top-level-await",
 ])
 FEATURE_CHECK_NEEDED = {
     "Atomics": "!this.hasOwnProperty('Atomics')",
+    "FinalizationGroup": "!this.hasOwnProperty('FinalizationGroup')",
     "SharedArrayBuffer": "!this.hasOwnProperty('SharedArrayBuffer')",
+    "WeakRef": "!this.hasOwnProperty('WeakRef')",
 }
 RELEASE_OR_BETA = set([
     "Intl.NumberFormat-unified",
     "Intl.DateTimeFormat-fractionalSecondDigits",
-    "Promise.allSettled",
+    "Promise.any",
+    "AggregateError",
+    "String.prototype.replaceAll",
 ])
 
 
@@ -419,7 +422,7 @@ def process_test262(test262Dir, test262OutDir, strictTests, externManifests):
                                                                  "detachArrayBuffer.js", "nans.js"]
     explicitIncludes[os.path.join("built-ins", "TypedArrays")] = ["detachArrayBuffer.js"]
 
-    # Intl.Locale isn't yet enabled by default.
+    # Intl.Locale and Intl.ListFormat aren't yet enabled by default.
     localIncludesMap[os.path.join("intl402")] = ["test262-intl-locale.js"]
 
     # Process all test directories recursively.

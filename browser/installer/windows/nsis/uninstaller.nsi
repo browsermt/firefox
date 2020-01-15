@@ -333,12 +333,13 @@ Section "Uninstall"
   ${un.RegCleanFileHandler}  ".shtml" "FirefoxHTML-$AppUserModelID"
   ${un.RegCleanFileHandler}  ".xht"   "FirefoxHTML-$AppUserModelID"
   ${un.RegCleanFileHandler}  ".xhtml" "FirefoxHTML-$AppUserModelID"
-  ${un.RegCleanFileHandler}  ".oga"  "FirefoxHTML-$AppUserModelID"
-  ${un.RegCleanFileHandler}  ".ogg"  "FirefoxHTML-$AppUserModelID"
-  ${un.RegCleanFileHandler}  ".ogv"  "FirefoxHTML-$AppUserModelID"
-  ${un.RegCleanFileHandler}  ".pdf"  "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".oga"   "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".ogg"   "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".ogv"   "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".pdf"   "FirefoxHTML-$AppUserModelID"
   ${un.RegCleanFileHandler}  ".webm"  "FirefoxHTML-$AppUserModelID"
-  ${un.RegCleanFileHandler} ".svg" "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".svg"   "FirefoxHTML-$AppUserModelID"
+  ${un.RegCleanFileHandler}  ".webp"  "FirefoxHTML-$AppUserModelID"
 
   SetShellVarContext all  ; Set SHCTX to HKLM
   ${un.GetSecondInstallPath} "Software\Mozilla" $R9
@@ -398,6 +399,18 @@ Section "Uninstall"
       ${un.GetParent} "$R9" $R1
       WriteRegStr HKLM "$0" "Path" "$R1"
     ${EndIf}
+  ${EndIf}
+
+  ; Remove our HKCR/Applications key, if it's for this installation.
+  ReadRegStr $0 HKLM "Software\Classes\Applications\${FileMainEXE}\DefaultIcon" ""
+  StrCpy $0 $0 -2
+  ${If} $0 == "$INSTDIR\${FileMainEXE}"
+    DeleteRegKey HKLM "Software\Classes\Applications\${FileMainEXE}"
+  ${EndIf}
+  ReadRegStr $0 HKCU "Software\Classes\Applications\${FileMainEXE}\DefaultIcon" ""
+  StrCpy $0 $0 -2
+  ${If} $0 == "$INSTDIR\${FileMainEXE}"
+    DeleteRegKey HKCU "Software\Classes\Applications\${FileMainEXE}"
   ${EndIf}
 
   ; Remove directories and files we always control before parsing the uninstall
@@ -573,9 +586,9 @@ Function un.leaveWelcome
   ${If} ${FileExists} "$INSTDIR\${FileMainEXE}"
     Banner::show /NOUNLOAD "$(BANNER_CHECK_EXISTING)"
 
-    ; If the message window has been found previously give the app an additional
-    ; five seconds to close.
-    ${If} "$TmpVal" == "FoundMessageWindow"
+    ; If we already found a window once and we're checking again, wait for an
+    ; additional five seconds for the app to close.
+    ${If} "$TmpVal" == "FoundAppWindow"
       Sleep 5000
     ${EndIf}
 
@@ -587,10 +600,11 @@ Function un.leaveWelcome
 
     ; If there are files in use $TmpVal will be "true"
     ${If} "$TmpVal" == "true"
-      ; If the message window is found the call to ManualCloseAppPrompt will
-      ; abort leaving the value of $TmpVal set to "FoundMessageWindow".
-      StrCpy $TmpVal "FoundMessageWindow"
-      ${un.ManualCloseAppPrompt} "${WindowClass}" "$(WARN_MANUALLY_CLOSE_APP_UNINSTALL)"
+      ; If it finds a window of the right class, then ManualCloseAppPrompt will
+      ; abort leaving the value of $TmpVal set to "FoundAppWindow".
+      StrCpy $TmpVal "FoundAppWindow"
+      ${un.ManualCloseAppPrompt} "${MainWindowClass}" "$(WARN_MANUALLY_CLOSE_APP_UNINSTALL)"
+      ${un.ManualCloseAppPrompt} "${DialogWindowClass}" "$(WARN_MANUALLY_CLOSE_APP_UNINSTALL)"
       ; If the message window is not found set $TmpVal to "true" so the restart
       ; required message is displayed.
       StrCpy $TmpVal "true"

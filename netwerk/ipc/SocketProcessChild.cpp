@@ -7,13 +7,20 @@
 #include "SocketProcessLogging.h"
 
 #include "base/task.h"
+#include "HttpTransactionChild.h"
+#include "HttpConnectionMgrChild.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/dom/MemoryReportRequest.h"
 #include "mozilla/ipc/CrashReporterClient.h"
+#include "mozilla/ipc/FileDescriptorSetChild.h"
+#include "mozilla/ipc/IPCStreamAlloc.h"
 #include "mozilla/ipc/ProcessChild.h"
 #include "mozilla/net/DNSRequestChild.h"
+#include "mozilla/ipc/PChildToParentStreamChild.h"
+#include "mozilla/ipc/PParentToChildStreamChild.h"
 #include "mozilla/Preferences.h"
 #include "nsDebugImpl.h"
+#include "nsIDNSService.h"
 #include "nsThreadManager.h"
 #include "ProcessUtils.h"
 #include "SocketProcessBridgeParent.h"
@@ -23,8 +30,7 @@
 #endif
 
 #ifdef MOZ_WEBRTC
-#  include "mozilla/net/ProxyConfigLookupChild.h"
-#  include "mozilla/net/WebrtcProxyChannelChild.h"
+#  include "mozilla/net/WebrtcTCPSocketChild.h"
 #endif
 
 namespace mozilla {
@@ -194,52 +200,105 @@ void SocketProcessChild::DestroySocketProcessBridgeParent(ProcessId aId) {
   mSocketProcessBridgeParentMap.Remove(aId);
 }
 
-PWebrtcProxyChannelChild* SocketProcessChild::AllocPWebrtcProxyChannelChild(
-    const PBrowserOrId& browser) {
+PWebrtcTCPSocketChild* SocketProcessChild::AllocPWebrtcTCPSocketChild(
+    const Maybe<TabId>& tabId) {
   // We don't allocate here: instead we always use IPDL constructor that takes
   // an existing object
   MOZ_ASSERT_UNREACHABLE(
-      "AllocPWebrtcProxyChannelChild should not be called on"
+      "AllocPWebrtcTCPSocketChild should not be called on"
       " socket child");
   return nullptr;
 }
 
-bool SocketProcessChild::DeallocPWebrtcProxyChannelChild(
-    PWebrtcProxyChannelChild* aActor) {
+bool SocketProcessChild::DeallocPWebrtcTCPSocketChild(
+    PWebrtcTCPSocketChild* aActor) {
 #ifdef MOZ_WEBRTC
-  WebrtcProxyChannelChild* child =
-      static_cast<WebrtcProxyChannelChild*>(aActor);
+  WebrtcTCPSocketChild* child = static_cast<WebrtcTCPSocketChild*>(aActor);
   child->ReleaseIPDLReference();
 #endif
   return true;
 }
 
-PDNSRequestChild* SocketProcessChild::AllocPDNSRequestChild(
-    const nsCString& aHost, const OriginAttributes& aOriginAttributes,
-    const uint32_t& aFlags) {
-  // We don't allocate here: instead we always use IPDL constructor that takes
-  // an existing object
-  MOZ_ASSERT_UNREACHABLE("AllocPDNSRequestChild should not be called on child");
-  return nullptr;
+already_AddRefed<PHttpTransactionChild>
+SocketProcessChild::AllocPHttpTransactionChild() {
+  RefPtr<HttpTransactionChild> actor = new HttpTransactionChild();
+  return actor.forget();
 }
 
-bool SocketProcessChild::DeallocPDNSRequestChild(PDNSRequestChild* aChild) {
-  DNSRequestChild* p = static_cast<DNSRequestChild*>(aChild);
-  p->ReleaseIPDLReference();
+PFileDescriptorSetChild* SocketProcessChild::AllocPFileDescriptorSetChild(
+    const FileDescriptor& aFD) {
+  return new FileDescriptorSetChild(aFD);
+}
+
+bool SocketProcessChild::DeallocPFileDescriptorSetChild(
+    PFileDescriptorSetChild* aActor) {
+  delete aActor;
   return true;
 }
 
-PProxyConfigLookupChild* SocketProcessChild::AllocPProxyConfigLookupChild() {
-  MOZ_CRASH("AllocPProxyConfigLookupChild should not be called");
-  return nullptr;
+PChildToParentStreamChild*
+SocketProcessChild::AllocPChildToParentStreamChild() {
+  MOZ_CRASH("PChildToParentStreamChild actors should be manually constructed!");
 }
 
-bool SocketProcessChild::DeallocPProxyConfigLookupChild(
-    PProxyConfigLookupChild* aActor) {
-#ifdef MOZ_WEBRTC
-  delete static_cast<ProxyConfigLookupChild*>(aActor);
-#endif
+bool SocketProcessChild::DeallocPChildToParentStreamChild(
+    PChildToParentStreamChild* aActor) {
+  delete aActor;
   return true;
+}
+
+PParentToChildStreamChild*
+SocketProcessChild::AllocPParentToChildStreamChild() {
+  return mozilla::ipc::AllocPParentToChildStreamChild();
+}
+
+bool SocketProcessChild::DeallocPParentToChildStreamChild(
+    PParentToChildStreamChild* aActor) {
+  delete aActor;
+  return true;
+}
+
+PChildToParentStreamChild*
+SocketProcessChild::SendPChildToParentStreamConstructor(
+    PChildToParentStreamChild* aActor) {
+  MOZ_ASSERT(NS_IsMainThread());
+  return PSocketProcessChild::SendPChildToParentStreamConstructor(aActor);
+}
+
+PFileDescriptorSetChild* SocketProcessChild::SendPFileDescriptorSetConstructor(
+    const FileDescriptor& aFD) {
+  MOZ_ASSERT(NS_IsMainThread());
+  return PSocketProcessChild::SendPFileDescriptorSetConstructor(aFD);
+}
+
+already_AddRefed<PHttpConnectionMgrChild>
+SocketProcessChild::AllocPHttpConnectionMgrChild() {
+  LOG(("SocketProcessChild::AllocPHttpConnectionMgrChild \n"));
+  if (!gHttpHandler) {
+    nsresult rv;
+    nsCOMPtr<nsIIOService> ios = do_GetIOService(&rv);
+    if (NS_FAILED(rv)) {
+      return nullptr;
+    }
+
+    nsCOMPtr<nsIProtocolHandler> handler;
+    rv = ios->GetProtocolHandler("http", getter_AddRefs(handler));
+    if (NS_FAILED(rv)) {
+      return nullptr;
+    }
+
+    // Initialize DNS Service here, since it needs to be done in main thread.
+    nsCOMPtr<nsIDNSService> dns =
+        do_GetService("@mozilla.org/network/dns-service;1", &rv);
+    if (NS_FAILED(rv)) {
+      return nullptr;
+    }
+
+    RefPtr<HttpConnectionMgrChild> actor = new HttpConnectionMgrChild();
+    return actor.forget();
+  }
+
+  return nullptr;
 }
 
 }  // namespace net

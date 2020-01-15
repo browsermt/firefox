@@ -12,7 +12,8 @@ interface nsIPrintSettings;
 interface nsIWebBrowserPersistDocumentReceiver;
 interface nsIWebProgressListener;
 
-[ChromeOnly]
+[ChromeOnly,
+ Exposed=Window]
 interface FrameLoader {
   /**
    * Get the docshell from the frame loader.
@@ -40,18 +41,17 @@ interface FrameLoader {
   readonly attribute BrowsingContext? browsingContext;
 
   /**
-   * Get the ParentSHistory for the nsFrameLoader. May return null if this
-   * frameloader is not for a toplevel frame.
-   */
-  readonly attribute ParentSHistory? parentSHistory;
-
-  /**
    * Find out whether the loader's frame is at too great a depth in
    * the frame tree.  This can be used to decide what operations may
    * or may not be allowed on the loader's docshell.
    */
   [Pure]
   readonly attribute boolean depthTooGreat;
+
+  /**
+   * Find out whether the loader's frame is a remote frame.
+   */
+  readonly attribute boolean isRemoteFrame;
 
   /**
    * Activate remote frame.
@@ -197,12 +197,11 @@ interface FrameLoader {
  *        The nsIWebBrowserPersistDocumentReceiver is a callback that
  *        will be fired once the document is ready for persisting.
  */
-[NoInterfaceObject]
-interface WebBrowserPersistable
+interface mixin WebBrowserPersistable
 {
   [Throws]
   void startPersistence(unsigned long long aOuterWindowID,
                         nsIWebBrowserPersistDocumentReceiver aRecv);
 };
 
-FrameLoader implements WebBrowserPersistable;
+FrameLoader includes WebBrowserPersistable;

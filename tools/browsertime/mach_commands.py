@@ -33,7 +33,9 @@ from __future__ import absolute_import, print_function, unicode_literals
 import argparse
 import logging
 import os
+import stat
 import sys
+import re
 
 from mach.decorators import CommandArgument, CommandProvider, Command
 from mozbuild.base import MachCommandBase
@@ -105,15 +107,6 @@ host_fetches = {
             'url': 'https://github.com/ncalexan/geckodriver/releases/download/v0.24.0-android/ffmpeg-4.1.1-macos64-static.zip',  # noqa
             # An extension to `fetch` syntax.
             'path': 'ffmpeg-4.1.1-macos64-static',
-        },
-        'ImageMagick': {
-            'type': 'static-url',
-            # It's sad that the macOS URLs don't include version numbers.  If
-            # ImageMagick is released frequently, we'll need to be more
-            # accommodating of multiple versions here.
-            'url': 'https://imagemagick.org/download/binaries/ImageMagick-x86_64-apple-darwin17.7.0.tar.gz',  # noqa
-            # An extension to `fetch` syntax.
-            'path': 'ImageMagick-7.0.8',
         },
     },
     'linux64': {
@@ -209,7 +202,38 @@ class MachBrowsertime(MachCommandBase):
                         'browsertime',
                         {'path': archive},
                         'Unpacking temporary location {path}')
-                    unpack_file(archive)
+
+                    if 'win64' in host_platform() and 'imagemagick' in tool.lower():
+                        # Windows archive does not contain a subfolder
+                        # so we make one for it here
+                        mkdir(fetch.get('path'))
+                        os.chdir(os.path.join(self.state_path, fetch.get('path')))
+                        unpack_file(archive)
+                        os.chdir(self.state_path)
+                    else:
+                        unpack_file(archive)
+
+                    # Make sure the expected path exists after extraction
+                    path = os.path.join(self.state_path, fetch.get('path'))
+                    if not os.path.exists(path):
+                        raise Exception("Cannot find an extracted directory: %s" % path)
+
+                    try:
+                        # Some archives provide binaries that don't have the
+                        # executable bit set so we need to set it here
+                        for root, dirs, files in os.walk(path):
+                            for edir in dirs:
+                                loc_to_change = os.path.join(root, edir)
+                                st = os.stat(loc_to_change)
+                                os.chmod(loc_to_change, st.st_mode | stat.S_IEXEC)
+                            for efile in files:
+                                loc_to_change = os.path.join(root, efile)
+                                st = os.stat(loc_to_change)
+                                os.chmod(loc_to_change, st.st_mode | stat.S_IEXEC)
+                    except Exception as e:
+                        raise Exception(
+                            "Could not set executable bit in %s, error: %s" % (path, str(e))
+                        )
                 finally:
                     os.chdir(cwd)
 
@@ -220,7 +244,7 @@ class MachBrowsertime(MachCommandBase):
         if 'GECKODRIVER_BASE_URL' not in os.environ:
             # Use custom `geckodriver` with pre-release Android support.
             url = 'https://github.com/ncalexan/geckodriver/releases/download/v0.24.0-android/'
-            os.environ['GECKODRIVER_BASE_URL'] = url
+            os.environ[str('GECKODRIVER_BASE_URL')] = str(url)
 
         self.log(
             logging.INFO,
@@ -280,6 +304,26 @@ class MachBrowsertime(MachCommandBase):
         # extension API.
         node_dir = os.path.dirname(node_path())
         path = [node_dir] + path
+
+        # On windows, we need to add the ImageMagick directory to the path
+        # otherwise compare won't be found, and the built-in OS convert
+        # method will be used instead of the ImageMagick one.
+        if 'win64' in host_platform() and path_to_imagemagick:
+            path.insert(0, path_to_imagemagick)
+
+        # On macOs, we can't install our own ImageMagick because the
+        # System Integrity Protection (SIP) won't let us set DYLD_LIBRARY_PATH
+        # unless we deactivate SIP with "csrutil disable".
+        # So we're asking the user to install it.
+        #
+        # if ImageMagick was installed via brew, we want to make sure we
+        # include the PATH
+        if host_platform() == "darwin":
+            for p in os.environ["PATH"].split(os.pathsep):
+                p = p.strip()
+                if not p or p in path:
+                    continue
+                path.append(p)
 
         append_env = {
             'PATH': os.pathsep.join(path),
@@ -355,6 +399,15 @@ class MachBrowsertime(MachCommandBase):
         # loose about arguments; repeat arguments are generally accepted but then produce
         # difficult to interpret type errors.
 
+        def extract_browser_name(args):
+            'Extracts the browser name if any'
+            # These are BT arguments, it's BT job to check them
+            # here we just want to extract the browser name
+            res = re.findall("(--browser|-b)[= ]([\w]+)", ' '.join(args))
+            if res == []:
+                return None
+            return res[0][-1]
+
         def matches(args, *flags):
             'Return True if any argument matches any of the given flags (maybe with an argument).'
             for flag in flags:
@@ -373,6 +426,24 @@ class MachBrowsertime(MachCommandBase):
         specifies_har = matches(args, '--har', '--skipHar', '--gzipHar')
         if not specifies_har:
             extra_args.append('--skipHar')
+
+        # If --firefox.binaryPath is not specified, default to the objdir binary
+        # Note: --firefox.release is not a real browsertime option, but it will
+        #       silently ignore it instead and default to a release installation.
+        specifies_binaryPath = matches(args, '--firefox.binaryPath',
+                                       '--firefox.release', '--firefox.nightly',
+                                       '--firefox.beta', '--firefox.developer')
+
+        if not specifies_binaryPath:
+            specifies_binaryPath = extract_browser_name(args) == 'chrome'
+
+        if not specifies_binaryPath:
+            try:
+                extra_args.extend(('--firefox.binaryPath', self.get_binary_path()))
+            except Exception:
+                print('Please run |./mach build| '
+                      'or specify a Firefox binary with --firefox.binaryPath.')
+                return 1
 
         if extra_args:
             self.log(
@@ -407,8 +478,10 @@ class MachBrowsertime(MachCommandBase):
             return self.check()
 
         self._activate_virtualenv()
-
-        return self.node([browsertime_path()] + self.extra_default_args(args) + args)
+        default_args = self.extra_default_args(args)
+        if default_args == 1:
+            return 1
+        return self.node([browsertime_path()] + default_args + args)
 
     @Command('visualmetrics', category='testing',
              description='Run visualmetrics.py')

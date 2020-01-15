@@ -19,7 +19,9 @@
 #include "js/Modules.h"
 #include "js/SourceText.h"
 #include "nsIInputStreamPump.h"
+#include "nsIStreamLoader.h"
 #include "nsIThreadRetargetableRequest.h"
+#include "nsIInputStreamPump.h"
 #include "nsNetUtil.h"
 #include "xpcprivate.h"
 
@@ -120,7 +122,7 @@ class WorkletFetchHandler final : public PromiseNativeHandler,
     }
 
     RequestOrUSVString request;
-    request.SetAsUSVString().Rebind(aModuleURL.Data(), aModuleURL.Length());
+    request.SetAsUSVString().ShareOrDependUpon(aModuleURL);
 
     RequestInit init;
     init.mCredentials.Construct(aOptions.mCredentials);

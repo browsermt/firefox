@@ -1486,19 +1486,19 @@ nscoord nsTableFrame::GetPrefISize(gfxContext* aRenderingContext) {
   return LayoutStrategy()->GetPrefISize(aRenderingContext, false);
 }
 
-/* virtual */ nsIFrame::IntrinsicISizeOffsetData
+/* virtual */ nsIFrame::IntrinsicSizeOffsetData
 nsTableFrame::IntrinsicISizeOffsets(nscoord aPercentageBasis) {
-  IntrinsicISizeOffsetData result =
+  IntrinsicSizeOffsetData result =
       nsContainerFrame::IntrinsicISizeOffsets(aPercentageBasis);
 
-  result.hMargin = 0;
+  result.margin = 0;
 
   if (IsBorderCollapse()) {
-    result.hPadding = 0;
+    result.padding = 0;
 
     WritingMode wm = GetWritingMode();
     LogicalMargin outerBC = GetIncludedOuterBCBorder(wm);
-    result.hBorder = outerBC.IStartEnd(wm);
+    result.border = outerBC.IStartEnd(wm);
   }
 
   return result;
@@ -2157,7 +2157,7 @@ nscoord nsTableFrame::GetCollapsedISize(const WritingMode aWM,
   nsTableFrame* fif = static_cast<nsTableFrame*>(FirstInFlow());
   for (nsIFrame* groupFrame : mColGroups) {
     const nsStyleVisibility* groupVis = groupFrame->StyleVisibility();
-    bool collapseGroup = (NS_STYLE_VISIBILITY_COLLAPSE == groupVis->mVisible);
+    bool collapseGroup = StyleVisibility::Collapse == groupVis->mVisible;
     nsTableColGroupFrame* cgFrame = (nsTableColGroupFrame*)groupFrame;
     for (nsTableColFrame* colFrame = cgFrame->GetFirstColumn(); colFrame;
          colFrame = colFrame->GetNextCol()) {
@@ -2165,7 +2165,7 @@ nscoord nsTableFrame::GetCollapsedISize(const WritingMode aWM,
       nscoord colIdx = colFrame->GetColIndex();
       if (mozilla::StyleDisplay::TableColumn == colDisplay->mDisplay) {
         const nsStyleVisibility* colVis = colFrame->StyleVisibility();
-        bool collapseCol = (NS_STYLE_VISIBILITY_COLLAPSE == colVis->mVisible);
+        bool collapseCol = StyleVisibility::Collapse == colVis->mVisible;
         nscoord colISize = fif->GetColumnISizeFromFirstInFlow(colIdx);
         if (!collapseGroup && !collapseCol) {
           iSize += colISize;
@@ -2649,19 +2649,15 @@ LogicalMargin nsTableFrame::GetChildAreaOffset(
 }
 
 void nsTableFrame::InitChildReflowInput(ReflowInput& aReflowInput) {
-  nsMargin collapseBorder;
-  nsMargin padding(0, 0, 0, 0);
-  nsMargin* pCollapseBorder = nullptr;
-  nsPresContext* presContext = PresContext();
+  nsMargin border;
   if (IsBorderCollapse()) {
     nsTableRowGroupFrame* rgFrame =
         static_cast<nsTableRowGroupFrame*>(aReflowInput.mFrame);
     WritingMode wm = GetWritingMode();
-    LogicalMargin border = rgFrame->GetBCBorderWidth(wm);
-    collapseBorder = border.GetPhysicalMargin(wm);
-    pCollapseBorder = &collapseBorder;
+    border = rgFrame->GetBCBorderWidth(wm).GetPhysicalMargin(wm);
   }
-  aReflowInput.Init(presContext, Nothing(), pCollapseBorder, &padding);
+  const nsMargin padding;
+  aReflowInput.Init(PresContext(), Nothing(), &border, &padding);
 
   NS_ASSERTION(!mBits.mResizedColumns ||
                    !aReflowInput.mParentReflowInput->mFlags.mSpecialBSizeReflow,
@@ -3731,10 +3727,7 @@ bool nsTableFrame::IsAutoBSize(WritingMode aWM) {
   if (bsize.IsAuto()) {
     return true;
   }
-  // Don't consider calc() here like this quirk for percent.
-  // FIXME(emilio): calc() causing this behavior change seems odd.
-  return bsize.HasPercent() && !bsize.AsLengthPercentage().was_calc &&
-         bsize.ToPercentage() <= 0.0f;
+  return bsize.ConvertsToPercentage() && bsize.ToPercentage() <= 0.0f;
 }
 
 nscoord nsTableFrame::CalcBorderBoxBSize(const ReflowInput& aReflowInput) {
@@ -4626,9 +4619,9 @@ static const BCCellBorder& CompareBorders(
   bool firstDominates = true;
 
   if (StyleBorderStyle::Hidden == aBorder1.style) {
-    firstDominates = (aIsCorner) ? false : true;
+    firstDominates = !aIsCorner;
   } else if (StyleBorderStyle::Hidden == aBorder2.style) {
-    firstDominates = (aIsCorner) ? true : false;
+    firstDominates = aIsCorner;
   } else if (aBorder1.width < aBorder2.width) {
     firstDominates = false;
   } else if (aBorder1.width == aBorder2.width) {
@@ -6718,7 +6711,7 @@ Maybe<BCBorderParameters> BCBlockDirSeg::BuildBorderParameters(
       if (!aIter.IsTableIEndMost() && (relColIndex > 0)) {
         col = aIter.mBlockDirInfo[relColIndex - 1].mCol;
       }
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eColGroupOwner:
       if (col) {
         owner = col->GetParent();
@@ -6729,13 +6722,13 @@ Maybe<BCBorderParameters> BCBlockDirSeg::BuildBorderParameters(
       if (!aIter.IsTableIEndMost() && (relColIndex > 0)) {
         col = aIter.mBlockDirInfo[relColIndex - 1].mCol;
       }
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eColOwner:
       owner = col;
       break;
     case eAjaRowGroupOwner:
       NS_ERROR("a neighboring rowgroup can never own a vertical border");
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eRowGroupOwner:
       NS_ASSERTION(aIter.IsTableIStartMost() || aIter.IsTableIEndMost(),
                    "row group can own border only at table edge");
@@ -6743,7 +6736,7 @@ Maybe<BCBorderParameters> BCBlockDirSeg::BuildBorderParameters(
       break;
     case eAjaRowOwner:
       NS_ERROR("program error");
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eRowOwner:
       NS_ASSERTION(aIter.IsTableIStartMost() || aIter.IsTableIEndMost(),
                    "row can own border only at table edge");
@@ -6752,7 +6745,7 @@ Maybe<BCBorderParameters> BCBlockDirSeg::BuildBorderParameters(
     case eAjaCellOwner:
       side = eLogicalSideIEnd;
       cell = mAjaCell;
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eCellOwner:
       owner = cell;
       break;
@@ -6928,20 +6921,19 @@ static void CreateWRCommandsForBeveledBorder(
   for (const auto& segment : segments) {
     auto rect = LayoutDeviceRect::FromUnknownRect(NSRectToRect(
         segment.mRect + aOffset, aBorderParams.mAppUnitsPerDevPixel));
-    auto roundedRect = wr::ToRoundedLayoutRect(rect);
+    auto r = wr::ToLayoutRect(rect);
     auto color = wr::ToColorF(ToDeviceColor(segment.mColor));
 
     // Adjust for the start bevel if needed.
-    AdjustAndPushBevel(aBuilder, roundedRect, segment.mColor,
-                       segment.mStartBevel, aBorderParams.mAppUnitsPerDevPixel,
+    AdjustAndPushBevel(aBuilder, r, segment.mColor, segment.mStartBevel,
+                       aBorderParams.mAppUnitsPerDevPixel,
                        aBorderParams.mBackfaceIsVisible, true);
 
-    AdjustAndPushBevel(aBuilder, roundedRect, segment.mColor, segment.mEndBevel,
+    AdjustAndPushBevel(aBuilder, r, segment.mColor, segment.mEndBevel,
                        aBorderParams.mAppUnitsPerDevPixel,
                        aBorderParams.mBackfaceIsVisible, false);
 
-    aBuilder.PushRect(roundedRect, roundedRect,
-                      aBorderParams.mBackfaceIsVisible, color);
+    aBuilder.PushRect(r, r, aBorderParams.mBackfaceIsVisible, color);
   }
 }
 
@@ -6956,7 +6948,7 @@ static void CreateWRCommandsForBorderSegment(
   auto borderRect = LayoutDeviceRect::FromUnknownRect(NSRectToRect(
       aBorderParams.mBorderRect + aOffset, aBorderParams.mAppUnitsPerDevPixel));
 
-  wr::LayoutRect roundedRect = wr::ToRoundedLayoutRect(borderRect);
+  wr::LayoutRect r = wr::ToLayoutRect(borderRect);
   wr::BorderSide wrSide[4];
   NS_FOR_CSS_SIDES(i) {
     wrSide[i] = wr::ToBorderSide(ToDeviceColor(aBorderParams.mBorderColor),
@@ -6964,8 +6956,7 @@ static void CreateWRCommandsForBorderSegment(
   }
   const bool horizontal = aBorderParams.mStartBevelSide == eSideTop ||
                           aBorderParams.mStartBevelSide == eSideBottom;
-  auto borderWidth =
-      horizontal ? roundedRect.size.height : roundedRect.size.width;
+  auto borderWidth = horizontal ? r.size.height : r.size.width;
 
   // All border style is set to none except left side. So setting the widths of
   // each side to width of rect is fine.
@@ -6981,9 +6972,8 @@ static void CreateWRCommandsForBorderSegment(
   }
 
   Range<const wr::BorderSide> wrsides(wrSide, 4);
-  aBuilder.PushBorder(roundedRect, roundedRect,
-                      aBorderParams.mBackfaceIsVisible, borderWidths, wrsides,
-                      wr::EmptyBorderRadius());
+  aBuilder.PushBorder(r, r, aBorderParams.mBackfaceIsVisible, borderWidths,
+                      wrsides, wr::EmptyBorderRadius());
 }
 
 void BCBlockDirSeg::CreateWebRenderCommands(
@@ -7120,7 +7110,7 @@ Maybe<BCBorderParameters> BCInlineDirSeg::BuildBorderParameters(
       break;
     case eAjaColGroupOwner:
       NS_ERROR("neighboring colgroups can never own an inline-dir border");
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eColGroupOwner:
       NS_ASSERTION(aIter.IsTableBStartMost() || aIter.IsTableBEndMost(),
                    "col group can own border only at the table edge");
@@ -7130,7 +7120,7 @@ Maybe<BCBorderParameters> BCInlineDirSeg::BuildBorderParameters(
       break;
     case eAjaColOwner:
       NS_ERROR("neighboring column can never own an inline-dir border");
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eColOwner:
       NS_ASSERTION(aIter.IsTableBStartMost() || aIter.IsTableBEndMost(),
                    "col can own border only at the table edge");
@@ -7139,14 +7129,14 @@ Maybe<BCBorderParameters> BCInlineDirSeg::BuildBorderParameters(
     case eAjaRowGroupOwner:
       side = eLogicalSideBEnd;
       rg = (aIter.IsTableBEndMost()) ? aIter.mRg : aIter.mPrevRg;
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eRowGroupOwner:
       owner = rg;
       break;
     case eAjaRowOwner:
       side = eLogicalSideBEnd;
       row = (aIter.IsTableBEndMost()) ? aIter.mRow : aIter.mPrevRow;
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eRowOwner:
       owner = row;
       break;
@@ -7155,7 +7145,7 @@ Maybe<BCBorderParameters> BCInlineDirSeg::BuildBorderParameters(
       // if this is null due to the damage area origin-y > 0, then the border
       // won't show up anyway
       cell = mAjaCell;
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case eCellOwner:
       owner = cell;
       break;
@@ -7191,7 +7181,7 @@ Maybe<BCBorderParameters> BCInlineDirSeg::BuildBorderParameters(
   // right or bottom end. If the writing mode is inline-RTL, our "start" and
   // "end" will be reversed from this physical-coord view, so we have to swap
   // them here.
-  if (!aIter.mTableWM.IsBidiLTR()) {
+  if (aIter.mTableWM.IsBidiRTL()) {
     Swap(result.mStartBevelSide, result.mEndBevelSide);
     Swap(result.mStartBevelOffset, result.mEndBevelOffset);
   }

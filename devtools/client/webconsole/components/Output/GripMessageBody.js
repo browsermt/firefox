@@ -15,11 +15,13 @@ const {
 } = require("devtools/client/webconsole/utils/object-inspector");
 const actions = require("devtools/client/webconsole/actions/index");
 
-const reps = require("devtools/client/shared/components/reps/reps");
-const {
-  MODE,
-  objectInspector: { utils },
-} = reps;
+loader.lazyGetter(this, "objectInspector", function() {
+  return require("devtools/client/shared/components/reps/reps").objectInspector;
+});
+
+loader.lazyGetter(this, "MODE", function() {
+  return require("devtools/client/shared/components/reps/reps").MODE;
+});
 
 GripMessageBody.displayName = "GripMessageBody";
 
@@ -70,16 +72,21 @@ function GripMessageBody(props) {
     mode,
     maybeScrollToBottom,
     onCmdCtrlClick: (node, { depth, event, focused, expanded }) => {
-      const value = utils.node.getValue(node);
-      if (value) {
-        dispatch(actions.showObjectInSidebar(value));
+      const front = objectInspector.utils.node.getFront(node);
+      if (front) {
+        dispatch(actions.showObjectInSidebar(front));
       }
     },
   };
 
-  if (typeof grip === "string" || (grip && grip.type === "longString")) {
+  if (
+    typeof grip === "string" ||
+    (grip && grip.type === "longString") ||
+    (grip && grip.getGrip && grip.getGrip().type === "longString")
+  ) {
     Object.assign(objectInspectorProps, {
       useQuotes,
+      transformEmptyString: true,
       escapeWhitespace,
       style: styleObject,
     });
@@ -97,11 +104,11 @@ const allowedStylesRegex = new RegExp(
 
 // Regular expression that matches the forbidden CSS property values.
 const forbiddenValuesRegexs = [
-  // url(), -moz-element()
-  /\b(?:url|(?:-moz-)?element)[\s('"]+/gi,
+  // -moz-element()
+  /\b((?:-moz-)?element)[\s('"]+/gi,
 
   // various URL protocols
-  /['"(]*(?:chrome|resource|about|app|data|https?|ftp|file):+\/*/gi,
+  /['"(]*(?:chrome|resource|about|app|https?|ftp|file):+\/*/gi,
 ];
 
 function cleanupStyle(userProvidedStyle, createElement) {

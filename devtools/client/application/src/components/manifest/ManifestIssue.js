@@ -18,7 +18,10 @@ const {
 const FluentReact = require("devtools/client/shared/vendor/fluent-react");
 const Localized = createFactory(FluentReact.Localized);
 
-const { MANIFEST_ISSUE_LEVELS } = require("../../constants");
+const {
+  MANIFEST_ISSUE_LEVELS,
+} = require("devtools/client/application/src/constants");
+const Types = require("devtools/client/application/src/types/index");
 
 /**
  * A Manifest validation issue (warning, error)
@@ -27,10 +30,7 @@ class ManifestIssue extends PureComponent {
   static get propTypes() {
     return {
       className: PropTypes.string,
-      level: PropTypes.oneOf(Object.values(MANIFEST_ISSUE_LEVELS)).isRequired,
-      message: PropTypes.string.isRequired,
-      // NOTE: we are currently ignoring the 'type' field that platform adds to
-      //       errors
+      ...Types.manifestIssue, // { level, message }
     };
   }
 

@@ -28,10 +28,10 @@
 #include "mozilla/Utf8.h"  // mozilla::Utf8Unit
 #include "mozilla/Variant.h"
 
+#include <algorithm>
 #include <new>
 
 #include "jsmath.h"
-#include "jsutil.h"
 
 #include "frontend/ParseNode.h"
 #include "frontend/Parser.h"
@@ -786,7 +786,7 @@ class NumLit {
 // A canonical subset of types representing the coercion targets: Int, Float,
 // Double.
 //
-// Void is also part of the canonical subset which then maps to wasm::ExprType.
+// Void is also part of the canonical subset.
 
 class Type {
  public:
@@ -829,7 +829,7 @@ class Type {
   }
 
   // Map |t| to one of the canonical vartype representations of a
-  // wasm::ExprType.
+  // wasm::ValType.
   static Type canonicalize(Type t) {
     switch (t.which()) {
       case Fixnum:
@@ -853,7 +853,7 @@ class Type {
       case Floatish:
       case Intish:
         // These types need some kind of coercion, they can't be mapped
-        // to an ExprType.
+        // to an VarType.
         break;
     }
     MOZ_CRASH("Invalid vartype");
@@ -932,7 +932,7 @@ class Type {
   bool isGlobalVarType() const { return isArgType(); }
 
   // Check if this is one of the canonical vartype representations of a
-  // wasm::ExprType. See Type::canonicalize().
+  // wasm::ValType, or is void. See Type::canonicalize().
   bool isCanonical() const {
     switch (which()) {
       case Int:
@@ -948,52 +948,49 @@ class Type {
   // Check if this is a canonical representation of a wasm::ValType.
   bool isCanonicalValType() const { return !isVoid() && isCanonical(); }
 
-  // Convert this canonical type to a wasm::ExprType.
-  ExprType canonicalToExprType() const {
+  // Convert this canonical type to a wasm::ValType.
+  ValType canonicalToValType() const {
     switch (which()) {
       case Int:
-        return ExprType::I32;
+        return ValType::I32;
       case Float:
-        return ExprType::F32;
+        return ValType::F32;
       case Double:
-        return ExprType::F64;
-      case Void:
-        return ExprType::Void;
+        return ValType::F64;
       default:
         MOZ_CRASH("Need canonical type");
     }
   }
 
-  // Convert this canonical type to a wasm::ValType.
-  ValType canonicalToValType() const {
-    return NonVoidToValType(canonicalToExprType());
+  Maybe<ValType> canonicalToReturnType() const {
+    return isVoid() ? Nothing() : Some(canonicalToValType());
   }
 
-  // Convert this type to a wasm::ExprType for use in a wasm
+  // Convert this type to a wasm::TypeCode for use in a wasm
   // block signature. This works for all types, including non-canonical
   // ones. Consequently, the type isn't valid for subsequent asm.js
   // validation; it's only valid for use in producing wasm.
-  ExprType toWasmBlockSignatureType() const {
+  TypeCode toWasmBlockSignatureType() const {
     switch (which()) {
       case Fixnum:
       case Signed:
       case Unsigned:
       case Int:
       case Intish:
-        return ExprType::I32;
+        return TypeCode::I32;
 
       case Float:
       case MaybeFloat:
       case Floatish:
-        return ExprType::F32;
+        return TypeCode::F32;
 
       case DoubleLit:
       case Double:
       case MaybeDouble:
-        return ExprType::F64;
+        return TypeCode::F64;
 
       case Void:
-        return ExprType::Void;
+        return TypeCode::BlockVoid;
     }
     MOZ_CRASH("Invalid Type");
   }
@@ -1225,11 +1222,8 @@ class MOZ_STACK_CLASS JS_HAZ_ROOTED ModuleValidatorShared {
       MOZ_ASSERT(which_ == FFI);
       return u.ffiIndex_;
     }
-    bool isAnyArrayView() const {
-      return which_ == ArrayView || which_ == ArrayViewCtor;
-    }
     Scalar::Type viewType() const {
-      MOZ_ASSERT(isAnyArrayView());
+      MOZ_ASSERT(which_ == ArrayView || which_ == ArrayViewCtor);
       return u.viewType_;
     }
     bool isMathFunction() const { return which_ == MathBuiltinFunction; }
@@ -1354,8 +1348,9 @@ class MOZ_STACK_CLASS JS_HAZ_ROOTED ModuleValidatorShared {
         funcImportMap_(cx),
         arrayViews_(cx),
         compilerEnv_(CompileMode::Once, Tier::Optimized, OptimizedBackend::Ion,
-                     DebugEnabled::False, /* ref types */ false,
-                     /* gc types */ false, /* huge memory */ false),
+                     DebugEnabled::False, /* multi value */ false,
+                     /* ref types */ false, /* gc types */ false,
+                     /* huge memory */ false, /* bigint */ false),
         env_(&compilerEnv_, Shareable::False, ModuleKind::AsmJS) {
     compilerEnv_.computeParameters(/* gc types */ false);
     env_.minMemoryLength = RoundUpToNextValidAsmJSHeapLength(0);
@@ -2353,7 +2348,7 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
   uint32_t blockDepth_;
 
   bool hasAlreadyReturned_;
-  ExprType ret_;
+  Maybe<ValType> ret_;
 
  private:
   FunctionValidatorShared(ModuleValidatorShared& m, ParseNode* fn,
@@ -2365,8 +2360,7 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
         breakLabels_(cx),
         continueLabels_(cx),
         blockDepth_(0),
-        hasAlreadyReturned_(false),
-        ret_(ExprType::Limit) {}
+        hasAlreadyReturned_(false) {}
 
  protected:
   template <typename Unit>
@@ -2418,9 +2412,10 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
 
   bool hasAlreadyReturned() const { return hasAlreadyReturned_; }
 
-  ExprType returnedType() const { return ret_; }
+  Maybe<ValType> returnedType() const { return ret_; }
 
-  void setReturnedType(ExprType ret) {
+  void setReturnedType(const Maybe<ValType>& ret) {
+    MOZ_ASSERT(!hasAlreadyReturned_);
     ret_ = ret;
     hasAlreadyReturned_ = true;
   }
@@ -2442,7 +2437,7 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
  public:
   bool pushBreakableBlock() {
     return encoder().writeOp(Op::Block) &&
-           encoder().writeFixedU8(uint8_t(ExprType::Void)) &&
+           encoder().writeFixedU8(uint8_t(TypeCode::BlockVoid)) &&
            breakableStack_.append(blockDepth_++);
   }
   bool popBreakableBlock() {
@@ -2460,7 +2455,7 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
     }
     blockDepth_++;
     return encoder().writeOp(Op::Block) &&
-           encoder().writeFixedU8(uint8_t(ExprType::Void));
+           encoder().writeFixedU8(uint8_t(TypeCode::BlockVoid));
   }
   bool popUnbreakableBlock(const LabelVector* labels = nullptr) {
     if (labels) {
@@ -2474,7 +2469,7 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
 
   bool pushContinuableBlock() {
     return encoder().writeOp(Op::Block) &&
-           encoder().writeFixedU8(uint8_t(ExprType::Void)) &&
+           encoder().writeFixedU8(uint8_t(TypeCode::BlockVoid)) &&
            continuableStack_.append(blockDepth_++);
   }
   bool popContinuableBlock() {
@@ -2484,9 +2479,9 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
 
   bool pushLoop() {
     return encoder().writeOp(Op::Block) &&
-           encoder().writeFixedU8(uint8_t(ExprType::Void)) &&
+           encoder().writeFixedU8(uint8_t(TypeCode::BlockVoid)) &&
            encoder().writeOp(Op::Loop) &&
-           encoder().writeFixedU8(uint8_t(ExprType::Void)) &&
+           encoder().writeFixedU8(uint8_t(TypeCode::BlockVoid)) &&
            breakableStack_.append(blockDepth_++) &&
            continuableStack_.append(blockDepth_++);
   }
@@ -2504,15 +2499,15 @@ class MOZ_STACK_CLASS FunctionValidatorShared {
     MOZ_ASSERT(blockDepth_ > 0);
     return encoder().writeOp(Op::Else);
   }
-  void setIfType(size_t typeAt, ExprType type) {
-    encoder().patchFixedU7(typeAt, uint8_t(type.code()));
+  void setIfType(size_t typeAt, TypeCode type) {
+    encoder().patchFixedU7(typeAt, uint8_t(type));
   }
   bool popIf() {
     MOZ_ASSERT(blockDepth_ > 0);
     --blockDepth_;
     return encoder().writeOp(Op::End);
   }
-  bool popIf(size_t typeAt, ExprType type) {
+  bool popIf(size_t typeAt, TypeCode type) {
     MOZ_ASSERT(blockDepth_ > 0);
     --blockDepth_;
     if (!encoder().writeOp(Op::End)) {
@@ -3240,12 +3235,12 @@ static bool CheckFinalReturn(FunctionValidatorShared& f,
   }
 
   if (!f.hasAlreadyReturned()) {
-    f.setReturnedType(ExprType::Void);
+    f.setReturnedType(Nothing());
     return true;
   }
 
   if (!lastNonEmptyStmt->isKind(ParseNodeKind::ReturnStmt) &&
-      !IsVoid(f.returnedType())) {
+      f.returnedType()) {
     return f.fail(lastNonEmptyStmt,
                   "void incompatible with previous return type");
   }
@@ -3413,7 +3408,7 @@ static bool CheckArrayAccess(FunctionValidator<Unit>& f, ParseNode* viewName,
 
   const ModuleValidatorShared::Global* global =
       f.lookupGlobal(viewName->as<NameNode>().name());
-  if (!global || !global->isAnyArrayView()) {
+  if (!global || global->which() != ModuleValidatorShared::Global::ArrayView) {
     return f.fail(viewName,
                   "base of array access must be a typed array view name");
   }
@@ -3941,27 +3936,9 @@ static bool CheckCallArgs(FunctionValidator<Unit>& f, ParseNode* callNode,
 static bool CheckSignatureAgainstExisting(ModuleValidatorShared& m,
                                           ParseNode* usepn, const FuncType& sig,
                                           const FuncType& existing) {
-  if (sig.args().length() != existing.args().length()) {
-    return m.failf(usepn,
-                   "incompatible number of arguments (%zu"
-                   " here vs. %zu before)",
-                   sig.args().length(), existing.args().length());
+  if (sig != existing) {
+    return m.failf(usepn, "incompatible argument types to function");
   }
-
-  for (unsigned i = 0; i < sig.args().length(); i++) {
-    if (sig.arg(i) != existing.arg(i)) {
-      return m.failf(
-          usepn, "incompatible type for argument %u: (%s here vs. %s before)",
-          i, ToCString(sig.arg(i)), ToCString(existing.arg(i)));
-    }
-  }
-
-  if (sig.ret() != existing.ret()) {
-    return m.failf(usepn, "%s incompatible with previous return of type %s",
-                   ToCString(sig.ret()), ToCString(existing.ret()));
-  }
-
-  MOZ_ASSERT(sig == existing);
   return true;
 }
 
@@ -4011,7 +3988,13 @@ static bool CheckInternalCall(FunctionValidator<Unit>& f, ParseNode* callNode,
     return false;
   }
 
-  FuncType sig(std::move(args), ret.canonicalToExprType());
+  ValTypeVector results;
+  Maybe<ValType> retType = ret.canonicalToReturnType();
+  if (retType && !results.append(retType.ref())) {
+    return false;
+  }
+
+  FuncType sig(std::move(args), std::move(results));
 
   ModuleValidatorShared::Func* callee;
   if (!CheckFunctionSignature(f.m(), callNode, std::move(sig), calleeName,
@@ -4121,7 +4104,13 @@ static bool CheckFuncPtrCall(FunctionValidator<Unit>& f, ParseNode* callNode,
     return false;
   }
 
-  FuncType sig(std::move(args), ret.canonicalToExprType());
+  ValTypeVector results;
+  Maybe<ValType> retType = ret.canonicalToReturnType();
+  if (retType && !results.append(retType.ref())) {
+    return false;
+  }
+
+  FuncType sig(std::move(args), std::move(results));
 
   uint32_t tableIndex;
   if (!CheckFuncPtrTableAgainstExisting(f.m(), tableNode, name, std::move(sig),
@@ -4166,7 +4155,13 @@ static bool CheckFFICall(FunctionValidator<Unit>& f, ParseNode* callNode,
     return false;
   }
 
-  FuncType sig(std::move(args), ret.canonicalToExprType());
+  ValTypeVector results;
+  Maybe<ValType> retType = ret.canonicalToReturnType();
+  if (retType && !results.append(retType.ref())) {
+    return false;
+  }
+
+  FuncType sig(std::move(args), std::move(results));
 
   uint32_t importIndex;
   if (!f.m().declareImport(calleeName, std::move(sig), ffiIndex,
@@ -4693,8 +4688,7 @@ static bool CheckComma(FunctionValidator<Unit>& f, ParseNode* comma,
     return false;
   }
 
-  f.encoder().patchFixedU7(typeAt,
-                           uint8_t(type->toWasmBlockSignatureType().code()));
+  f.encoder().patchFixedU7(typeAt, uint8_t(type->toWasmBlockSignatureType()));
 
   return f.encoder().writeOp(Op::End);
 }
@@ -5584,7 +5578,7 @@ recurse:
     return false;
   }
 
-  f.setIfType(typeAt, ExprType::Void);
+  f.setIfType(typeAt, TypeCode::BlockVoid);
 
   if (!CheckStatement(f, thenStmt)) {
     return false;
@@ -5677,8 +5671,8 @@ static bool CheckSwitchRange(FunctionValidatorShared& f, ParseNode* stmt,
       return false;
     }
 
-    *low = Min(*low, i);
-    *high = Max(*high, i);
+    *low = std::min(*low, i);
+    *high = std::max(*high, i);
   }
 
   int64_t i64 = (int64_t(*high) - int64_t(*low)) + 1;
@@ -5867,14 +5861,16 @@ static bool CheckSwitch(FunctionValidator<Unit>& f, ParseNode* switchStmt) {
 
 static bool CheckReturnType(FunctionValidatorShared& f, ParseNode* usepn,
                             Type ret) {
+  Maybe<ValType> type = ret.canonicalToReturnType();
+
   if (!f.hasAlreadyReturned()) {
-    f.setReturnedType(ret.canonicalToExprType());
+    f.setReturnedType(type);
     return true;
   }
 
-  if (f.returnedType() != ret.canonicalToExprType()) {
+  if (f.returnedType() != type) {
     return f.failf(usepn, "%s incompatible with previous return of type %s",
-                   Type::ret(ret).toChars(), ToCString(f.returnedType()));
+                   ToCString(type), ToCString(f.returnedType()));
   }
 
   return true;
@@ -6075,22 +6071,6 @@ static bool CheckFunction(ModuleValidator<Unit>& m) {
     return false;
   }
 
-  // Eagerly process the function tree, and null out all the functionbox
-  // pointers from this root of the tree.
-  //
-  // This is because the scope exit above frees all the function boxes
-  // that would have been created as part of this subtree.
-  FunctionTree* tree = m.parser().getTreeHolder().getCurrentParent();
-  if (tree) {
-    m.parser().publishDeferredItems(tree);
-
-    tree->visitRecursively(m.cx(), &m.parser(),
-                           [](ParserBase* parser, FunctionTree* tree) {
-                             tree->setFunctionBox(nullptr);
-                             return true;
-                           });
-  }
-
   if (!CheckFunctionHead(m, funNode)) {
     return false;
   }
@@ -6124,9 +6104,16 @@ static bool CheckFunction(ModuleValidator<Unit>& m) {
     return false;
   }
 
+  ValTypeVector results;
+  if (f.returnedType()) {
+    if (!results.append(f.returnedType().ref())) {
+      return false;
+    }
+  }
+
   ModuleValidatorShared::Func* func = nullptr;
   if (!CheckFunctionSignature(m, funNode,
-                              FuncType(std::move(args), f.returnedType()),
+                              FuncType(std::move(args), std::move(results)),
                               FunctionName(funNode), &func)) {
     return false;
   }
@@ -6548,7 +6535,7 @@ static bool ValidateGlobalVariable(JSContext* cx, const AsmJSGlobal& global,
         return LinkFail(cx, "Imported values must be primitives");
       }
 
-      switch (global.varInitImportType().code()) {
+      switch (global.varInitImportType().kind()) {
         case ValType::I32: {
           int32_t i32;
           if (!ToInt32(cx, v, &i32)) {
@@ -6575,10 +6562,7 @@ static bool ValidateGlobalVariable(JSContext* cx, const AsmJSGlobal& global,
           val->emplace(d);
           return true;
         }
-        case ValType::Ref:
-        case ValType::NullRef:
-        case ValType::AnyRef:
-        case ValType::FuncRef: {
+        case ValType::Ref: {
           MOZ_CRASH("not available in asm.js");
         }
       }
@@ -6914,7 +6898,7 @@ static bool HandleInstantiationFailure(JSContext* cx, CallArgs args,
 
   uint32_t begin = metadata.toStringStart;
   uint32_t end = metadata.srcEndAfterCurly();
-  Rooted<JSFlatString*> src(cx, source->substringDontDeflate(cx, begin, end));
+  Rooted<JSLinearString*> src(cx, source->substringDontDeflate(cx, begin, end));
   if (!src) {
     return false;
   }
@@ -6936,7 +6920,7 @@ static bool HandleInstantiationFailure(JSContext* cx, CallArgs args,
   // The exported function inherits an implicit strict context if the module
   // also inherited it somehow.
   if (metadata.strict) {
-    options.strictOption = true;
+    options.setForceStrictMode();
   }
 
   AutoStableStringChars stableChars(cx);
@@ -7134,6 +7118,11 @@ static bool DoCompileAsmJS(JSContext* cx, AsmJSParser<Unit>& parser,
   MOZ_ASSERT(funbox->isInterpreted());
   funbox->clobberFunction(moduleFun);
 
+  // Clear any deferred allocation data. This is important in particular
+  // to avoid publishing a deferred function allocation on top of the
+  // module function set on the funbox above.
+  funbox->clearDeferredAllocationInfo();
+
   // Success! Write to the console with a "warning" message indicating
   // total compilation time.
   *validated = true;
@@ -7254,7 +7243,7 @@ JSString* js::AsmJSModuleToString(JSContext* cx, HandleFunction fun,
       return nullptr;
     }
   } else {
-    Rooted<JSFlatString*> src(cx, source->substring(cx, begin, end));
+    Rooted<JSLinearString*> src(cx, source->substring(cx, begin, end));
     if (!src) {
       return nullptr;
     }
@@ -7304,7 +7293,7 @@ JSString* js::AsmJSFunctionToString(JSContext* cx, HandleFunction fun) {
       return nullptr;
     }
   } else {
-    Rooted<JSFlatString*> src(cx, source->substring(cx, begin, end));
+    Rooted<JSLinearString*> src(cx, source->substring(cx, begin, end));
     if (!src) {
       return nullptr;
     }

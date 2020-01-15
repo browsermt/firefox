@@ -14,6 +14,7 @@ import sys
 import tempfile
 import zipfile
 from collections import namedtuple
+from six import string_types, text_type
 from six.moves.urllib.request import urlopen
 
 import mozfile
@@ -139,7 +140,7 @@ def log_crashes(logger,
 # determining the appropriate frame for the crash signature.
 ABORT_SIGNATURES = (
     "Abort(char const*)",
-    "GeckoCrash",
+    "RustMozCrash",
     "NS_DebugBreak",
     # This signature is part of Rust panic stacks on some platforms. On
     # others, it includes a template parameter containing "core::panic::" and
@@ -472,7 +473,7 @@ if mozinfo.isWin:
                 log.error(u"minidumpwriter not found in {}".format(utility_path))
                 return
 
-            if isinstance(file_name, unicode):
+            if isinstance(file_name, string_types):
                 # Convert to a byte string before sending to the shell.
                 file_name = file_name.encode(sys.getfilesystemencoding())
 
@@ -486,10 +487,10 @@ if mozinfo.isWin:
         if not proc_handle:
             return
 
-        if not isinstance(file_name, unicode):
+        if not isinstance(file_name, string_types):
             # Convert to unicode explicitly so our path will be valid as input
             # to CreateFileW
-            file_name = unicode(file_name, sys.getfilesystemencoding())
+            file_name = text_type(file_name, sys.getfilesystemencoding())
 
         file_handle = kernel32.CreateFileW(file_name,
                                            GENERIC_READ | GENERIC_WRITE,

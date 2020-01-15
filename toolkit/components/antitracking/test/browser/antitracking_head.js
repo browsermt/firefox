@@ -8,6 +8,8 @@
 "use strict";
 
 var gFeatures = undefined;
+var gTestTrackersCleanedUp = false;
+var gTestTrackersCleanupRegistered = false;
 
 /**
  * Force garbage collection.
@@ -317,7 +319,11 @@ this.AntiTracking = {
     });
 
     info("Let's interact with the tracker");
-    window.open(TEST_3RD_PARTY_DOMAIN + TEST_PATH + "3rdPartyOpenUI.html");
+    window.open(
+      TEST_3RD_PARTY_DOMAIN + TEST_PATH + "3rdPartyOpenUI.html",
+      "",
+      "noopener"
+    );
     await windowClosed;
   },
 
@@ -354,16 +360,30 @@ this.AntiTracking = {
             "@mozilla.org/url-classifier/dbservice;1"
           ].getService(Ci.nsIURIClassifier);
           let feature = classifier.getFeatureByName("tracking-annotation");
-          await TestUtils.waitForCondition(
-            () => feature.skipHostList == item[1].toLowerCase(),
-            "Skip list service initialized"
-          );
+          await TestUtils.waitForCondition(() => {
+            for (let x of item[1].toLowerCase().split(",")) {
+              if (feature.skipHostList.split(",").includes(x)) {
+                return true;
+              }
+            }
+            return false;
+          }, "Skip list service initialized");
           break;
         }
       }
     }
 
     await UrlClassifierTestUtils.addTestTrackers();
+    if (!gTestTrackersCleanupRegistered) {
+      registerCleanupFunction(_ => {
+        if (gTestTrackersCleanedUp) {
+          return;
+        }
+        UrlClassifierTestUtils.cleanupTestTrackers();
+        gTestTrackersCleanedUp = true;
+      });
+      gTestTrackersCleanupRegistered = true;
+    }
   },
 
   _createTask(options) {
@@ -486,20 +506,22 @@ this.AntiTracking = {
         typeof options.accessRemoval == "string" &&
         options.cookieBehavior == BEHAVIOR_REJECT_TRACKER &&
         !options.allowList;
-      let id = await ContentTask.spawn(
+      let id = await SpecialPowers.spawn(
         browser,
-        {
-          page: thirdPartyPage,
-          nextPage: TEST_4TH_PARTY_PAGE,
-          callback: options.callback.toString(),
-          callbackAfterRemoval: options.callbackAfterRemoval
-            ? options.callbackAfterRemoval.toString()
-            : null,
-          accessRemoval: options.accessRemoval,
-          iframeSandbox: options.iframeSandbox,
-          allowList: options.allowList,
-          doAccessRemovalChecks,
-        },
+        [
+          {
+            page: thirdPartyPage,
+            nextPage: TEST_4TH_PARTY_PAGE,
+            callback: options.callback.toString(),
+            callbackAfterRemoval: options.callbackAfterRemoval
+              ? options.callbackAfterRemoval.toString()
+              : null,
+            accessRemoval: options.accessRemoval,
+            iframeSandbox: options.iframeSandbox,
+            allowList: options.allowList,
+            doAccessRemovalChecks,
+          },
+        ],
         async function(obj) {
           let id = "id" + Math.random();
           await new content.Promise(resolve => {
@@ -606,14 +628,16 @@ this.AntiTracking = {
         gBrowser.goBack();
         await pageshow;
 
-        await ContentTask.spawn(
+        await SpecialPowers.spawn(
           browser,
-          {
-            id,
-            callbackAfterRemoval: options.callbackAfterRemoval
-              ? options.callbackAfterRemoval.toString()
-              : null,
-          },
+          [
+            {
+              id,
+              callbackAfterRemoval: options.callbackAfterRemoval
+                ? options.callbackAfterRemoval.toString()
+                : null,
+            },
+          ],
           async function(obj) {
             let ifr = content.document.getElementById(obj.id);
             ifr.contentWindow.postMessage(obj.callbackAfterRemoval, "*");
@@ -671,14 +695,32 @@ this.AntiTracking = {
       if (expectedCategory == "") {
         is(allMessages.length, 0, "No console messages should be generated");
       } else {
-        ok(allMessages.length != 0, "Some console message should be generated");
+        ok(!!allMessages.length, "Some console message should be generated");
+        if (options.errorMessageDomains) {
+          is(
+            allMessages.length,
+            options.errorMessageDomains.length,
+            "Enough items provided in errorMessageDomains"
+          );
+        }
       }
+      let index = 0;
       for (let msg of allMessages) {
         is(
           msg.category,
           expectedCategory,
           "Message should be of expected category"
         );
+
+        if (options.errorMessageDomains) {
+          ok(
+            msg.errorMessage.includes(options.errorMessageDomains[index]),
+            `Error message domain ${
+              options.errorMessageDomains[index]
+            } (${index}) found in "${msg.errorMessage}"`
+          );
+          index++;
+        }
       }
 
       if (options.allowList) {
@@ -751,14 +793,16 @@ this.AntiTracking = {
       }
 
       info("Creating a 3rd party content");
-      await ContentTask.spawn(
+      await SpecialPowers.spawn(
         browser,
-        {
-          page: pageURL,
-          blockingCallback: blockingCallback.toString(),
-          nonBlockingCallback: nonBlockingCallback.toString(),
-          iframeSandbox,
-        },
+        [
+          {
+            page: pageURL,
+            blockingCallback: blockingCallback.toString(),
+            nonBlockingCallback: nonBlockingCallback.toString(),
+            iframeSandbox,
+          },
+        ],
         async function(obj) {
           await new content.Promise(resolve => {
             let ifr = content.document.createElement("iframe");
@@ -832,14 +876,16 @@ this.AntiTracking = {
       await BrowserTestUtils.browserLoaded(browser);
 
       info("Creating a 3rd party content");
-      await ContentTask.spawn(
+      await SpecialPowers.spawn(
         browser,
-        {
-          page: TEST_3RD_PARTY_PAGE_UI,
-          popup: TEST_POPUP_PAGE,
-          blockingCallback: blockingCallback.toString(),
-          iframeSandbox,
-        },
+        [
+          {
+            page: TEST_3RD_PARTY_PAGE_UI,
+            popup: TEST_POPUP_PAGE,
+            blockingCallback: blockingCallback.toString(),
+            iframeSandbox,
+          },
+        ],
         async function(obj) {
           let ifr = content.document.createElement("iframe");
           let loading = new content.Promise(resolve => {
@@ -934,14 +980,16 @@ this.AntiTracking = {
 
       await AntiTracking.interactWithTracker();
 
-      await ContentTask.spawn(
+      await SpecialPowers.spawn(
         browser,
-        {
-          page: TEST_3RD_PARTY_PAGE_UI,
-          popup: TEST_POPUP_PAGE,
-          nonBlockingCallback: nonBlockingCallback.toString(),
-          iframeSandbox,
-        },
+        [
+          {
+            page: TEST_3RD_PARTY_PAGE_UI,
+            popup: TEST_POPUP_PAGE,
+            nonBlockingCallback: nonBlockingCallback.toString(),
+            iframeSandbox,
+          },
+        ],
         async function(obj) {
           let ifr = content.document.createElement("iframe");
           let loading = new content.Promise(resolve => {
@@ -1047,6 +1095,6 @@ this.AntiTracking = {
       channel.asyncOpen(listener);
     });
 
-    return channel.QueryInterface(Ci.nsIHttpChannel).isTrackingResource();
+    return channel.QueryInterface(Ci.nsIClassifiedChannel).isTrackingResource();
   },
 };

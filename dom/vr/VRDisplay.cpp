@@ -9,11 +9,11 @@
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/ElementBinding.h"
 #include "mozilla/dom/Promise.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/VRDisplay.h"
-#include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/dom/VRDisplayBinding.h"
+#include "mozilla/HoldDropJSObjects.h"
 #include "mozilla/Base64.h"
-#include "mozilla/EventStateManager.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/gfx/DataSurfaceHelpers.h"
 #include "Navigator.h"
@@ -68,6 +68,11 @@ uint32_t VRDisplayCapabilities::MaxLayers() const {
   return CanPresent() ? 1 : 0;
 }
 
+void VRDisplay::UpdateDisplayClient(
+    already_AddRefed<gfx::VRDisplayClient> aClient) {
+  mClient = std::move(aClient);
+}
+
 /*static*/
 bool VRDisplay::RefreshVRDisplays(uint64_t aWindowId) {
   gfx::VRManagerChild* vm = gfx::VRManagerChild::Get();
@@ -89,6 +94,11 @@ void VRDisplay::UpdateVRDisplays(nsTArray<RefPtr<VRDisplay>>& aDisplays,
       for (size_t j = 0; j < aDisplays.Length(); j++) {
         if (aDisplays[j]->GetClient()->GetDisplayInfo().GetDisplayID() ==
             display->GetDisplayInfo().GetDisplayID()) {
+          displays.AppendElement(aDisplays[j]);
+          isNewDisplay = false;
+        } else {
+          RefPtr<gfx::VRDisplayClient> ref = display;
+          aDisplays[j]->UpdateDisplayClient(do_AddRef(display));
           displays.AppendElement(aDisplays[j]);
           isNewDisplay = false;
         }
@@ -320,8 +330,6 @@ VRDisplay::VRDisplay(nsPIDOMWindowInner* aWindow, gfx::VRDisplayClient* aClient)
       mVRNavigationEventDepth(0),
       mShutdown(false) {
   const gfx::VRDisplayInfo& info = aClient->GetDisplayInfo();
-  mDisplayId = info.GetDisplayID();
-  mDisplayName = NS_ConvertUTF8toUTF16(info.GetDisplayName());
   mCapabilities = new VRDisplayCapabilities(aWindow, info.GetCapabilities());
   if (info.GetCapabilities() &
       gfx::VRDisplayCapabilityFlags::Cap_StageParameters) {
@@ -361,6 +369,16 @@ VRDisplayCapabilities* VRDisplay::Capabilities() { return mCapabilities; }
 
 VRStageParameters* VRDisplay::GetStageParameters() { return mStageParameters; }
 
+uint32_t VRDisplay::DisplayId() const {
+  const gfx::VRDisplayInfo& info = mClient->GetDisplayInfo();
+  return info.GetDisplayID();
+}
+
+void VRDisplay::GetDisplayName(nsAString& aDisplayName) const {
+  const gfx::VRDisplayInfo& info = mClient->GetDisplayInfo();
+  aDisplayName = NS_ConvertUTF8toUTF16(info.GetDisplayName());
+}
+
 void VRDisplay::UpdateFrameInfo() {
   /**
    * The WebVR 1.1 spec Requires that VRDisplay.getPose and
@@ -375,7 +393,10 @@ void VRDisplay::UpdateFrameInfo() {
    * If we are not presenting WebVR content, the frame will never end and we
    * should return the latest frame data always.
    */
-  if (mFrameInfo.IsDirty() || !mPresentation) {
+  mFrameInfo.Clear();
+
+  if ((mFrameInfo.IsDirty() && IsPresenting()) ||
+      mClient->GetDisplayInfo().GetPresentingGroups() == 0) {
     const gfx::VRHMDSensorState& state = mClient->GetSensorState();
     const gfx::VRDisplayInfo& info = mClient->GetDisplayInfo();
     mFrameInfo.Update(info, state, mDepthNear, mDepthFar);
@@ -461,7 +482,7 @@ already_AddRefed<Promise> VRDisplay::RequestPresent(
   uint32_t presentationGroup =
       isChromePresentation ? gfx::kVRGroupChrome : gfx::kVRGroupContent;
 
-  if (!EventStateManager::IsHandlingUserInput() && !isChromePresentation &&
+  if (!UserActivation::IsHandlingUserInput() && !isChromePresentation &&
       !IsHandlingVRNavigationEvent() && StaticPrefs::dom_vr_require_gesture() &&
       !IsPresenting()) {
     // The WebVR API states that if called outside of a user gesture, the
@@ -674,7 +695,7 @@ VRFrameData::~VRFrameData() { mozilla::DropJSObjects(this); }
 
 /* static */
 already_AddRefed<VRFrameData> VRFrameData::Constructor(
-    const GlobalObject& aGlobal, ErrorResult& aRv) {
+    const GlobalObject& aGlobal) {
   RefPtr<VRFrameData> obj = new VRFrameData(aGlobal.GetAsSupports());
   return obj.forget();
 }

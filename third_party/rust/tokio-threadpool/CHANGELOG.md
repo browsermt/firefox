@@ -1,3 +1,44 @@
+# 0.1.17 (December 3, 2019)
+
+### Added
+- Internal APIs for overriding blocking behavior (#1752)
+
+# 0.1.16 (September 25, 2019)
+
+### Changed
+- Remove last non-dev dependency on rand crate by seeding PRNG via libstd
+  `RandomState` (#1324 backport)
+- Upgrade (dev-only dependency) rand to 0.7.0 (#1302 backport)
+- The minimum supported rust version (MSRV) is now 1.31.0 (#1358)
+
+# 0.1.15 (June 2, 2019)
+
+### Changed
+- Allow other executors inside `threadpool::blocking` (#1155).
+
+# 0.1.14 (April 22, 2019)
+
+### Added
+- Add `panic_handler` for customizing action taken on panic (#1052).
+
+# 0.1.13 (March 22, 2019)
+
+### Added
+- `TypedExecutor` implementations (#993)
+
+# 0.1.12 (March 1, 2019)
+
+### Fixed
+- Documentation typos (#915).
+
+### Changed
+- Update crossbeam dependencies (#874).
+
+# 0.1.11 (January 24, 2019)
+
+### Fixed
+- Drop incomplete tasks when threadpool is dropped (#722).
+
 # 0.1.10 (January 6, 2019)
 
 * Fix deadlock bug in `blocking` (#795).

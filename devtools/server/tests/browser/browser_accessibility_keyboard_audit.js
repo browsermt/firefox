@@ -129,6 +129,208 @@ add_task(async function() {
       "#img-4",
       { score: FAIL, issue: MOUSE_INTERACTIVE_ONLY },
     ],
+    ["Focusable button with aria-haspopup.", "#buttonmenu-1", null],
+    [
+      "Not focusable aria button with aria-haspopup.",
+      "#buttonmenu-2",
+      {
+        score: FAIL,
+        issue: INTERACTIVE_NOT_FOCUSABLE,
+      },
+    ],
+    ["Focusable checkbox.", "#checkbox-1", null],
+    ["Focusable select element size > 1", "#listbox-1", null],
+    ["Focusable select element with one option", "#combobox-1", null],
+    ["Focusable select element with no options", "#combobox-2", null],
+    ["Focusable select element with two options", "#combobox-3", null],
+    [
+      "Non-focusable aria combobox with one aria option.",
+      "#editcombobox-1",
+      null,
+    ],
+    ["Non-focusable aria combobox with no options.", "#editcombobox-2", null],
+    ["Focusable aria combobox with no options.", "#editcombobox-3", null],
+    [
+      "Non-focusable aria switch",
+      "#switch-1",
+      {
+        score: FAIL,
+        issue: INTERACTIVE_NOT_FOCUSABLE,
+      },
+    ],
+    ["Focusable aria switch", "#switch-2", null],
+    [
+      "Combobox list that is visible (has focusable state)",
+      "#owned_listbox",
+      null,
+    ],
+    [
+      "Mouse interactive, label that contains form element (linked)",
+      "#label-1",
+      null,
+    ],
+    ["Mouse interactive label for external element (linked)", "#label-2", null],
+    ["Not interactive unlinked label", "#label-3", null],
+    [
+      "Not interactive unlinked label with folloing form element",
+      "#label-4",
+      null,
+    ],
+    ["Image inside an anchor (href)", "#img-5", null],
+    ["Image inside an anchor (onmousedown)", "#img-6", null],
+    ["Image inside an anchor (onclick)", "#img-7", null],
+    ["Image inside an anchor (onmouseup)", "#img-8", null],
+    [
+      "Section with a collapse action from aria-expanded attribute",
+      "#section-1",
+      null,
+    ],
+    ["Tabindex -1 should not report an element as focusable", "#main", null],
+    [
+      "Not keyboard focusable element with no focus styling.",
+      "#not-keyboard-focusable-1",
+      null,
+    ],
+    ["Interactive grid that is not focusable.", "#grid-1", null],
+    ["Focusable interactive grid.", "#grid-2", null],
+    [
+      "Non interactive ARIA table does not need to be focusable.",
+      "#table-1",
+      null,
+    ],
+    [
+      "Focusable ARIA table does not have interactive semantics",
+      "#table-2",
+      { score: "WARNING", issue: "FOCUSABLE_NO_SEMANTICS" },
+    ],
+    ["Non interactive table does not need to be focusable.", "#table-3", null],
+    [
+      "Focusable table does not have interactive semantics",
+      "#table-4",
+      { score: "WARNING", issue: "FOCUSABLE_NO_SEMANTICS" },
+    ],
+    [
+      "Article that is not focusable is not considered interactive",
+      "#article-1",
+      null,
+    ],
+    ["Focusable article is considered interactive", "#article-2", null],
+    [
+      "Column header that is not focusable is not considered interactive (ARIA grid)",
+      "#columnheader-1",
+      null,
+    ],
+    [
+      "Column header that is not focusable is not considered interactive (ARIA table)",
+      "#columnheader-2",
+      null,
+    ],
+    [
+      "Column header that is not focusable is not considered interactive (table)",
+      "#columnheader-3",
+      null,
+    ],
+    [
+      "Column header that is focusable is considered interactive (table)",
+      "#columnheader-4",
+      null,
+    ],
+    [
+      "Column header that is not focusable is not considered interactive (table as ARIA grid)",
+      "#columnheader-5",
+      null,
+    ],
+    [
+      "Column header that is focusable is considered interactive (table as ARIA grid)",
+      "#columnheader-6",
+      null,
+    ],
+    [
+      "Row header that is not focusable is not considered interactive",
+      "#rowheader-1",
+      null,
+    ],
+    [
+      "Row header that is not focusable is not considered interactive",
+      "#rowheader-2",
+      null,
+    ],
+    [
+      "Row header that is not focusable is not considered interactive",
+      "#rowheader-3",
+      null,
+    ],
+    [
+      "Row header that is focusable is considered interactive",
+      "#rowheader-4",
+      null,
+    ],
+    [
+      "Row header that is not focusable is not considered interactive (table as ARIA grid)",
+      "#rowheader-5",
+      null,
+    ],
+    [
+      "Row header that is focusable is considered interactive (table as ARIA grid)",
+      "#rowheader-6",
+      null,
+    ],
+    [
+      "Gridcell that is not focusable is not considered interactive (ARIA grid)",
+      "#gridcell-1",
+      null,
+    ],
+    [
+      "Gridcell that is focusable is considered interactive (ARIA grid)",
+      "#gridcell-2",
+      null,
+    ],
+    [
+      "Gridcell that is not focusable is not considered interactive (table as ARIA grid)",
+      "#gridcell-3",
+      null,
+    ],
+    [
+      "Gridcell that is focusable is considered interactive (table as ARIA grid)",
+      "#gridcell-4",
+      null,
+    ],
+    [
+      "Tab list that is not focusable is not considered interactive",
+      "#tablist-1",
+      null,
+    ],
+    ["Focusable tab list is considered interactive", "#tablist-2", null],
+    [
+      "Scrollbar that is not focusable is not considered interactive",
+      "#scrollbar-1",
+      null,
+    ],
+    ["Focusable scrollbar is considered interactive", "#scrollbar-2", null],
+    [
+      "Separator that is not focusable is not considered interactive",
+      "#separator-1",
+      null,
+    ],
+    ["Focusable separator is considered interactive", "#separator-2", null],
+    [
+      "Toolbar that is not focusable is not considered interactive",
+      "#toolbar-1",
+      null,
+    ],
+    ["Focusable toolbar is considered interactive", "#toolbar-2", null],
+    [
+      "Menu popup that is not focusable is not considered interactive",
+      "#menu-1",
+      null,
+    ],
+    ["Focusable menu popup is considered interactive", "#menu-2", null],
+    [
+      "Menubar that is not focusable is not considered interactive",
+      "#menubar-1",
+      null,
+    ],
+    ["Focusable menubar is considered interactive", "#menubar-2", null],
   ];
 
   for (const [description, selector, expected] of tests) {
@@ -144,14 +346,25 @@ add_task(async function() {
   }
 
   info("Text leaf inside a link (jump action is propagated to the text link)");
-  const node = await walker.querySelector(walker.rootNode, "#link-5");
-  const parent = await a11yWalker.getAccessibleFor(node);
-  const front = (await parent.children())[0];
-  const audit = await front.audit({ types: [KEYBOARD] });
+  let node = await walker.querySelector(walker.rootNode, "#link-5");
+  let parent = await a11yWalker.getAccessibleFor(node);
+  let front = (await parent.children())[0];
+  let audit = await front.audit({ types: [KEYBOARD] });
   Assert.deepEqual(
     audit[KEYBOARD],
     null,
     "Text leafs are excluded from semantics rule."
+  );
+
+  info("Combobox list that is invisible");
+  node = await walker.querySelector(walker.rootNode, "#combobox-1");
+  parent = await a11yWalker.getAccessibleFor(node);
+  front = (await parent.children())[0];
+  audit = await front.audit({ types: [KEYBOARD] });
+  Assert.deepEqual(
+    audit[KEYBOARD],
+    null,
+    "Combobox lists (invisible) are excluded from semantics rule."
   );
 
   await accessibility.disable();

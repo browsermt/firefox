@@ -38,13 +38,8 @@ bool IsTracerKind(JSTracer* trc, JS::CallbackTracer::TracerKind kind);
 
 namespace gc {
 
-class Arena;
 struct Cell;
 class TenuredCell;
-
-/*** Special Cases ***/
-
-void PushArena(GCMarker* gcmarker, Arena* arena);
 
 /*** Liveness ***/
 
@@ -109,7 +104,7 @@ inline bool IsAboutToBeFinalizedUnbarriered(T* thingp) {
 }
 
 template <typename T>
-inline bool IsAboutToBeFinalized(WriteBarriered<T>* thingp) {
+inline bool IsAboutToBeFinalized(const WriteBarriered<T>* thingp) {
   return IsAboutToBeFinalizedInternal(
       ConvertToBase(thingp->unsafeUnbarrieredForTracing()));
 }

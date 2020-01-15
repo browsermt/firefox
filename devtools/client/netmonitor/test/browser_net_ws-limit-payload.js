@@ -22,7 +22,7 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   // Wait for WS connections to be established + send messages
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.openConnection(0);
     content.wrappedJSObject.sendData(new Array(10 * 11).toString()); // > 100B payload
   });
@@ -31,7 +31,7 @@ add_task(async function() {
   is(requests.length, 1, "There should be one request");
 
   // Wait for all sent/received messages to be displayed in DevTools
-  wait = waitForDOM(
+  const wait = waitForDOM(
     document,
     "#messages-panel .ws-frames-list-table .ws-frame-list-item",
     2
@@ -73,7 +73,7 @@ add_task(async function() {
   );
 
   // Close WS connection
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.closeConnection();
   });
 

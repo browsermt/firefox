@@ -5,8 +5,8 @@
 #include <algorithm>
 
 #include "DriftCompensation.h"
-#include "MediaStreamGraph.h"
-#include "MediaStreamListener.h"
+#include "MediaTrackGraph.h"
+#include "MediaTrackListener.h"
 #include "VP8TrackEncoder.h"
 #include "WebMWriter.h"  // TODO: it's weird to include muxer header to get the class definition of VP8 METADATA
 #include "gmock/gmock.h"
@@ -331,7 +331,8 @@ TEST(VP8VideoTrackEncoder, TimestampFrameEncode)
   uint64_t totalDuration = 0;
   size_t i = 0;
   for (auto& frame : frames) {
-    EXPECT_EQ(expectedDurations[i++], frame->mDuration);
+    EXPECT_EQ(expectedDurations[i], frame->mDuration);
+    i++;
     totalDuration += frame->mDuration;
   }
   const uint64_t pointThree = (PR_USEC_PER_SEC / 10) * 3;
@@ -380,7 +381,8 @@ TEST(VP8VideoTrackEncoder, DriftingFrameEncode)
   uint64_t totalDuration = 0;
   size_t i = 0;
   for (auto& frame : frames) {
-    EXPECT_EQ(expectedDurations[i++], frame->mDuration);
+    EXPECT_EQ(expectedDurations[i], frame->mDuration);
+    i++;
     totalDuration += frame->mDuration;
   }
   const uint64_t pointSix = (PR_USEC_PER_SEC / 10) * 6;

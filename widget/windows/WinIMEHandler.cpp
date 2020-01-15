@@ -32,6 +32,10 @@
 #include "setupapi.h"
 #include "cfgmgr32.h"
 
+#include "FxRWindowManager.h"
+#include "VRShMem.h"
+#include "moz_external_vr.h"
+
 const char* kOskPathPrefName = "ui.osk.on_screen_keyboard_path";
 const char* kOskEnabled = "ui.osk.enabled";
 const char* kOskDetectPhysicalKeyboard = "ui.osk.detect_physical_keyboard";
@@ -448,7 +452,7 @@ void IMEHandler::OnDestroyWindow(nsWindow* aWindow) {
   if (!sIsInTSFMode) {
     // MSDN says we need to set IS_DEFAULT to avoid memory leak when we use
     // SetInputScopes API. Use an empty string to do this.
-    SetInputScopeForIMM32(aWindow, EmptyString(), EmptyString());
+    SetInputScopeForIMM32(aWindow, EmptyString(), EmptyString(), false);
   }
 #endif  // #ifdef NS_ENABLE_TSF
   AssociateIMEContext(aWindow, true);
@@ -473,6 +477,10 @@ void IMEHandler::SetInputContext(nsWindow* aWindow, InputContext& aInputContext,
 
   // Assume that SetInputContext() is called only when aWindow has focus.
   sPluginHasFocus = (aInputContext.mIMEState.mEnabled == IMEState::PLUGIN);
+  if (sPluginHasFocus) {
+    // Update some cached system settings in the plugin.
+    aWindow->DispatchPluginSettingEvents();
+  }
 
   if (aAction.UserMightRequestOpenVKB()) {
     IMEHandler::MaybeShowOnScreenKeyboard();
@@ -505,7 +513,8 @@ void IMEHandler::SetInputContext(nsWindow* aWindow, InputContext& aInputContext,
   } else {
     // Set at least InputScope even when TextStore is not available.
     SetInputScopeForIMM32(aWindow, aInputContext.mHTMLInputType,
-                          aInputContext.mHTMLInputInputmode);
+                          aInputContext.mHTMLInputInputmode,
+                          aInputContext.mInPrivateBrowsing);
   }
 #endif  // #ifdef NS_ENABLE_TSF
 
@@ -627,18 +636,21 @@ void IMEHandler::OnKeyboardLayoutChanged() {
 // static
 void IMEHandler::SetInputScopeForIMM32(nsWindow* aWindow,
                                        const nsAString& aHTMLInputType,
-                                       const nsAString& aHTMLInputInputmode) {
+                                       const nsAString& aHTMLInputInputmode,
+                                       bool aInPrivateBrowsing) {
   if (sIsInTSFMode || !sSetInputScopes || aWindow->Destroyed()) {
     return;
   }
-  UINT arraySize = 0;
-  const InputScope* scopes = nullptr;
+  AutoTArray<InputScope, 3> scopes;
+
+  if (aInPrivateBrowsing) {
+    scopes.AppendElement(IS_PRIVATE);
+  }
+
   // http://www.whatwg.org/specs/web-apps/current-work/multipage/the-input-element.html
   if (aHTMLInputType.IsEmpty() || aHTMLInputType.EqualsLiteral("text")) {
     if (aHTMLInputInputmode.EqualsLiteral("url")) {
-      static const InputScope inputScopes[] = {IS_URL};
-      scopes = &inputScopes[0];
-      arraySize = ArrayLength(inputScopes);
+      scopes.AppendElement(IS_URL);
     } else if (aHTMLInputInputmode.EqualsLiteral("mozAwesomebar")) {
       // Even if Awesomebar has focus, user may not input URL directly.
       // However, on-screen keyboard for URL should be shown because it has
@@ -657,82 +669,60 @@ void IMEHandler::SetInputScopeForIMM32(nsWindow* aWindow,
       //      been updated yet even after the OS is upgraded to Win8 or later,
       //      it's installed as IMM-IME.
       if (TSFTextStore::ShouldSetInputScopeOfURLBarToDefault()) {
-        static const InputScope inputScopes[] = {IS_DEFAULT};
-        scopes = &inputScopes[0];
-        arraySize = ArrayLength(inputScopes);
+        scopes.AppendElement(IS_DEFAULT);
       } else {
-        static const InputScope inputScopes[] = {IS_URL};
-        scopes = &inputScopes[0];
-        arraySize = ArrayLength(inputScopes);
+        scopes.AppendElement(IS_URL);
       }
     } else if (aHTMLInputInputmode.EqualsLiteral("email")) {
-      static const InputScope inputScopes[] = {IS_EMAIL_SMTPEMAILADDRESS};
-      scopes = &inputScopes[0];
-      arraySize = ArrayLength(inputScopes);
+      scopes.AppendElement(IS_EMAIL_SMTPEMAILADDRESS);
     } else if (aHTMLInputInputmode.EqualsLiteral("tel")) {
-      static const InputScope inputScopes[] = {
-          IS_TELEPHONE_LOCALNUMBER, IS_TELEPHONE_FULLTELEPHONENUMBER};
-      scopes = &inputScopes[0];
-      arraySize = ArrayLength(inputScopes);
+      scopes.AppendElement(IS_TELEPHONE_LOCALNUMBER);
+      scopes.AppendElement(IS_TELEPHONE_FULLTELEPHONENUMBER);
     } else if (aHTMLInputInputmode.EqualsLiteral("numeric")) {
-      static const InputScope inputScopes[] = {IS_NUMBER};
-      scopes = &inputScopes[0];
-      arraySize = ArrayLength(inputScopes);
+      scopes.AppendElement(IS_NUMBER);
     } else {
-      static const InputScope inputScopes[] = {IS_DEFAULT};
-      scopes = &inputScopes[0];
-      arraySize = ArrayLength(inputScopes);
+      scopes.AppendElement(IS_DEFAULT);
     }
   } else if (aHTMLInputType.EqualsLiteral("url")) {
-    static const InputScope inputScopes[] = {IS_URL};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_URL);
   } else if (aHTMLInputType.EqualsLiteral("search")) {
-    static const InputScope inputScopes[] = {IS_SEARCH};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_SEARCH);
   } else if (aHTMLInputType.EqualsLiteral("email")) {
-    static const InputScope inputScopes[] = {IS_EMAIL_SMTPEMAILADDRESS};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_EMAIL_SMTPEMAILADDRESS);
   } else if (aHTMLInputType.EqualsLiteral("password")) {
-    static const InputScope inputScopes[] = {IS_PASSWORD};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_PASSWORD);
   } else if (aHTMLInputType.EqualsLiteral("datetime") ||
              aHTMLInputType.EqualsLiteral("datetime-local")) {
-    static const InputScope inputScopes[] = {IS_DATE_FULLDATE,
-                                             IS_TIME_FULLTIME};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_DATE_FULLDATE);
+    scopes.AppendElement(IS_TIME_FULLTIME);
   } else if (aHTMLInputType.EqualsLiteral("date") ||
              aHTMLInputType.EqualsLiteral("month") ||
              aHTMLInputType.EqualsLiteral("week")) {
-    static const InputScope inputScopes[] = {IS_DATE_FULLDATE};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_DATE_FULLDATE);
   } else if (aHTMLInputType.EqualsLiteral("time")) {
-    static const InputScope inputScopes[] = {IS_TIME_FULLTIME};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_TIME_FULLTIME);
   } else if (aHTMLInputType.EqualsLiteral("tel")) {
-    static const InputScope inputScopes[] = {IS_TELEPHONE_FULLTELEPHONENUMBER,
-                                             IS_TELEPHONE_LOCALNUMBER};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_TELEPHONE_FULLTELEPHONENUMBER);
+    scopes.AppendElement(IS_TELEPHONE_LOCALNUMBER);
   } else if (aHTMLInputType.EqualsLiteral("number")) {
-    static const InputScope inputScopes[] = {IS_NUMBER};
-    scopes = &inputScopes[0];
-    arraySize = ArrayLength(inputScopes);
+    scopes.AppendElement(IS_NUMBER);
   }
-  if (scopes && arraySize > 0) {
-    sSetInputScopes(aWindow->GetWindowHandle(), scopes, arraySize, nullptr, 0,
-                    nullptr, nullptr);
+  if (!scopes.IsEmpty()) {
+    sSetInputScopes(aWindow->GetWindowHandle(), scopes.Elements(),
+                    scopes.Length(), nullptr, 0, nullptr, nullptr);
   }
 }
 
 // static
 void IMEHandler::MaybeShowOnScreenKeyboard() {
+#ifdef NIGHTLY_BUILD
+  if (FxRWindowManager::GetInstance()->IsFxRWindow(sFocusedWindow)) {
+    mozilla::gfx::VRShMem shmem(nullptr, true /*aRequiresMutex*/);
+    shmem.SendIMEState(FxRWindowManager::GetInstance()->GetWindowID(),
+                       mozilla::gfx::VRFxEventState::FOCUS);
+    return;
+  }
+#endif  // NIGHTLY_BUILD
   if (sPluginHasFocus || !IsWin8OrLater() ||
       !Preferences::GetBool(kOskEnabled, true) || GetOnScreenKeyboardWindow() ||
       !IMEHandler::NeedOnScreenKeyboard()) {
@@ -755,10 +745,16 @@ void IMEHandler::MaybeShowOnScreenKeyboard() {
 
 // static
 void IMEHandler::MaybeDismissOnScreenKeyboard(nsWindow* aWindow) {
+#ifdef NIGHTLY_BUILD
+  if (FxRWindowManager::GetInstance()->IsFxRWindow(aWindow)) {
+    mozilla::gfx::VRShMem shmem(nullptr, true /*aRequiresMutex*/);
+    shmem.SendIMEState(FxRWindowManager::GetInstance()->GetWindowID(),
+                       mozilla::gfx::VRFxEventState::BLUR);
+  }
+#endif  // NIGHTLY_BUILD
   if (sPluginHasFocus || !IsWin8OrLater()) {
     return;
   }
-
   ::PostMessage(aWindow->GetWindowHandle(), MOZ_WM_DISMISS_ONSCREEN_KEYBOARD, 0,
                 0);
 }

@@ -13,10 +13,10 @@ use freetype::freetype::{FT_GlyphSlot, FT_LcdFilter, FT_New_Face, FT_New_Memory_
 use freetype::freetype::{FT_Init_FreeType, FT_Load_Glyph, FT_Render_Glyph};
 use freetype::freetype::{FT_Library, FT_Outline_Get_CBox, FT_Set_Char_Size, FT_Select_Size};
 use freetype::freetype::{FT_Fixed, FT_Matrix, FT_Set_Transform, FT_String, FT_ULong};
-use freetype::freetype::{FT_Err_Unimplemented_Feature};
+use freetype::freetype::{FT_Err_Unimplemented_Feature, FT_MulFix, FT_Outline_Embolden};
 use freetype::freetype::{FT_LOAD_COLOR, FT_LOAD_DEFAULT, FT_LOAD_FORCE_AUTOHINT};
 use freetype::freetype::{FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH, FT_LOAD_NO_AUTOHINT};
-use freetype::freetype::{FT_LOAD_NO_BITMAP, FT_LOAD_NO_HINTING, FT_LOAD_VERTICAL_LAYOUT};
+use freetype::freetype::{FT_LOAD_NO_BITMAP, FT_LOAD_NO_HINTING};
 use freetype::freetype::{FT_FACE_FLAG_SCALABLE, FT_FACE_FLAG_FIXED_SIZES};
 use freetype::freetype::{FT_FACE_FLAG_MULTIPLE_MASTERS};
 use freetype::succeeded;
@@ -107,6 +107,46 @@ ft_dyn_fn!(FT_Set_Var_Design_Coordinates(face: FT_Face, num_vals: FT_UInt, vals:
 
 extern "C" {
     fn FT_GlyphSlot_Embolden(slot: FT_GlyphSlot);
+}
+
+// Custom version of FT_GlyphSlot_Embolden to be less aggressive with outline
+// fonts than the default implementation in FreeType.
+#[no_mangle]
+pub extern "C" fn mozilla_glyphslot_embolden_less(slot: FT_GlyphSlot) {
+    if slot.is_null() {
+        return;
+    }
+
+    let slot_ = unsafe { &mut *slot };
+    let format = slot_.format;
+    if format != FT_Glyph_Format::FT_GLYPH_FORMAT_OUTLINE {
+        // For non-outline glyphs, just fall back to FreeType's function.
+        unsafe { FT_GlyphSlot_Embolden(slot) };
+        return;
+    }
+
+    let face_ = unsafe { *slot_.face };
+
+    // FT_GlyphSlot_Embolden uses a divisor of 24 here; we'll be only half as
+    // bold.
+    let size_ = unsafe { *face_.size };
+    let strength =
+        unsafe { FT_MulFix(face_.units_per_EM as FT_Long,
+                           size_.metrics.y_scale) / 48 };
+    unsafe { FT_Outline_Embolden(&mut slot_.outline, strength) };
+
+    // Adjust metrics to suit the fattened glyph.
+    if slot_.advance.x != 0 {
+        slot_.advance.x += strength;
+    }
+    if slot_.advance.y != 0 {
+        slot_.advance.y += strength;
+    }
+    slot_.metrics.width += strength;
+    slot_.metrics.height += strength;
+    slot_.metrics.horiAdvance += strength;
+    slot_.metrics.vertAdvance += strength;
+    slot_.metrics.horiBearingY += strength;
 }
 
 enum FontFile {
@@ -325,7 +365,7 @@ impl FontContext {
     }
 
     pub fn delete_font(&mut self, font_key: &FontKey) {
-        if let Some(_) = self.faces.remove(font_key) {
+        if self.faces.remove(font_key).is_some() {
             self.variations.retain(|k, _| k.0 != *font_key);
         }
     }
@@ -415,22 +455,18 @@ impl FontContext {
         if !font.flags.contains(FontInstanceFlags::EMBEDDED_BITMAPS) {
             load_flags |= FT_LOAD_NO_BITMAP;
         }
-        if font.flags.contains(FontInstanceFlags::VERTICAL_LAYOUT) {
-            load_flags |= FT_LOAD_VERTICAL_LAYOUT;
-        }
 
         load_flags |= FT_LOAD_COLOR;
         load_flags |= FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH;
 
         let (x_scale, y_scale) = font.transform.compute_scale().unwrap_or((1.0, 1.0));
-        let scale = font.oversized_scale_factor(x_scale, y_scale);
         let req_size = font.size.to_f64_px();
         let face_flags = unsafe { (*face).face_flags };
         let mut result = if (face_flags & (FT_FACE_FLAG_FIXED_SIZES as FT_Long)) != 0 &&
                             (face_flags & (FT_FACE_FLAG_SCALABLE as FT_Long)) == 0 &&
                             (load_flags & FT_LOAD_NO_BITMAP) == 0 {
             unsafe { FT_Set_Transform(face, ptr::null_mut(), ptr::null_mut()) };
-            self.choose_bitmap_size(face, req_size * y_scale / scale)
+            self.choose_bitmap_size(face, req_size * y_scale)
         } else {
             let mut shape = font.transform.invert_scale(x_scale, y_scale);
             if font.flags.contains(FontInstanceFlags::FLIP_X) {
@@ -455,8 +491,8 @@ impl FontContext {
                 FT_Set_Transform(face, &mut ft_shape, ptr::null_mut());
                 FT_Set_Char_Size(
                     face,
-                    (req_size * x_scale / scale * 64.0 + 0.5) as FT_F26Dot6,
-                    (req_size * y_scale / scale * 64.0 + 0.5) as FT_F26Dot6,
+                    (req_size * x_scale * 64.0 + 0.5) as FT_F26Dot6,
+                    (req_size * y_scale * 64.0 + 0.5) as FT_F26Dot6,
                     0,
                     0,
                 )
@@ -499,7 +535,7 @@ impl FontContext {
         assert!(slot != ptr::null_mut());
 
         if font.flags.contains(FontInstanceFlags::SYNTHETIC_BOLD) {
-            unsafe { FT_GlyphSlot_Embolden(slot) };
+            mozilla_glyphslot_embolden_less(slot);
         }
 
         let format = unsafe { (*slot).format };
@@ -508,7 +544,7 @@ impl FontContext {
                 let y_size = unsafe { (*(*(*slot).face).size).metrics.y_ppem };
                 Some((slot, req_size as f32 / y_size as f32))
             }
-            FT_Glyph_Format::FT_GLYPH_FORMAT_OUTLINE => Some((slot, scale as f32)),
+            FT_Glyph_Format::FT_GLYPH_FORMAT_OUTLINE => Some((slot, 1.0)),
             _ => {
                 error!("Unsupported format");
                 debug!("format={:?}", format);
@@ -539,16 +575,16 @@ impl FontContext {
         glyph: &GlyphKey,
         scale: f32,
     ) -> FT_BBox {
-        let mut cbox: FT_BBox = unsafe { mem::uninitialized() };
-
         // Get the estimated bounding box from FT (control points).
+        let mut cbox = FT_BBox { xMin: 0, yMin: 0, xMax: 0, yMax: 0 };
+
         unsafe {
             FT_Outline_Get_CBox(&(*slot).outline, &mut cbox);
+        }
 
-            // For spaces and other non-printable characters, early out.
-            if (*slot).outline.n_contours == 0 {
-                return cbox;
-            }
+        // For spaces and other non-printable characters, early out.
+        if unsafe { (*slot).outline.n_contours } == 0 {
+            return cbox;
         }
 
         self.pad_bounding_box(font, &mut cbox);
@@ -722,7 +758,7 @@ impl FontContext {
         // into account the subpixel positioning.
         unsafe {
             let outline = &(*slot).outline;
-            let mut cbox: FT_BBox = mem::uninitialized();
+            let mut cbox = FT_BBox { xMin: 0, yMin: 0, xMax: 0, yMax: 0 };
             FT_Outline_Get_CBox(outline, &mut cbox);
             self.pad_bounding_box(font, &mut cbox);
             FT_Outline_Translate(

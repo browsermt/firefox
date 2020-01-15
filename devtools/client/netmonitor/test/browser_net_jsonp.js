@@ -35,7 +35,7 @@ add_task(async function() {
   verifyRequestItemTarget(
     document,
     getDisplayedRequests(store.getState()),
-    getSortedRequests(store.getState()).get(0),
+    getSortedRequests(store.getState())[0],
     "GET",
     CONTENT_TYPE_SJS + "?fmt=jsonp&jsonp=$_0123Fun",
     {
@@ -50,7 +50,7 @@ add_task(async function() {
   verifyRequestItemTarget(
     document,
     getDisplayedRequests(store.getState()),
-    getSortedRequests(store.getState()).get(1),
+    getSortedRequests(store.getState())[1],
     "GET",
     CONTENT_TYPE_SJS + "?fmt=jsonp2&jsonp=$_4567Sad",
     {
@@ -64,7 +64,7 @@ add_task(async function() {
   );
 
   info("Testing first request");
-  wait = waitForDOM(document, "#response-panel .CodeMirror-code");
+  let wait = waitForDOM(document, "#response-panel .CodeMirror-code");
   store.dispatch(Actions.toggleNetworkDetails());
   EventUtils.sendMouseEvent(
     { type: "click" },

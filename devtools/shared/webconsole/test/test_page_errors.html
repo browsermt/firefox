@@ -12,6 +12,8 @@
 <p>Test for page errors</p>
 
 <script class="testbody" type="text/javascript">
+"use strict";
+
 SimpleTest.waitForExplicitFinish();
 
 let expectedPageErrors = [];
@@ -132,7 +134,7 @@ function doPageErrors() {
   };
 
   let container = document.createElement("script");
-  for (let stmt of Object.keys(expectedPageErrors)) {
+  for (const stmt of Object.keys(expectedPageErrors)) {
       if (expectedPageErrors[stmt].exception) {
           SimpleTest.expectUncaughtException();
       }
@@ -153,11 +155,11 @@ function startTest() {
 
 function onAttach(state, response) {
   onPageError = onPageError.bind(null, state);
-  state.client.on("pageError", onPageError);
+  state.webConsoleFront.on("pageError", onPageError);
   doPageErrors();
 }
 
-let pageErrors = [];
+const pageErrors = [];
 
 function onPageError(state, packet) {
   if (!packet.pageError.sourceName.includes("test_page_errors")) {
@@ -170,7 +172,7 @@ function onPageError(state, packet) {
     return;
   }
 
-  state.client.off("pageError", onPageError);
+  state.webConsoleFront.off("pageError", onPageError);
 
   Object.values(expectedPageErrors).forEach(function(message, index) {
     info("checking received page error #" + index);

@@ -24,17 +24,31 @@ async function setRTAMOOnboarding() {
     "Attribution data should be set"
   );
 
-  Services.prefs.setCharPref(BRANCH_PREF, "control");
+  Services.prefs.setCharPref(BRANCH_PREF, "join-supercharge");
 
   // Reset trailhead so it loads the new branch.
   Services.prefs.clearUserPref("trailhead.firstrun.didSeeAboutWelcome");
   await ASRouter.setState({ trailheadInitialized: false });
-  await ASRouter.setupTrailhead();
   ASRouter._updateMessageProviders();
   await ASRouter.loadMessagesFromAllProviders();
 
-  registerCleanupFunction(() => {
+  registerCleanupFunction(async () => {
+    // Separate cleanup methods between mac and windows
+    if (AppConstants.platform === "macosx") {
+      const { path } = Services.dirsvc.get("GreD", Ci.nsIFile).parent.parent;
+      const attributionSvc = Cc["@mozilla.org/mac-attribution;1"].getService(
+        Ci.nsIMacAttributionService
+      );
+      attributionSvc.setReferrerUrl(path, "", true);
+    }
+    // Clear cache call is only possible in a testing environment
+    let env = Cc["@mozilla.org/process/environment;1"].getService(
+      Ci.nsIEnvironment
+    );
+    env.set("XPCSHELL_TEST_PROFILE_DIR", "testing");
     Services.prefs.clearUserPref(BRANCH_PREF);
+    await AttributionCode.deleteFileAsync();
+    AttributionCode._clearCache();
   });
 }
 
@@ -56,42 +70,40 @@ add_task(async function setup() {
 add_task(async () => {
   await setRTAMOOnboarding();
 
-  let tab = await BrowserTestUtils.openNewForegroundTab(
-    gBrowser,
-    "about:welcome",
-    false
-  );
-  let browser = tab.linkedBrowser;
+  await BrowserTestUtils.withNewTab(
+    { gBrowser, url: "about:welcome" },
+    async browser => {
+      let modalText = await SpecialPowers.spawn(browser, [], async () => {
+        // Wait for Activity Stream to load
+        await ContentTaskUtils.waitForCondition(
+          () => content.document.querySelector(".activity-stream"),
+          `Should render Activity Stream`
+        );
+        await ContentTaskUtils.waitForCondition(
+          () => content.document.body.classList.contains("welcome"),
+          "The modal setup should be completed"
+        );
+        await ContentTaskUtils.waitForCondition(
+          () => content.document.body.classList.contains("hide-main"),
+          "You shouldn't be able to see newtabpage content"
+        );
+        for (let selector of [
+          // ReturnToAMO elements
+          ".ReturnToAMOOverlay",
+          ".ReturnToAMOContainer",
+          ".ReturnToAMOAddonContents",
+          ".ReturnToAMOIcon",
+        ]) {
+          await ContentTaskUtils.waitForCondition(
+            () => content.document.querySelector(selector) !== null,
+            `Should render ${selector}`
+          );
+        }
 
-  await ContentTask.spawn(browser, {}, async () => {
-    // Wait for Activity Stream to load
-    await ContentTaskUtils.waitForCondition(
-      () => content.document.querySelector(".activity-stream"),
-      `Should render Activity Stream`
-    );
-    await ContentTaskUtils.waitForCondition(
-      () => content.document.body.classList.contains("welcome"),
-      "The modal setup should be completed"
-    );
-    await ContentTaskUtils.waitForCondition(
-      () => content.document.body.classList.contains("hide-main"),
-      "You shouldn't be able to see newtabpage content"
-    );
-    for (let selector of [
-      // ReturnToAMO elements
-      ".ReturnToAMOOverlay",
-      ".ReturnToAMOContainer",
-      ".ReturnToAMOAddonContents",
-      ".ReturnToAMOIcon",
-    ]) {
-      ok(content.document.querySelector(selector), `Should render ${selector}`);
+        return content.document.querySelector(".ReturnToAMOText").innerText;
+      });
+      // Make sure strings are properly shown
+      Assert.equal(modalText, "Now let’s get you mochitest_name.");
     }
-    // Make sure strings are properly shown
-    Assert.equal(
-      content.document.querySelector(".ReturnToAMOText").innerText,
-      "Now let’s get you mochitest_name."
-    );
-  });
-
-  BrowserTestUtils.removeTab(tab);
+  );
 });

@@ -8,6 +8,7 @@ import { selectLocation } from "../sources";
 import { evaluateExpressions } from "../expressions";
 import { fetchScopes } from "./fetchScopes";
 import assert from "../../utils/assert";
+import { getCanRewind } from "../../reducers/threads";
 
 import type { Frame, ThreadContext } from "../../types";
 import type { ThunkArgs } from "../types";
@@ -20,6 +21,11 @@ export function selectFrame(cx: ThreadContext, frame: Frame) {
   return async ({ dispatch, client, getState, sourceMaps }: ThunkArgs) => {
     assert(cx.thread == frame.thread, "Thread mismatch");
 
+    // Frames with an async cause are not selected
+    if (frame.asyncCause) {
+      return dispatch(selectLocation(cx, frame.location));
+    }
+
     dispatch({
       type: "SELECT_FRAME",
       cx,
@@ -27,7 +33,12 @@ export function selectFrame(cx: ThreadContext, frame: Frame) {
       frame,
     });
 
+    if (getCanRewind(getState())) {
+      client.fetchAncestorFramePositions(frame.index);
+    }
+
     dispatch(selectLocation(cx, frame.location));
+
     dispatch(evaluateExpressions(cx));
     dispatch(fetchScopes(cx));
   };

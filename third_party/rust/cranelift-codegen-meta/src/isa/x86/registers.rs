@@ -1,12 +1,13 @@
 use crate::cdsl::regs::{IsaRegs, IsaRegsBuilder, RegBankBuilder, RegClassBuilder};
 
-pub fn define() -> IsaRegs {
+pub(crate) fn define() -> IsaRegs {
     let mut regs = IsaRegsBuilder::new();
 
     let builder = RegBankBuilder::new("IntRegs", "r")
         .units(16)
         .names(vec!["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"])
-        .track_pressure(true);
+        .track_pressure(true)
+        .pinned_reg(15);
     let int_regs = regs.add_bank(builder);
 
     let builder = RegBankBuilder::new("FloatRegs", "xmm")

@@ -2,10 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{BuiltDisplayList, ColorF, DynamicProperties, Epoch};
+use api::{BuiltDisplayList, ColorF, DynamicProperties, Epoch, FontRenderMode};
 use api::{PipelineId, PropertyBinding, PropertyBindingId, MixBlendMode, StackingContext};
-use api::units::{LayoutSize, LayoutTransform};
-use crate::internal_types::FastHashMap;
+use api::units::*;
+use crate::composite::CompositorKind;
+use crate::clip::{ClipStore, ClipDataStore};
+use crate::clip_scroll_tree::{ClipScrollTree, SpatialNodeIndex};
+use crate::frame_builder::{ChasePrimitive, FrameBuilderConfig};
+use crate::hit_test::{HitTester, HitTestingScene, HitTestingSceneStats};
+use crate::internal_types::{FastHashMap, FastHashSet};
+use crate::prim_store::{PrimitiveStore, PrimitiveStoreStats, PictureIndex};
 use std::sync::Arc;
 
 /// Stores a map of the animated property bindings for the current display list. These
@@ -136,7 +142,7 @@ pub struct ScenePipeline {
 #[derive(Clone)]
 pub struct Scene {
     pub root_pipeline_id: Option<PipelineId>,
-    pub pipelines: FastHashMap<PipelineId, Arc<ScenePipeline>>,
+    pub pipelines: FastHashMap<PipelineId, ScenePipeline>,
     pub pipeline_epochs: FastHashMap<PipelineId, Epoch>,
 }
 
@@ -170,7 +176,7 @@ impl Scene {
             display_list,
         };
 
-        self.pipelines.insert(pipeline_id, Arc::new(new_pipeline));
+        self.pipelines.insert(pipeline_id, new_pipeline);
         self.pipeline_epochs.insert(pipeline_id, epoch);
     }
 
@@ -204,6 +210,93 @@ impl StackingContextHelpers for StackingContext {
         match self.mix_blend_mode {
             MixBlendMode::Normal => None,
             _ => Some(self.mix_blend_mode),
+        }
+    }
+}
+
+
+/// WebRender's internal representation of the scene.
+pub struct BuiltScene {
+    pub has_root_pipeline: bool,
+    pub pipeline_epochs: FastHashMap<PipelineId, Epoch>,
+    pub output_rect: DeviceIntRect,
+    pub background_color: Option<ColorF>,
+    pub root_pic_index: PictureIndex,
+    pub prim_store: PrimitiveStore,
+    pub clip_store: ClipStore,
+    pub config: FrameBuilderConfig,
+    pub clip_scroll_tree: ClipScrollTree,
+    pub hit_testing_scene: Arc<HitTestingScene>,
+    pub content_slice_count: usize,
+    pub picture_cache_spatial_nodes: FastHashSet<SpatialNodeIndex>,
+}
+
+impl BuiltScene {
+    pub fn empty() -> Self {
+        BuiltScene {
+            has_root_pipeline: false,
+            pipeline_epochs: FastHashMap::default(),
+            output_rect: DeviceIntRect::zero(),
+            background_color: None,
+            root_pic_index: PictureIndex(0),
+            prim_store: PrimitiveStore::new(&PrimitiveStoreStats::empty()),
+            clip_store: ClipStore::new(),
+            clip_scroll_tree: ClipScrollTree::new(),
+            hit_testing_scene: Arc::new(HitTestingScene::new(&HitTestingSceneStats::empty())),
+            content_slice_count: 0,
+            picture_cache_spatial_nodes: FastHashSet::default(),
+            config: FrameBuilderConfig {
+                default_font_render_mode: FontRenderMode::Mono,
+                dual_source_blending_is_enabled: true,
+                dual_source_blending_is_supported: false,
+                chase_primitive: ChasePrimitive::Nothing,
+                global_enable_picture_caching: false,
+                testing: false,
+                gpu_supports_fast_clears: false,
+                gpu_supports_advanced_blend: false,
+                advanced_blend_is_coherent: false,
+                batch_lookback_count: 0,
+                background_color: None,
+                compositor_kind: CompositorKind::default(),
+            },
+        }
+    }
+
+    /// Get the memory usage statistics to pre-allocate for the next scene.
+    pub fn get_stats(&self) -> SceneStats {
+        SceneStats {
+            prim_store_stats: self.prim_store.get_stats(),
+            hit_test_stats: self.hit_testing_scene.get_stats(),
+        }
+    }
+
+    pub fn create_hit_tester(
+        &mut self,
+        clip_data_store: &ClipDataStore,
+    ) -> HitTester {
+        HitTester::new(
+            Arc::clone(&self.hit_testing_scene),
+            &self.clip_scroll_tree,
+            &self.clip_store,
+            clip_data_store,
+        )
+    }
+}
+
+/// Stores the allocation sizes of various arrays in the built
+/// scene. This is retrieved from the current frame builder
+/// and used to reserve an approximately correct capacity of
+/// the arrays for the next scene that is getting built.
+pub struct SceneStats {
+    pub prim_store_stats: PrimitiveStoreStats,
+    pub hit_test_stats: HitTestingSceneStats,
+}
+
+impl SceneStats {
+    pub fn empty() -> Self {
+        SceneStats {
+            prim_store_stats: PrimitiveStoreStats::empty(),
+            hit_test_stats: HitTestingSceneStats::empty(),
         }
     }
 }

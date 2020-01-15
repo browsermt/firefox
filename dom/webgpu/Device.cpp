@@ -3,108 +3,130 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "js/ArrayBuffer.h"
+#include "js/Value.h"
+#include "mozilla/dom/WebGPUBinding.h"
+#include "mozilla/ipc/Shmem.h"
+#include "mozilla/Logging.h"
 #include "Device.h"
 
 #include "Adapter.h"
-#include "mozilla/dom/WebGPUBinding.h"
+#include "ipc/WebGPUChild.h"
 
 namespace mozilla {
 namespace webgpu {
 
-Device::~Device() = default;
+mozilla::LazyLogModule gWebGPULog("WebGPU");
 
-already_AddRefed<webgpu::Adapter> Device::Adapter() const { MOZ_CRASH("todo"); }
+NS_IMPL_CYCLE_COLLECTION_INHERITED(Device, DOMEventTargetHelper, mBridge)
+NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED_0(Device, DOMEventTargetHelper)
+GPU_IMPL_JS_WRAP(Device)
 
-void Device::Extensions(dom::WebGPUExtensions& out) const { MOZ_CRASH("todo"); }
+static void mapFreeCallback(void* aContents, void* aUserData) {
+  Unused << aContents;
+  Unused << aUserData;
+}
 
-void Device::Features(dom::WebGPUFeatures& out) const { MOZ_CRASH("todo"); }
+JSObject* Device::CreateExternalArrayBuffer(JSContext* aCx, size_t aSize,
+                                            ipc::Shmem& aShmem) {
+  MOZ_ASSERT(aShmem.Size<uint8_t>() == aSize);
+  return JS::NewExternalArrayBuffer(aCx, aSize, aShmem.get<uint8_t>(),
+                                    &mapFreeCallback, nullptr);
+}
 
-void Device::Limits(dom::WebGPULimits& out) const { MOZ_CRASH("todo"); }
+Device::Device(Adapter* const aParent, RawId aId)
+    : DOMEventTargetHelper(aParent->GetParentObject()),
+      mBridge(aParent->GetBridge()),
+      mId(aId) {}
+
+Device::~Device() {
+  // could be `nullptr` if CC-ed
+  if (mBridge && mBridge->IsOpen()) {
+    mBridge->SendDeviceDestroy(mId);
+  }
+}
+
+void Device::GetLabel(nsAString& aValue) const { aValue = mLabel; }
+void Device::SetLabel(const nsAString& aLabel) { mLabel = aLabel; }
 
 already_AddRefed<Buffer> Device::CreateBuffer(
-    const dom::WebGPUBufferDescriptor& desc) const {
-  MOZ_CRASH("todo");
+    const dom::GPUBufferDescriptor& aDesc) {
+  RawId id = mBridge->DeviceCreateBuffer(mId, aDesc);
+  RefPtr<Buffer> buffer = new Buffer(this, id, aDesc.mSize);
+  return buffer.forget();
 }
 
-already_AddRefed<Texture> Device::CreateTexture(
-    const dom::WebGPUTextureDescriptor& desc) const {
-  MOZ_CRASH("todo");
+void Device::CreateBufferMapped(JSContext* aCx,
+                                const dom::GPUBufferDescriptor& aDesc,
+                                nsTArray<JS::Value>& aSequence,
+                                ErrorResult& aRv) {
+  const auto checked = CheckedInt<size_t>(aDesc.mSize);
+  if (!checked.isValid()) {
+    aRv.ThrowRangeError(u"Mapped size is too large");
+    return;
+  }
+  const auto& size = checked.value();
+
+  // TODO: use `ShmemPool`
+  ipc::Shmem shmem;
+  if (!mBridge->AllocShmem(size, ipc::Shmem::SharedMemory::TYPE_BASIC,
+                           &shmem)) {
+    aRv.ThrowDOMException(
+        NS_ERROR_DOM_ABORT_ERR,
+        nsPrintfCString("Unable to allocate shmem of size %" PRIuPTR, size));
+    return;
+  }
+
+  // zero out memory
+  memset(shmem.get<uint8_t>(), 0, size);
+
+  JS::Rooted<JSObject*> arrayBuffer(
+      aCx, CreateExternalArrayBuffer(aCx, size, shmem));
+  if (!arrayBuffer) {
+    aRv.NoteJSContextException(aCx);
+    return;
+  }
+
+  dom::GPUBufferDescriptor modifiedDesc(aDesc);
+  modifiedDesc.mUsage |= dom::GPUBufferUsage_Binding::MAP_WRITE;
+  RawId id = mBridge->DeviceCreateBuffer(mId, modifiedDesc);
+  RefPtr<Buffer> buffer = new Buffer(this, id, aDesc.mSize);
+
+  JS::Rooted<JS::Value> bufferValue(aCx);
+  if (!dom::ToJSValue(aCx, buffer, &bufferValue)) {
+    aRv.NoteJSContextException(aCx);
+    return;
+  }
+
+  aSequence.AppendElement(bufferValue);
+  aSequence.AppendElement(JS::ObjectValue(*arrayBuffer));
+
+  buffer->InitMapping(std::move(shmem), arrayBuffer);
 }
 
-already_AddRefed<Sampler> Device::CreateSampler(
-    const dom::WebGPUSamplerDescriptor& desc) const {
-  MOZ_CRASH("todo");
+RefPtr<MappingPromise> Device::MapBufferForReadAsync(RawId aId, size_t aSize,
+                                                     ErrorResult& aRv) {
+  ipc::Shmem shmem;
+  if (!mBridge->AllocShmem(aSize, ipc::Shmem::SharedMemory::TYPE_BASIC,
+                           &shmem)) {
+    aRv.ThrowDOMException(
+        NS_ERROR_DOM_ABORT_ERR,
+        nsPrintfCString("Unable to allocate shmem of size %" PRIuPTR, aSize));
+    return nullptr;
+  }
+
+  return mBridge->SendDeviceMapBufferRead(mId, aId, std::move(shmem));
 }
 
-already_AddRefed<BindGroupLayout> Device::CreateBindGroupLayout(
-    const dom::WebGPUBindGroupLayoutDescriptor& desc) const {
-  MOZ_CRASH("todo");
+void Device::UnmapBuffer(RawId aId, UniquePtr<ipc::Shmem> aShmem) {
+  mBridge->SendDeviceUnmapBuffer(mId, aId, std::move(*aShmem));
 }
 
-already_AddRefed<PipelineLayout> Device::CreatePipelineLayout(
-    const dom::WebGPUPipelineLayoutDescriptor& desc) const {
-  MOZ_CRASH("todo");
+void Device::DestroyBuffer(RawId aId) {
+  if (mBridge && mBridge->IsOpen()) {
+    mBridge->SendBufferDestroy(aId);
+  }
 }
-
-already_AddRefed<BindGroup> Device::CreateBindGroup(
-    const dom::WebGPUBindGroupDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<BlendState> Device::CreateBlendState(
-    const dom::WebGPUBlendStateDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<DepthStencilState> Device::CreateDepthStencilState(
-    const dom::WebGPUDepthStencilStateDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<InputState> Device::CreateInputState(
-    const dom::WebGPUInputStateDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<ShaderModule> Device::CreateShaderModule(
-    const dom::WebGPUShaderModuleDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<AttachmentState> Device::CreateAttachmentState(
-    const dom::WebGPUAttachmentStateDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<ComputePipeline> Device::CreateComputePipeline(
-    const dom::WebGPUComputePipelineDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<RenderPipeline> Device::CreateRenderPipeline(
-    const dom::WebGPURenderPipelineDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<CommandEncoder> Device::CreateCommandEncoder(
-    const dom::WebGPUCommandEncoderDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<Queue> Device::GetQueue() const { MOZ_CRASH("todo"); }
-
-RefPtr<dom::WebGPULogCallback> Device::OnLog() const { MOZ_CRASH("todo"); }
-
-void Device::SetOnLog(const dom::WebGPULogCallback& callback) const {
-  MOZ_CRASH("todo");
-}
-
-already_AddRefed<dom::Promise> Device::GetObjectStatus(
-    const dom::WebGPUBufferOrWebGPUTexture& obj) const {
-  MOZ_CRASH("todo");
-}
-
-WEBGPU_IMPL_GOOP_0(Device)
 
 }  // namespace webgpu
 }  // namespace mozilla

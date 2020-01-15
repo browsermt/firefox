@@ -70,6 +70,7 @@ $white-10: rgba($white, 0.1);
 $white-50: rgba($white, 0.5);
 $white-60: rgba($white, 0.6);
 $white-70: rgba($white, 0.7);
+$ghost-white: #FAFAFC;
 $pocket-teal: #50BCB6;
 $pocket-red: #EF4056;
 $shadow-10: rgba(12, 12, 13, 0.1);
@@ -85,7 +86,9 @@ $about-welcome-gradient: linear-gradient(to bottom, $blue-70 40%, $aw-extra-blue
 $about-welcome-extra-links: #676F7E;
 $firefox-wordmark-default-color: #363959;
 $firefox-wordmark-darktheme-color: $white;
+$trailhead-violet: #7542E5;
 $trailhead-purple: #2B2156;
+$trailhead-purple-80: #36296D;
 $trailhead-blue-60: #0250BB;
 $trailhead-blue-70: #054096;
 
@@ -119,9 +122,9 @@ $wrapper-max-width-widest: $grid-unit * 8 + $base-gutter * 7 + $section-horizont
 $scrollbar-width: 16px;
 
 // Breakpoints
-$break-point-medium: $wrapper-max-width-medium + $base-gutter * 2 + $scrollbar-width;
-$break-point-large: $wrapper-max-width-large + $base-gutter * 2 + $scrollbar-width;
-$break-point-widest: $wrapper-max-width-widest + $base-gutter * 2 + $scrollbar-width;
+$break-point-medium: $wrapper-max-width-medium + $base-gutter * 2 + $scrollbar-width; // 610px
+$break-point-large: $wrapper-max-width-large + $base-gutter * 2 + $scrollbar-width; // 866px
+$break-point-widest: $wrapper-max-width-widest + $base-gutter * 2 + $scrollbar-width; // 1122px
 
 $section-title-font-size: 13px;
 

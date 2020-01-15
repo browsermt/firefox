@@ -12,7 +12,6 @@
 #include "nsIRunnable.h"
 #include "nsTArray.h"
 
-using mozilla::dom::ClassifierInfo;
 using mozilla::ipc::IPCResult;
 
 namespace mozilla {
@@ -49,37 +48,15 @@ class HttpBackgroundChannelChild final : public PHttpBackgroundChannelChild {
                                    const nsCString& aData);
 
   IPCResult RecvOnStopRequest(const nsresult& aChannelStatus,
-                              const ResourceTimingStruct& aTiming,
+                              const ResourceTimingStructArgs& aTiming,
                               const TimeStamp& aLastActiveTabOptHit,
                               const nsHttpHeaderArray& aResponseTrailers);
-
-  IPCResult RecvOnProgress(const int64_t& aProgress,
-                           const int64_t& aProgressMax);
-
-  IPCResult RecvOnStatus(const nsresult& aStatus);
 
   IPCResult RecvFlushedForDiversion();
 
   IPCResult RecvDivertMessages();
 
   IPCResult RecvOnStartRequestSent();
-
-  IPCResult RecvNotifyChannelClassifierProtectionDisabled(
-      const uint32_t& aAcceptedReason);
-
-  IPCResult RecvNotifyCookieAllowed();
-
-  IPCResult RecvNotifyCookieBlocked(const uint32_t& aRejectedReason);
-
-  IPCResult RecvNotifyClassificationFlags(const uint32_t& aClassificationFlags,
-                                          const bool& aIsThirdParty);
-
-  IPCResult RecvNotifyFlashPluginStateChanged(
-      const nsIHttpChannel::FlashPluginState& aState);
-
-  IPCResult RecvSetClassifierMatchedInfo(const ClassifierInfo& info);
-
-  IPCResult RecvSetClassifierMatchedTrackingInfo(const ClassifierInfo& info);
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
 

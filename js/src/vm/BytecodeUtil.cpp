@@ -25,19 +25,20 @@
 #include "jsapi.h"
 #include "jsnum.h"
 #include "jstypes.h"
-#include "jsutil.h"
 
 #include "frontend/BytecodeCompiler.h"
 #include "frontend/SourceNotes.h"
-#include "gc/FreeOp.h"
-#include "gc/GCInternals.h"
+#include "gc/PublicIterators.h"
 #include "js/CharacterEncoding.h"
 #include "js/Printf.h"
 #include "js/Symbol.h"
+#include "util/Memory.h"
 #include "util/StringBuffer.h"
 #include "util/Text.h"
+#include "vm/BytecodeLocation.h"
 #include "vm/CodeCoverage.h"
 #include "vm/EnvironmentObject.h"
+#include "vm/FrameIter.h"  // js::{,Script}FrameIter
 #include "vm/JSAtom.h"
 #include "vm/JSContext.h"
 #include "vm/JSFunction.h"
@@ -47,7 +48,9 @@
 #include "vm/Realm.h"
 #include "vm/Shape.h"
 
-#include "gc/PrivateIterators-inl.h"
+#include "gc/GC-inl.h"
+#include "vm/BytecodeIterator-inl.h"
+#include "vm/BytecodeLocation-inl.h"
 #include "vm/JSContext-inl.h"
 #include "vm/JSObject-inl.h"
 #include "vm/JSScript-inl.h"
@@ -63,7 +66,7 @@ using js::frontend::IsIdentifier;
 JS_STATIC_ASSERT(sizeof(uint32_t) * CHAR_BIT >= INDEX_LIMIT_LOG2 + 1);
 
 const JSCodeSpec js::CodeSpec[] = {
-#define MAKE_CODESPEC(op, val, name, token, length, nuses, ndefs, format) \
+#define MAKE_CODESPEC(op, name, token, length, nuses, ndefs, format) \
   {length, nuses, ndefs, format},
     FOR_EACH_OPCODE(MAKE_CODESPEC)
 #undef MAKE_CODESPEC
@@ -74,7 +77,7 @@ const JSCodeSpec js::CodeSpec[] = {
  * bytecode or null.
  */
 static const char* const CodeToken[] = {
-#define TOKEN(op, val, name, token, ...) token,
+#define TOKEN(op, name, token, ...) token,
     FOR_EACH_OPCODE(TOKEN)
 #undef TOKEN
 };
@@ -84,7 +87,7 @@ static const char* const CodeToken[] = {
  * and JIT debug spew.
  */
 const char* const js::CodeName[] = {
-#define OPNAME(op, val, name, ...) name,
+#define OPNAME(op, name, ...) name,
     FOR_EACH_OPCODE(OPNAME)
 #undef OPNAME
 };
@@ -135,6 +138,9 @@ static MOZ_MUST_USE bool DumpIonScriptCounts(Sprinter* sp, HandleScript script,
 static MOZ_MUST_USE bool DumpPCCounts(JSContext* cx, HandleScript script,
                                       Sprinter* sp) {
   MOZ_ASSERT(script->hasScriptCounts());
+
+  // Ensure the Disassemble1 call below does not discard the script counts.
+  gc::AutoSuppressGC suppress(cx);
 
 #ifdef DEBUG
   jsbytecode* pc = script->code();
@@ -538,9 +544,9 @@ class BytecodeParser {
                              const OffsetAndDefIndex* offsetStack,
                              uint32_t stackDepth);
 
-  inline bool addJump(uint32_t offset, uint32_t* currentOffset,
-                      uint32_t stackDepth, const OffsetAndDefIndex* offsetStack,
-                      jsbytecode* pc, JumpKind kind);
+  inline bool addJump(uint32_t offset, uint32_t stackDepth,
+                      const OffsetAndDefIndex* offsetStack, jsbytecode* pc,
+                      JumpKind kind);
 };
 
 }  // anonymous namespace
@@ -676,6 +682,7 @@ uint32_t BytecodeParser::simulateOp(JSOp op, uint32_t offset,
     case JSOP_INITGLEXICAL:
     case JSOP_INITLEXICAL:
     case JSOP_OR:
+    case JSOP_COALESCE:
     case JSOP_SETALIASEDVAR:
     case JSOP_SETARG:
     case JSOP_SETINTRINSIC:
@@ -684,7 +691,6 @@ uint32_t BytecodeParser::simulateOp(JSOp op, uint32_t offset,
     case JSOP_THROWSETCALLEE:
     case JSOP_THROWSETCONST:
     case JSOP_INITALIASEDLEXICAL:
-    case JSOP_INITIALYIELD:
     case JSOP_ITERNEXT:
       // Keep the top value.
       MOZ_ASSERT(nuses == 1);
@@ -694,6 +700,12 @@ uint32_t BytecodeParser::simulateOp(JSOp op, uint32_t offset,
     case JSOP_INITHOMEOBJECT:
       // Pop the top value, keep the other value.
       MOZ_ASSERT(nuses == 2);
+      MOZ_ASSERT(ndefs == 1);
+      break;
+
+    case JSOP_CHECK_RESUMEKIND:
+      // Pop the top two values, keep the other value.
+      MOZ_ASSERT(nuses == 3);
       MOZ_ASSERT(ndefs == 1);
       break;
 
@@ -763,8 +775,7 @@ bool BytecodeParser::recordBytecode(uint32_t offset,
   return true;
 }
 
-bool BytecodeParser::addJump(uint32_t offset, uint32_t* currentOffset,
-                             uint32_t stackDepth,
+bool BytecodeParser::addJump(uint32_t offset, uint32_t stackDepth,
                              const OffsetAndDefIndex* offsetStack,
                              jsbytecode* pc, JumpKind kind) {
   if (!recordBytecode(offset, offsetStack, stackDepth)) {
@@ -772,21 +783,17 @@ bool BytecodeParser::addJump(uint32_t offset, uint32_t* currentOffset,
   }
 
 #ifdef DEBUG
+  uint32_t currentOffset = script_->pcToOffset(pc);
   if (isStackDump) {
-    if (!codeArray_[offset]->addJump(script_->pcToOffset(pc), kind)) {
+    if (!codeArray_[offset]->addJump(currentOffset, kind)) {
       reportOOM();
       return false;
     }
   }
-#endif /* DEBUG */
 
-  Bytecode*& code = codeArray_[offset];
-  if (offset < *currentOffset && !code->parsed) {
-    // Backedge in a while/for loop, whose body has not been parsed due
-    // to a lack of fallthrough at the loop head. Roll back the offset
-    // to analyze the body.
-    *currentOffset = offset;
-  }
+  // If this is a backedge, assert we parsed the target JSOP_LOOPHEAD.
+  MOZ_ASSERT_IF(offset < currentOffset, codeArray_[offset]->parsed);
+#endif /* DEBUG */
 
   return true;
 }
@@ -822,22 +829,16 @@ bool BytecodeParser::parse() {
   startcode->stackDepth = 0;
   codeArray_[0] = startcode;
 
-  uint32_t offset, nextOffset = 0;
-  while (nextOffset < length) {
-    offset = nextOffset;
-
+  for (uint32_t offset = 0, nextOffset = 0; offset < length;
+       offset = nextOffset) {
     Bytecode* code = maybeCode(offset);
     jsbytecode* pc = script_->offsetToPC(offset);
 
+    // Next bytecode to analyze.
+    nextOffset = offset + GetBytecodeLength(pc);
+
     JSOp op = (JSOp)*pc;
     MOZ_ASSERT(op < JSOP_LIMIT);
-
-    // Immediate successor of this bytecode.
-    uint32_t successorOffset = offset + GetBytecodeLength(pc);
-
-    // Next bytecode to analyze.  This is either the successor, or is an
-    // earlier bytecode if this bytecode has a loop backedge.
-    nextOffset = successorOffset;
 
     if (!code) {
       // Haven't found a path by which this bytecode is reachable.
@@ -880,7 +881,7 @@ bool BytecodeParser::parse() {
         int32_t high = GET_JUMP_OFFSET(pc2);
         pc2 += JUMP_OFFSET_LEN;
 
-        if (!addJump(defaultOffset, &nextOffset, stackDepth, offsetStack, pc,
+        if (!addJump(defaultOffset, stackDepth, offsetStack, pc,
                      JumpKind::SwitchDefault)) {
           return false;
         }
@@ -890,7 +891,7 @@ bool BytecodeParser::parse() {
         for (uint32_t i = 0; i < ncases; i++) {
           uint32_t targetOffset = script_->tableSwitchCaseOffset(pc, i);
           if (targetOffset != defaultOffset) {
-            if (!addJump(targetOffset, &nextOffset, stackDepth, offsetStack, pc,
+            if (!addJump(targetOffset, stackDepth, offsetStack, pc,
                          JumpKind::SwitchCase)) {
               return false;
             }
@@ -906,16 +907,16 @@ bool BytecodeParser::parse() {
         // same function: no more code will execute, and it does not matter what
         // is defined.
         for (const JSTryNote& tn : script_->trynotes()) {
-          if (tn.start == offset + 1) {
+          if (tn.start == offset + JSOP_TRY_LENGTH) {
             uint32_t catchOffset = tn.start + tn.length;
             if (tn.kind == JSTRY_CATCH) {
-              if (!addJump(catchOffset, &nextOffset, stackDepth, offsetStack,
-                           pc, JumpKind::TryCatch)) {
+              if (!addJump(catchOffset, stackDepth, offsetStack, pc,
+                           JumpKind::TryCatch)) {
                 return false;
               }
             } else if (tn.kind == JSTRY_FINALLY) {
-              if (!addJump(catchOffset, &nextOffset, stackDepth, offsetStack,
-                           pc, JumpKind::TryFinally)) {
+              if (!addJump(catchOffset, stackDepth, offsetStack, pc,
+                           JumpKind::TryFinally)) {
                 return false;
               }
             }
@@ -937,7 +938,7 @@ bool BytecodeParser::parse() {
       }
 
       uint32_t targetOffset = offset + GET_JUMP_OFFSET(pc);
-      if (!addJump(targetOffset, &nextOffset, newStackDepth, offsetStack, pc,
+      if (!addJump(targetOffset, newStackDepth, offsetStack, pc,
                    JumpKind::Simple)) {
         return false;
       }
@@ -945,7 +946,7 @@ bool BytecodeParser::parse() {
 
     // Handle any fallthrough from this opcode.
     if (BytecodeFallsThrough(op)) {
-      if (!recordBytecode(successorOffset, offsetStack, stackDepth)) {
+      if (!recordBytecode(nextOffset, offsetStack, stackDepth)) {
         return false;
       }
     }
@@ -1152,7 +1153,7 @@ static UniqueChars ToDisassemblySource(JSContext* cx, HandleValue v) {
       if (!str) {
         return nullptr;
       }
-      return StringToNewUTF8CharsZ(cx, *str);
+      return QuoteString(cx, str);
     }
 
     if (obj.is<RegExpObject>()) {
@@ -1160,7 +1161,7 @@ static UniqueChars ToDisassemblySource(JSContext* cx, HandleValue v) {
       if (!source) {
         return nullptr;
       }
-      return StringToNewUTF8CharsZ(cx, *source);
+      return QuoteString(cx, source);
     }
   }
 
@@ -1401,21 +1402,6 @@ static unsigned Disassemble1(JSContext* cx, HandleScript script, jsbytecode* pc,
   int i;
   switch (JOF_TYPE(cs->format)) {
     case JOF_BYTE:
-      // Scan the trynotes to find the associated catch block
-      // and make the try opcode look like a jump instruction
-      // with an offset. This simplifies code coverage analysis
-      // based on this disassembled output.
-      if (op == JSOP_TRY) {
-        for (const JSTryNote& tn : script->trynotes()) {
-          if (tn.kind == JSTRY_CATCH && tn.start == loc + 1) {
-            if (!sp->jsprintf(" %u (%+d)", unsigned(loc + tn.length + 1),
-                              int(tn.length + 1))) {
-              return 0;
-            }
-            break;
-          }
-        }
-      }
       break;
 
     case JOF_JUMP: {
@@ -1581,12 +1567,29 @@ static unsigned Disassemble1(JSContext* cx, HandleScript script, jsbytecode* pc,
       }
       break;
 
-    case JOF_LOOPENTRY:
-      if (!sp->jsprintf(" (ic: %u, data: %u,%u)", GET_ICINDEX(pc),
-                        LoopEntryCanIonOsr(pc), LoopEntryDepthHint(pc))) {
+    case JOF_LOOPHEAD:
+      if (!sp->jsprintf(" (ic: %u, depthHint: %u)", GET_ICINDEX(pc),
+                        LoopHeadDepthHint(pc))) {
         return 0;
       }
       break;
+
+    case JOF_CLASS_CTOR: {
+      uint32_t atomIndex = 0;
+      uint32_t classStartOffset = 0, classEndOffset = 0;
+      GetClassConstructorOperands(pc, &atomIndex, &classStartOffset,
+                                  &classEndOffset);
+      RootedValue v(cx, StringValue(script->getAtom(atomIndex)));
+      UniqueChars bytes = ToDisassemblySource(cx, v);
+      if (!bytes) {
+        return 0;
+      }
+      if (!sp->jsprintf(" %s (off: %u-%u)", bytes.get(), classStartOffset,
+                        classEndOffset)) {
+        return 0;
+      }
+      break;
+    }
 
     case JOF_ARGC:
     case JOF_UINT16:
@@ -2082,6 +2085,7 @@ bool ExpressionDecompiler::decompilePC(jsbytecode* pc, uint8_t defIndex) {
 
       case JSOP_NEWINIT:
       case JSOP_NEWOBJECT:
+      case JSOP_NEWOBJECT_WITHGROUP:
       case JSOP_OBJWITHPROTO:
         return write("OBJ");
 
@@ -2109,12 +2113,23 @@ bool ExpressionDecompiler::decompilePC(jsbytecode* pc, uint8_t defIndex) {
       case JSOP_UNINITIALIZED:
         return write("UNINITIALIZED");
 
+      case JSOP_INITIALYIELD:
       case JSOP_AWAIT:
       case JSOP_YIELD:
         // Printing "yield SOMETHING" is confusing since the operand doesn't
         // match to the syntax, since the stack operand for "yield 10" is
         // the result object, not 10.
-        return write("RVAL");
+        if (defIndex == 0) {
+          return write("RVAL");
+        }
+        if (defIndex == 1) {
+          return write("GENERATOR");
+        }
+        MOZ_ASSERT(defIndex == 2);
+        return write("RESUMEKIND");
+
+      case JSOP_RESUMEKIND:
+        return write("RESUMEKIND");
 
       case JSOP_ASYNCAWAIT:
       case JSOP_ASYNCRESOLVE:
@@ -2187,7 +2202,7 @@ JSAtom* ExpressionDecompiler::loadAtom(jsbytecode* pc) {
 }
 
 JSAtom* ExpressionDecompiler::getArg(unsigned slot) {
-  MOZ_ASSERT(script->functionNonDelazifying());
+  MOZ_ASSERT(script->isFunction());
   MOZ_ASSERT(slot < script->numArgs());
 
   for (PositionalFormalParameterIter fi(script); fi; fi++) {
@@ -2647,7 +2662,7 @@ JS_FRIEND_API JSString* js::GetPCCountScriptSummary(JSContext* cx,
   }
   json.property("line", script->lineno());
 
-  if (JSFunction* fun = script->functionNonDelazifying()) {
+  if (JSFunction* fun = script->function()) {
     if (JSAtom* atom = fun->displayAtom()) {
       if (!JSONStringProperty(sp, json, "name", atom)) {
         return nullptr;
@@ -2856,14 +2871,34 @@ JS_FRIEND_API JSString* js::GetPCCountScriptContents(JSContext* cx,
   return NewStringCopyZ<CanGC>(cx, sp.string());
 }
 
+struct CollectedScripts {
+  MutableHandle<ScriptVector> scripts;
+  bool ok = true;
+
+  explicit CollectedScripts(MutableHandle<ScriptVector> scripts)
+      : scripts(scripts) {}
+
+  static void consider(JSRuntime* rt, void* data, JSScript* script,
+                       const JS::AutoRequireNoGC& nogc) {
+    auto self = static_cast<CollectedScripts*>(data);
+    if (!script->filename()) {
+      return;
+    }
+    if (!self->scripts.append(script)) {
+      self->ok = false;
+    }
+  }
+};
+
 static bool GenerateLcovInfo(JSContext* cx, JS::Realm* realm,
                              GenericPrinter& out) {
-  JSRuntime* rt = cx->runtime();
-
   AutoRealmUnchecked ar(cx, realm);
 
   // Collect the list of scripts which are part of the current realm.
-  { js::gc::AutoPrepareForTracing apft(cx); }
+
+  MOZ_RELEASE_ASSERT(
+      coverage::IsLCovEnabled(),
+      "Coverage must be enabled for process before generating LCov info");
 
   // Hold the scripts that we have already flushed, to avoid flushing them
   // twice.
@@ -2871,21 +2906,23 @@ static bool GenerateLcovInfo(JSContext* cx, JS::Realm* realm,
   Rooted<JSScriptSet> scriptsDone(cx, JSScriptSet(cx));
 
   Rooted<ScriptVector> queue(cx, ScriptVector(cx));
-  for (ZonesIter zone(rt, SkipAtoms); !zone.done(); zone.next()) {
-    for (auto script = zone->cellIter<JSScript>(); !script.done();
-         script.next()) {
-      if (script->realm() != realm || !script->filename()) {
-        continue;
-      }
 
-      if (!queue.append(script)) {
-        return false;
-      }
+  {
+    CollectedScripts result(&queue);
+    IterateScripts(cx, realm, &result, &CollectedScripts::consider);
+    if (!result.ok) {
+      return false;
     }
   }
 
   if (queue.length() == 0) {
     return true;
+  }
+
+  // Ensure the LCovRealm exists to collect info into.
+  coverage::LCovRealm* lcovRealm = realm->lcovRealm();
+  if (!lcovRealm) {
+    return false;
   }
 
   // Collect code coverage info for one realm.
@@ -2894,14 +2931,18 @@ static bool GenerateLcovInfo(JSContext* cx, JS::Realm* realm,
     RootedFunction fun(cx);
 
     JSScriptSet::AddPtr entry = scriptsDone.lookupForAdd(script);
-    if (script->filename() && !entry) {
-      realm->lcovOutput.collectCodeCoverageInfo(realm, script,
-                                                script->filename());
-      script->resetScriptCounts();
+    if (entry) {
+      continue;
+    }
 
-      if (!scriptsDone.add(entry, script)) {
-        return false;
-      }
+    if (!coverage::CollectScriptCoverage(script, false)) {
+      return false;
+    }
+
+    script->resetScriptCounts();
+
+    if (!scriptsDone.add(entry, script)) {
+      return false;
     }
 
     if (!script->isTopLevel()) {
@@ -2940,7 +2981,7 @@ static bool GenerateLcovInfo(JSContext* cx, JS::Realm* realm,
   } while (!queue.empty());
 
   bool isEmpty = true;
-  realm->lcovOutput.exportInto(out, &isEmpty);
+  lcovRealm->exportInto(out, &isEmpty);
   if (out.hadOutOfMemory()) {
     return false;
   }
@@ -2948,9 +2989,9 @@ static bool GenerateLcovInfo(JSContext* cx, JS::Realm* realm,
   return true;
 }
 
-JS_FRIEND_API char* js::GetCodeCoverageSummary(JSContext* cx, size_t* length) {
+JS_FRIEND_API UniqueChars js::GetCodeCoverageSummaryAll(JSContext* cx,
+                                                        size_t* length) {
   Sprinter out(cx);
-
   if (!out.init()) {
     return nullptr;
   }
@@ -2962,23 +3003,24 @@ JS_FRIEND_API char* js::GetCodeCoverageSummary(JSContext* cx, size_t* length) {
     }
   }
 
-  if (out.hadOutOfMemory()) {
+  *length = out.getOffset();
+  return js::DuplicateString(cx, out.string(), *length);
+}
+
+JS_FRIEND_API UniqueChars js::GetCodeCoverageSummary(JSContext* cx,
+                                                     size_t* length) {
+  Sprinter out(cx);
+  if (!out.init()) {
+    return nullptr;
+  }
+
+  if (!GenerateLcovInfo(cx, cx->realm(), out)) {
     JS_ReportOutOfMemory(cx);
     return nullptr;
   }
 
-  ptrdiff_t len = out.stringEnd() - out.string();
-  char* res = cx->pod_malloc<char>(len + 1);
-  if (!res) {
-    return nullptr;
-  }
-
-  js_memcpy(res, out.string(), len);
-  res[len] = 0;
-  if (length) {
-    *length = len;
-  }
-  return res;
+  *length = out.getOffset();
+  return js::DuplicateString(cx, out.string(), *length);
 }
 
 bool js::GetSuccessorBytecodes(JSScript* script, jsbytecode* pc,
@@ -3019,16 +3061,16 @@ bool js::GetSuccessorBytecodes(JSScript* script, jsbytecode* pc,
 
 bool js::GetPredecessorBytecodes(JSScript* script, jsbytecode* pc,
                                  PcVector& predecessors) {
-  jsbytecode* end = script->code() + script->length();
-  MOZ_ASSERT(pc >= script->code() && pc < end);
-  for (jsbytecode* npc = script->code(); npc < end; npc = GetNextPc(npc)) {
+  MOZ_ASSERT(js::BytecodeLocation(script, pc).isInBounds(script));
+
+  for (const BytecodeLocation& loc : js::AllBytecodesIterable(script)) {
     PcVector successors;
-    if (!GetSuccessorBytecodes(script, npc, successors)) {
+    if (!GetSuccessorBytecodes(script, loc.toRawBytecode(), successors)) {
       return false;
     }
     for (size_t i = 0; i < successors.length(); i++) {
       if (successors[i] == pc) {
-        if (!predecessors.append(npc)) {
+        if (!predecessors.append(loc.toRawBytecode())) {
           return false;
         }
         break;

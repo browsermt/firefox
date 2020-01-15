@@ -17,13 +17,9 @@
 #endif
 
 ProfiledThreadData::ProfiledThreadData(ThreadInfo* aThreadInfo,
-                                       nsIEventTarget* aEventTarget,
-                                       bool aIncludeResponsiveness)
+                                       nsIEventTarget* aEventTarget)
     : mThreadInfo(aThreadInfo) {
   MOZ_COUNT_CTOR(ProfiledThreadData);
-  if (aIncludeResponsiveness) {
-    mResponsiveness.emplace(aEventTarget, aThreadInfo->IsMainThread());
-  }
 }
 
 ProfiledThreadData::~ProfiledThreadData() {
@@ -38,7 +34,8 @@ void ProfiledThreadData::StreamJSON(const ProfileBuffer& aBuffer,
                                     double aSinceTime, bool JSTracerEnabled,
                                     ProfilerCodeAddressService* aService) {
   if (mJITFrameInfoForPreviousJSContexts &&
-      mJITFrameInfoForPreviousJSContexts->HasExpired(aBuffer.mRangeStart)) {
+      mJITFrameInfoForPreviousJSContexts->HasExpired(
+          aBuffer.BufferRangeStart())) {
     mJITFrameInfoForPreviousJSContexts = nullptr;
   }
 
@@ -84,6 +81,7 @@ void ProfiledThreadData::StreamJSON(const ProfileBuffer& aBuffer,
         JSONSchemaWriter schema(aWriter);
         schema.WriteField("location");
         schema.WriteField("relevantForJS");
+        schema.WriteField("innerWindowID");
         schema.WriteField("implementation");
         schema.WriteField("optimizations");
         schema.WriteField("line");
@@ -208,8 +206,7 @@ void StreamSamplesAndMarkers(const char* aName, int aThreadId,
                              const mozilla::TimeStamp& aRegisterTime,
                              const mozilla::TimeStamp& aUnregisterTime,
                              double aSinceTime, UniqueStacks& aUniqueStacks) {
-  aWriter.StringProperty("processType",
-                         XRE_ChildProcessTypeToString(XRE_GetProcessType()));
+  aWriter.StringProperty("processType", XRE_GetProcessTypeString());
 
   aWriter.StringProperty("name", aName);
 
@@ -245,7 +242,7 @@ void StreamSamplesAndMarkers(const char* aName, int aThreadId,
       JSONSchemaWriter schema(aWriter);
       schema.WriteField("stack");
       schema.WriteField("time");
-      schema.WriteField("responsiveness");
+      schema.WriteField("eventDelay");
     }
 
     aWriter.StartArrayProperty("data");
@@ -287,7 +284,8 @@ void ProfiledThreadData::NotifyAboutToLoseJSContext(
   MOZ_RELEASE_ASSERT(aContext);
 
   if (mJITFrameInfoForPreviousJSContexts &&
-      mJITFrameInfoForPreviousJSContexts->HasExpired(aBuffer.mRangeStart)) {
+      mJITFrameInfoForPreviousJSContexts->HasExpired(
+          aBuffer.BufferRangeStart())) {
     mJITFrameInfoForPreviousJSContexts = nullptr;
   }
 

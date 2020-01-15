@@ -28,8 +28,8 @@ class NeckoChild : public PNeckoChild {
   PStunAddrsRequestChild* AllocPStunAddrsRequestChild();
   bool DeallocPStunAddrsRequestChild(PStunAddrsRequestChild* aActor);
 
-  PWebrtcProxyChannelChild* AllocPWebrtcProxyChannelChild(const TabId& tabId);
-  bool DeallocPWebrtcProxyChannelChild(PWebrtcProxyChannelChild* aActor);
+  PWebrtcTCPSocketChild* AllocPWebrtcTCPSocketChild(const Maybe<TabId>& tabId);
+  bool DeallocPWebrtcTCPSocketChild(PWebrtcTCPSocketChild* aActor);
 
   PAltDataOutputStreamChild* AllocPAltDataOutputStreamChild(
       const nsCString& type, const int64_t& predictedSize,
@@ -60,10 +60,6 @@ class NeckoChild : public PNeckoChild {
   PUDPSocketChild* AllocPUDPSocketChild(nsIPrincipal* aPrincipal,
                                         const nsCString& aFilter);
   bool DeallocPUDPSocketChild(PUDPSocketChild*);
-  PDNSRequestChild* AllocPDNSRequestChild(
-      const nsCString& aHost, const OriginAttributes& aOriginAttributes,
-      const uint32_t& aFlags);
-  bool DeallocPDNSRequestChild(PDNSRequestChild*);
   PSimpleChannelChild* AllocPSimpleChannelChild(const uint32_t& channelId);
   bool DeallocPSimpleChannelChild(PSimpleChannelChild* child);
   PChannelDiverterChild* AllocPChannelDiverterChild(
@@ -95,9 +91,6 @@ class NeckoChild : public PNeckoChild {
 
   bool DeallocPClassifierDummyChannelChild(
       PClassifierDummyChannelChild* aChannel);
-
-  PProxyConfigLookupChild* AllocPProxyConfigLookupChild();
-  bool DeallocPProxyConfigLookupChild(PProxyConfigLookupChild* aActor);
 };
 
 /**

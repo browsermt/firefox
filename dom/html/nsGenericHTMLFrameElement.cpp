@@ -8,6 +8,7 @@
 
 #include "mozilla/dom/HTMLIFrameElement.h"
 #include "mozilla/dom/XULFrameElement.h"
+#include "mozilla/dom/BrowserBridgeChild.h"
 #include "mozilla/dom/WindowProxyHolder.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
@@ -20,7 +21,6 @@
 #include "nsIFrame.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsIPermissionManager.h"
-#include "nsIScrollable.h"
 #include "nsPresContext.h"
 #include "nsServiceManagerUtils.h"
 #include "nsSubDocumentFrame.h"
@@ -251,19 +251,17 @@ void nsGenericHTMLFrameElement::UnbindFromTree(bool aNullParent) {
 }
 
 /* static */
-int32_t nsGenericHTMLFrameElement::MapScrollingAttribute(
+ScrollbarPreference nsGenericHTMLFrameElement::MapScrollingAttribute(
     const nsAttrValue* aValue) {
-  int32_t mappedValue = nsIScrollable::Scrollbar_Auto;
   if (aValue && aValue->Type() == nsAttrValue::eEnum) {
     switch (aValue->GetEnumValue()) {
       case NS_STYLE_FRAME_OFF:
       case NS_STYLE_FRAME_NOSCROLL:
       case NS_STYLE_FRAME_NO:
-        mappedValue = nsIScrollable::Scrollbar_Never;
-        break;
+        return ScrollbarPreference::Never;
     }
   }
-  return mappedValue;
+  return ScrollbarPreference::Auto;
 }
 
 static bool PrincipalAllowsBrowserFrame(nsIPrincipal* aPrincipal) {
@@ -294,28 +292,16 @@ nsresult nsGenericHTMLFrameElement::AfterSetAttr(
   if (aNameSpaceID == kNameSpaceID_None) {
     if (aName == nsGkAtoms::scrolling) {
       if (mFrameLoader) {
-        nsIDocShell* docshell = mFrameLoader->GetExistingDocShell();
-        nsCOMPtr<nsIScrollable> scrollable = do_QueryInterface(docshell);
-        if (scrollable) {
-          int32_t cur;
-          scrollable->GetDefaultScrollbarPreferences(
-              nsIScrollable::ScrollOrientation_X, &cur);
-          int32_t val = MapScrollingAttribute(aValue);
-          if (cur != val) {
-            scrollable->SetDefaultScrollbarPreferences(
-                nsIScrollable::ScrollOrientation_X, val);
-            scrollable->SetDefaultScrollbarPreferences(
-                nsIScrollable::ScrollOrientation_Y, val);
-            RefPtr<nsPresContext> presContext = docshell->GetPresContext();
-            PresShell* presShell =
-                presContext ? presContext->GetPresShell() : nullptr;
-            nsIFrame* rootScroll =
-                presShell ? presShell->GetRootScrollFrame() : nullptr;
-            if (rootScroll) {
-              presShell->FrameNeedsReflow(
-                  rootScroll, IntrinsicDirty::StyleChange, NS_FRAME_IS_DIRTY);
-            }
-          }
+        ScrollbarPreference pref = MapScrollingAttribute(aValue);
+        if (nsIDocShell* docshell = mFrameLoader->GetExistingDocShell()) {
+          nsDocShell::Cast(docshell)->SetScrollbarPreference(pref);
+        } else if (auto* child = mFrameLoader->GetBrowserBridgeChild()) {
+          // NOTE(emilio): We intentionally don't deal with the
+          // GetBrowserParent() case, and only deal with the fission iframe
+          // case. We could make it work, but it's a bit of boilerplate for
+          // something that we don't use, and we'd need to think how it
+          // interacts with the scrollbar window flags...
+          child->SendScrollbarPreferenceChanged(pref);
         }
       }
     } else if (aName == nsGkAtoms::mozbrowser) {
@@ -353,15 +339,14 @@ void nsGenericHTMLFrameElement::AfterMaybeChangeAttr(
         LoadSrc();
       }
     } else if (aName == nsGkAtoms::name) {
-      // Propagate "name" to the docshell to make browsing context names live,
-      // per HTML5.
-      nsIDocShell* docShell =
-          mFrameLoader ? mFrameLoader->GetExistingDocShell() : nullptr;
-      if (docShell) {
+      // Propagate "name" to the browsing context per HTML5.
+      RefPtr<BrowsingContext> bc =
+          mFrameLoader ? mFrameLoader->GetBrowsingContext() : nullptr;
+      if (bc) {
         if (aValue) {
-          docShell->SetName(aValue->String());
+          bc->SetName(aValue->String());
         } else {
-          docShell->SetName(EmptyString());
+          bc->SetName(EmptyString());
         }
       }
     }
@@ -385,7 +370,7 @@ nsresult nsGenericHTMLFrameElement::CopyInnerTo(Element* aDest) {
   if (doc->IsStaticDocument() && mFrameLoader) {
     nsGenericHTMLFrameElement* dest =
         static_cast<nsGenericHTMLFrameElement*>(aDest);
-    nsFrameLoader* fl = nsFrameLoader::Create(dest, nullptr, false);
+    RefPtr<nsFrameLoader> fl = nsFrameLoader::Create(dest, nullptr, false);
     NS_ENSURE_STATE(fl);
     dest->mFrameLoader = fl;
     mFrameLoader->CreateStaticClone(fl);

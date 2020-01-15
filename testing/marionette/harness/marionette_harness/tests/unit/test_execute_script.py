@@ -373,12 +373,13 @@ class TestExecuteChrome(WindowManagerMixin, TestExecuteContent):
 
     def test_unmarshal_element_collection(self):
         try:
-            win = self.open_chrome_window("chrome://marionette/content/test.xul")
+            win = self.open_chrome_window("chrome://marionette/content/test.xhtml")
             self.marionette.switch_to_window(win)
 
-            expected = self.marionette.find_elements(By.TAG_NAME, "textbox")
+            expected = self.marionette.find_elements(By.TAG_NAME, "input")
             actual = self.marionette.execute_script(
-                "return document.querySelectorAll('textbox')")
+                "return document.querySelectorAll('input')")
+            self.assertTrue(len(expected) > 0)
             self.assertEqual(expected, actual)
 
         finally:

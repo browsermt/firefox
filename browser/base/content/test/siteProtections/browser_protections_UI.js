@@ -3,55 +3,21 @@
 
 /* Basic UI tests for the protections panel */
 
+"use strict";
+
+const TRACKING_PAGE =
+  "http://tracking.example.org/browser/browser/base/content/test/trackingUI/trackingPage.html";
+
 ChromeUtils.defineModuleGetter(
   this,
   "ContentBlockingAllowList",
   "resource://gre/modules/ContentBlockingAllowList.jsm"
 );
 
-function checkClickTelemetry(objectName, value) {
-  let events = Services.telemetry.snapshotEvents(
-    Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS
-  ).parent;
-  let buttonEvents = events.filter(
-    e =>
-      e[1] == "security.ui.protectionspopup" &&
-      e[2] == "click" &&
-      e[3] == objectName &&
-      (!value || e[4] == value)
-  );
-  is(buttonEvents.length, 1, `recorded ${objectName} telemetry event`);
-}
-
-XPCOMUtils.defineLazyServiceGetter(
-  this,
-  "TrackingDBService",
-  "@mozilla.org/tracking-db-service;1",
-  "nsITrackingDBService"
+ChromeUtils.import(
+  "resource://testing-common/CustomizableUITestUtils.jsm",
+  this
 );
-
-XPCOMUtils.defineLazyGetter(this, "TRACK_DB_PATH", function() {
-  return OS.Path.join(OS.Constants.Path.profileDir, "protections.sqlite");
-});
-
-const { Sqlite } = ChromeUtils.import("resource://gre/modules/Sqlite.jsm");
-
-async function addTrackerDataIntoDB(count) {
-  const insertSQL =
-    "INSERT INTO events (type, count, timestamp)" +
-    "VALUES (:type, :count, date(:timestamp));";
-
-  let db = await Sqlite.openConnection({ path: TRACK_DB_PATH });
-  let date = new Date().toISOString();
-
-  await db.execute(insertSQL, {
-    type: TrackingDBService.TRACKERS_ID,
-    count,
-    timestamp: date,
-  });
-
-  await db.close();
-}
 
 add_task(async function setup() {
   await SpecialPowers.pushPrefEnv({
@@ -63,6 +29,7 @@ add_task(async function setup() {
       ["browser.contentblocking.report.monitor.enabled", false],
       ["browser.contentblocking.report.lockwise.enabled", false],
       ["browser.contentblocking.report.proxy.enabled", false],
+      ["privacy.trackingprotection.enabled", true],
     ],
   });
   let oldCanRecord = Services.telemetry.canRecordExtended;
@@ -78,8 +45,13 @@ add_task(async function setup() {
 add_task(async function testToggleSwitch() {
   let tab = await BrowserTestUtils.openNewForegroundTab(
     gBrowser,
-    "https://example.com"
+    TRACKING_PAGE
   );
+
+  await TestUtils.waitForCondition(() => {
+    return gProtectionsHandler._protectionsPopup.hasAttribute("blocking");
+  });
+
   await openProtectionsPanel();
   let events = Services.telemetry.snapshotEvents(
     Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS
@@ -100,6 +72,50 @@ add_task(async function testToggleSwitch() {
     "The 'Site not working?' link should be visible."
   );
 
+  // The 'Site Fixed?' link should be hidden.
+  ok(
+    BrowserTestUtils.is_hidden(
+      gProtectionsHandler._protectionsPopupTPSwitchBreakageFixedLink
+    ),
+    "The 'Site Fixed?' link should be hidden."
+  );
+
+  // Navigate through the 'Site Not Working?' flow and back to the main view,
+  // checking for telemetry on the way.
+  let siteNotWorkingView = document.getElementById(
+    "protections-popup-siteNotWorkingView"
+  );
+  let viewShown = BrowserTestUtils.waitForEvent(
+    siteNotWorkingView,
+    "ViewShown"
+  );
+  gProtectionsHandler._protectionsPopupTPSwitchBreakageLink.click();
+  await viewShown;
+
+  checkClickTelemetry("sitenotworking_link");
+
+  let sendReportButton = document.getElementById(
+    "protections-popup-siteNotWorkingView-sendReport"
+  );
+  let sendReportView = document.getElementById(
+    "protections-popup-sendReportView"
+  );
+  viewShown = BrowserTestUtils.waitForEvent(sendReportView, "ViewShown");
+  sendReportButton.click();
+  await viewShown;
+
+  checkClickTelemetry("send_report_link");
+
+  viewShown = BrowserTestUtils.waitForEvent(siteNotWorkingView, "ViewShown");
+  sendReportView.querySelector(".subviewbutton-back").click();
+  await viewShown;
+
+  let mainView = document.getElementById("protections-popup-mainView");
+
+  viewShown = BrowserTestUtils.waitForEvent(mainView, "ViewShown");
+  siteNotWorkingView.querySelector(".subviewbutton-back").click();
+  await viewShown;
+
   ok(
     gProtectionsHandler._protectionsPopupTPSwitch.hasAttribute("enabled"),
     "TP Switch should be enabled"
@@ -117,6 +133,13 @@ add_task(async function testToggleSwitch() {
       gProtectionsHandler._protectionsPopupTPSwitchBreakageLink
     ),
     "The 'Site not working?' link should be hidden after TP switch turns to off."
+  );
+  // Same for the 'Site Fixed?' link
+  ok(
+    BrowserTestUtils.is_hidden(
+      gProtectionsHandler._protectionsPopupTPSwitchBreakageFixedLink
+    ),
+    "The 'Site Fixed?' link should be hidden."
   );
 
   await popuphiddenPromise;
@@ -154,6 +177,25 @@ add_task(async function testToggleSwitch() {
     "The 'Site not working?' link should be hidden if TP is off."
   );
 
+  // The 'Site Fixed?' link should be shown if TP is off.
+  ok(
+    BrowserTestUtils.is_visible(
+      gProtectionsHandler._protectionsPopupTPSwitchBreakageFixedLink
+    ),
+    "The 'Site Fixed?' link should be visible."
+  );
+
+  // Check telemetry for 'Site Fixed?' link.
+  viewShown = BrowserTestUtils.waitForEvent(sendReportView, "ViewShown");
+  gProtectionsHandler._protectionsPopupTPSwitchBreakageFixedLink.click();
+  await viewShown;
+
+  checkClickTelemetry("sitenotworking_link", "sitefixed");
+
+  viewShown = BrowserTestUtils.waitForEvent(mainView, "ViewShown");
+  sendReportView.querySelector(".subviewbutton-back").click();
+  await viewShown;
+
   // Click the TP switch again and check the visibility of the 'Site not
   // Working?'. It should be hidden after toggling the TP switch.
   browserLoadedPromise = BrowserTestUtils.browserLoaded(tab.linkedBrowser);
@@ -165,6 +207,12 @@ add_task(async function testToggleSwitch() {
     ),
     `The 'Site not working?' link should be still hidden after toggling TP
      switch to on from off.`
+  );
+  ok(
+    BrowserTestUtils.is_hidden(
+      gProtectionsHandler._protectionsPopupTPSwitchBreakageFixedLink
+    ),
+    "The 'Site Fixed?' link should be hidden."
   );
 
   await browserLoadedPromise;
@@ -222,10 +270,7 @@ add_task(async function testShowFullReportButton() {
     protectionsPopup,
     "popuphidden"
   );
-  let newTabPromise = BrowserTestUtils.waitForNewTab(
-    gBrowser,
-    "about:protections"
-  );
+  let newTabPromise = waitForAboutProtectionsTab();
   let showFullReportButton = document.getElementById(
     "protections-popup-show-report-button"
   );
@@ -238,15 +283,6 @@ add_task(async function testShowFullReportButton() {
   let newTab = await newTabPromise;
 
   ok(true, "about:protections has been opened successfully");
-
-  // When the graph is built it means the messaging has finished,
-  // we can close the tab.
-  await ContentTask.spawn(newTab.linkedBrowser, {}, async function() {
-    await ContentTaskUtils.waitForCondition(() => {
-      let bars = content.document.querySelectorAll(".graph-bar");
-      return bars.length;
-    }, "The graph has been built");
-  });
 
   checkClickTelemetry("full_report");
 
@@ -273,7 +309,7 @@ add_task(async function testMiniPanel() {
 
   // Check that only the header is displayed.
   for (let item of protectionsPopupMainView.childNodes) {
-    if (item.id !== "protections-popup-mainView-panel-header") {
+    if (item.id !== "protections-popup-mainView-panel-header-section") {
       ok(
         !BrowserTestUtils.is_visible(item),
         `The section '${item.id}' is hidden in the toast.`
@@ -623,4 +659,31 @@ add_task(async function testQuickSwitchTabAfterTogglingTPSwitch() {
 
   // Finally, clear the tracking database.
   await TrackingDBService.clearAll();
+});
+
+// Test that the "Privacy Protections" button in the app menu loads about:protections
+// and has appropriate telemetry
+add_task(async function testProtectionsButton() {
+  let gCUITestUtils = new CustomizableUITestUtils(window);
+
+  await BrowserTestUtils.withNewTab(gBrowser, async function(browser) {
+    await gCUITestUtils.openMainMenu();
+
+    let loaded = TestUtils.waitForCondition(
+      () => gBrowser.currentURI.spec == "about:protections",
+      "Should open about:protections"
+    );
+    document.getElementById("appMenu-protection-report-button").click();
+    await loaded;
+
+    // When the graph is built it means any messaging has finished,
+    // we can close the tab.
+    await SpecialPowers.spawn(browser, [], async function() {
+      await ContentTaskUtils.waitForCondition(() => {
+        let bars = content.document.querySelectorAll(".graph-bar");
+        return bars.length;
+      }, "The graph has been built");
+    });
+  });
+  checkClickTelemetry("open_full_report", undefined, "app_menu");
 });

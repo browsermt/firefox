@@ -9,6 +9,7 @@
 #endif
 
 #include "nsFxrCommandLineHandler.h"
+#include "FxRWindowManager.h"
 
 #include "nsICommandLine.h"
 #include "nsIWindowWatcher.h"
@@ -20,6 +21,7 @@
 #include "nsString.h"
 #include "nsArray.h"
 #include "nsCOMPtr.h"
+#include "mozilla/StaticPrefs_extensions.h"
 
 #include "windows.h"
 #include "WinUtils.h"
@@ -51,9 +53,12 @@ NS_IMPL_ISUPPORTS(nsFxrCommandLineHandler, nsICommandLineHandler)
 //       |                         |                  share texture handle to
 //       |                         |                  VRShMem and set signal
 //  CreateVRWindow returns         |                       |
-//  to host                        |                       |
+//  to host with relevant          |                       |
+//  return data from VRShMem       |                       |
+//       |                   Fx continues to run           |
+//       |                         |                  Fx continues to render
 //       |                         |                       |
-//
+//      ...                       ...                     ...
 
 NS_IMETHODIMP
 nsFxrCommandLineHandler::Handle(nsICommandLine* aCmdLine) {
@@ -61,6 +66,14 @@ nsFxrCommandLineHandler::Handle(nsICommandLine* aCmdLine) {
   nsresult result =
       aCmdLine->HandleFlag(NS_LITERAL_STRING("fxr"), false, &handleFlagRetVal);
   if (result == NS_OK && handleFlagRetVal) {
+    if (XRE_IsParentProcess() && !XRE_IsE10sParentProcess()) {
+      MOZ_CRASH("--fxr not supported without e10s");
+    }
+
+    MOZ_ASSERT(mozilla::StaticPrefs::extensions_webextensions_remote(),
+               "Remote extensions are the only supported configuration on "
+               "desktop platforms");
+
     aCmdLine->SetPreventDefault(true);
 
     nsCOMPtr<nsIWindowWatcher> wwatch =
@@ -71,11 +84,21 @@ nsFxrCommandLineHandler::Handle(nsICommandLine* aCmdLine) {
     result = wwatch->OpenWindow(nullptr,                            // aParent
                                 "chrome://fxr/content/fxrui.html",  // aUrl
                                 "_blank",                           // aName
-                                "chrome,dialog=no,all",             // aFeatures
+                                "chrome,dialog=no,all,private"      // aFeatures
+                                ",alwaysontop",
                                 nullptr,  // aArguments
                                 getter_AddRefs(newWindow));
 
     MOZ_ASSERT(result == NS_OK);
+
+    nsPIDOMWindowOuter* newWindowOuter = nsPIDOMWindowOuter::From(newWindow);
+    FxRWindowManager::GetInstance()->AddWindow(newWindowOuter);
+
+    // Set ForceFullScreenInWidget so that full-screen (in an FxR window)
+    // fills only the window and thus the same texture that will already be
+    // shared with the host. Also, this is set here per-window because
+    // changing the related pref would impact all browser window instances.
+    newWindowOuter->ForceFullScreenInWidget();
 
     // Send the window's HWND to vrhost through VRShMem
     mozilla::gfx::VRShMem shmem(nullptr, true /*aRequiresMutex*/);
@@ -84,8 +107,7 @@ nsFxrCommandLineHandler::Handle(nsICommandLine* aCmdLine) {
       shmem.PullWindowState(windowState);
 
       nsCOMPtr<nsIWidget> newWidget =
-          mozilla::widget::WidgetUtils::DOMWindowToWidget(
-              nsPIDOMWindowOuter::From(newWindow));
+          mozilla::widget::WidgetUtils::DOMWindowToWidget(newWindowOuter);
       HWND hwndWidget = (HWND)newWidget->GetNativeData(NS_NATIVE_WINDOW);
 
       // The CLH should populate these members first
@@ -100,7 +122,9 @@ nsFxrCommandLineHandler::Handle(nsICommandLine* aCmdLine) {
       // after output data is set in VRShMem
       newWidget->RequestFxrOutput();
     } else {
+#ifndef NIGHTLY_BUILD
       MOZ_CRASH("failed to start with --fxr");
+#endif
     }
   }
 

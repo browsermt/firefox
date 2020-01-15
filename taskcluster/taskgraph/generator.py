@@ -307,8 +307,11 @@ class TaskGraphGenerator(object):
         docker_image_tasks = set(t.label for t in full_task_graph.tasks.itervalues()
                                  if t.attributes['kind'] == 'docker-image')
         # include all tasks with `always_target` set
-        always_target_tasks = set(t.label for t in full_task_graph.tasks.itervalues()
-                                  if t.attributes.get('always_target'))
+        if parameters["tasks_for"] == "hg-push":
+            always_target_tasks = set(t.label for t in full_task_graph.tasks.itervalues()
+                                      if t.attributes.get('always_target'))
+        else:
+            always_target_tasks = set()
         logger.info('Adding %d tasks with `always_target` attribute' % (
                     len(always_target_tasks) - len(always_target_tasks & target_tasks)))
         target_graph = full_task_graph.graph.transitive_closure(
@@ -340,7 +343,7 @@ class TaskGraphGenerator(object):
         yield verifications('optimized_task_graph', optimized_task_graph, graph_config)
 
         morphed_task_graph, label_to_taskid = morph(
-            optimized_task_graph, label_to_taskid, parameters)
+            optimized_task_graph, label_to_taskid, parameters, graph_config)
 
         yield 'label_to_taskid', label_to_taskid
         yield verifications('morphed_task_graph', morphed_task_graph, graph_config)

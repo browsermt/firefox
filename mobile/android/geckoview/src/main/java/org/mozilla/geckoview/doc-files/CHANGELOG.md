@@ -13,15 +13,194 @@ exclude: true
 
 ⚠️  breaking change
 
+## v74
+- Added [`WebExtensionController.enable`][74.1] and [`disable`][74.2] to
+  enable and disable extensions.
+  ([bug 1599585]({{bugzilla}}1599585))
+- ⚠️ Added ['GeckoSession.ProgressDelegate.SecurityInformation#certificate'][74.3], which is the
+  full server certificate in use, if any. The other certificate-related fields were removed.
+  ([bug 1508730]({{bugzilla}}1508730))
+- Added ['WebResponse#isSecure'][74.4], which indicates whether or not the response was
+  delivered over a secure connection.
+  ([bug 1508730]({{bugzilla}}1508730))
+- Added ['WebResponse#certificate'][74.5], which is the server certificate used for the
+  response, if any.
+  ([bug 1508730]({{bugzilla}}1508730))
+- Added ['WebRequestError#certificate'][74.6], which is the server certificate used in the
+  failed request, if any.
+  ([bug 1508730]({{bugzilla}}1508730))
+
+[74.1]: {{javadoc_uri}}/WebExtensionController.html#enable-org.mozilla.geckoview.WebExtension-int-
+[74.2]: {{javadoc_uri}}/WebExtensionController.html#disable-org.mozilla.geckoview.WebExtension-int-
+[74.3]: {{javadoc_uri}}/GeckoSession.ProgressDelegate.SecurityInformation.html#certificate
+[74.4]: {{javadoc_uri}}/WebResponse.html#isSecure
+[74.5]: {{javadoc_uri}}/WebResponse.html#certificate
+[74.6]: {{javadoc_uri}}/WebRequestError.html#certificate
+
+## v73
+- Added [`WebExtensionController.install`][73.1] and [`uninstall`][73.2] to
+  manage installed extensions
+- ⚠️ Renamed `ScreenLength.VIEWPORT_WIDTH`, `ScreenLength.VIEWPORT_HEIGHT`,
+  `ScreenLength.fromViewportWidth` and `ScreenLength.fromViewportHeight` to
+  [`ScreenLength.VISUAL_VIEWPORT_WIDTH`][73.3],
+  [`ScreenLength.VISUAL_VIEWPORT_HEIGHT`][73.4],
+  [`ScreenLength.fromVisualViewportWidth`][73.5] and
+  [`ScreenLength.fromVisualViewportHeight`][73.6] respectively.
+- Added the [`LoginStorage`][73.7] API. Apps may handle login fetch requests now by
+  attaching a [`LoginStorage.Delegate`][73.8] via
+  [`GeckoRuntime#setLoginStorageDelegate`][73.9]
+  ([bug 1602881]({{bugzilla}}1602881))
+- ⚠️ [`WebExtension`][69.5]'s constructor now requires a `WebExtensionController`
+  instance.
+- Added [`GeckoResult.allOf`][73.10] for consuming a list of results.
+- Added [`WebExtensionController.list`][73.11] to list all installed extensions.
+- Added [`GeckoSession.PermissionDelegate#PERMISSION_AUTOPLAY_AUDIBLE`][73.12] and
+  [`GeckoSession.PermissionDelegate#PERMISSION_AUTOPLAY_INAUDIBLE`][73.13]. These control
+  autoplay permissions for audible and inaudible videos.
+  ([bug 1577596]({{bugzilla}}1577596))
+- Added [`LoginStorage.Delegate.onLoginSave`][73.14] for login storage save
+  requests and [`GeckoSession.PromptDelegate.onLoginStoragePrompt`][73.15] for
+  login storage prompts.
+  ([bug 1599873]({{bugzilla}}1599873))
+
+[73.1]: {{javadoc_uri}}/WebExtensionController.html#install-java.lang.String-
+[73.2]: {{javadoc_uri}}/WebExtensionController.html#uninstall-org.mozilla.geckoview.WebExtension-
+[73.3]: {{javadoc_uri}}/ScreenLength.html#VISUAL_VIEWPORT_WIDTH
+[73.4]: {{javadoc_uri}}/ScreenLength.html#VISUAL_VIEWPORT_HEIGHT
+[73.5]: {{javadoc_uri}}/ScreenLength.html#fromVisualViewportWidth-double-
+[73.6]: {{javadoc_uri}}/ScreenLength.html#fromVisualViewportHeight-double-
+[73.7]: {{javadoc_uri}}/LoginStorage.html
+[73.8]: {{javadoc_uri}}/LoginStorage.Delegate.html
+[73.9]: {{javadoc_uri}}/GeckoRuntime.html#setLoginStorageDelegate-org.mozilla.geckoview.LoginStorage.Delegate-
+[73.10]: {{javadoc_uri}}/GeckoResult.html#allOf-java.util.List-
+[73.11]: {{javadoc_uri}}/WebExtensionController.html#list--
+[73.12]: {{javadoc_uri}}/GeckoSession.PermissionDelegate.html#PERMISSION_AUTOPLAY_AUDIBLE
+[73.13]: {{javadoc_uri}}/GeckoSession.PermissionDelegate.html#PERMISSION_AUTOPLAY_INAUDIBLE
+[73.14]: {{javadoc_uri}}/LoginStorage.Delegate.html#onLoginSave-org.mozilla.geckoview.LoginStorage.LoginEntry-
+[73.15]: {{javadoc_uri}}/GeckoSession.PromptDelegate.html#onLoginStoragePrompt-org.mozilla.geckoview.GeckoSession-org.mozilla.geckoview.GeckoSession.PromptDelegate.LoginStoragePrompt-
+
+## v72
+- Added [`GeckoSession.NavigationDelegate.LoadRequest#hasUserGesture`][72.1]. This indicates
+  if a load was requested while a user gesture was active (e.g., a tap).
+  ([bug 1555337]({{bugzilla}}1555337))
+- ⚠️  Refactored `AutofillElement` and `AutofillSupport` into the
+  [`Autofill`][72.2] API.
+  ([bug 1591462]({{bugzilla}}1591462))
+- Make `read()` in the `InputStream` returned from [`WebResponse#body`][72.3] timeout according
+  to [`WebResponse#setReadTimeoutMillis()`][72.4]. The default timeout value is reflected in
+  [`WebResponse#DEFAULT_READ_TIMEOUT_MS`][72.5], currently 30s.
+  ([bug 1595145]({{bugzilla}}1595145))
+- ⚠️  Removed `GeckoResponse`
+  ([bug 1581161]({{bugzilla}}1581161))
+- ⚠️  Removed `actions` and `response` arguments from [`SelectionActionDelegate.onShowActionRequest`][72.6]
+  and [`BasicSelectionActionDelegate.onShowActionRequest`][72.7]
+  ([bug 1581161]({{bugzilla}}1581161))
+- Added text selection action methods to [`SelectionActionDelegate.Selection`][72.8]
+  ([bug 1581161]({{bugzilla}}1581161))
+- Added [`BasicSelectionActionDelegate.getSelection`][72.9]
+  ([bug 1581161]({{bugzilla}}1581161))
+- Changed [`BasicSelectionActionDelegate.clearSelection`][72.10] to public.
+  ([bug 1581161]({{bugzilla}}1581161))
+- Added `Autofill` commit support.
+  ([bug 1577005]({{bugzilla}}1577005))
+- Added [`GeckoView.setViewBackend`][72.11] to set whether GeckoView should be
+  backed by a [`TextureView`][72.12] or a [`SurfaceView`][72.13].
+  ([bug 1530402]({{bugzilla}}1530402))
+- Added support for Browser and Page Action from the WebExtension API.
+  See [`WebExtension.Action`][72.14].
+  ([bug 1530402]({{bugzilla}}1530402))
+- ⚠️ Split [`ContentBlockingController.Event.LOADED_TRACKING_CONTENT`][72.15] into
+  [`ContentBlockingController.Event.LOADED_LEVEL_1_TRACKING_CONTENT`][72.16] and
+  [`ContentBlockingController.Event.LOADED_LEVEL_2_TRACKING_CONTENT`][72.17].
+- Replaced `subscription` argument in [`WebPushDelegate.onPushEvent`][72.18] from a [`WebPushSubscription`][72.19] to the [`String`][72.20] `scope`.
+- ⚠️ Renamed `WebExtension.ActionIcon` to [`Icon`][72.21].
+- Added ['GeckoWebExecutor#FETCH_FLAGS_STREAM_FAILURE_TEST'][72.22], which is a new
+  flag used to immediately fail when reading a `WebResponse` body.
+  ([bug 1594905]({{bugzilla}}1594905))
+- Changed [`CrashReporter#sendCrashReport(Context, File, JSONObject)`][72.23] to
+  accept a JSON object instead of a Map. Said object also includes the
+  application name that was previously passed as the fourth argument to the
+  method, which was thus removed.
+- Added WebXR device access permission support, [`PERMISSION_PERSISTENT_XR`][72.24].
+  ([bug 1599927]({{bugzilla}}1599927))
+
+[72.1]: {{javadoc_uri}}/GeckoSession.NavigationDelegate.LoadRequest#hasUserGesture-
+[72.2]: {{javadoc_uri}}/Autofill.html
+[72.3]: {{javadoc_uri}}/WebResponse.html#body
+[72.4]: {{javadoc_uri}}/WebResponse.html#setReadTimeoutMillis-long-
+[72.5]: {{javadoc_uri}}/WebResponse.html#DEFAULT_READ_TIMEOUT_MS
+[72.6]: {{javadoc_uri}}/GeckoSession.SelectionActionDelegate.html#onShowActionRequest-org.mozilla.geckoview.GeckoSession-org.mozilla.geckoview.GeckoSession.SelectionActionDelegate.Selection-
+[72.7]: {{javadoc_uri}}/BasicSelectionActionDelegate.html#onShowActionRequest-org.mozilla.geckoview.GeckoSession-org.mozilla.geckoview.GeckoSession.SelectionActionDelegate.Selection-
+[72.8]: {{javadoc_uri}}/GeckoSession.SelectionActionDelegate.Selection.html
+[72.9]: {{javadoc_uri}}/BasicSelectionActionDelegate.html#getSelection-
+[72.10]: {{javadoc_uri}}/BasicSelectionActionDelegate.html#clearSelection-
+[72.11]: {{javadoc_uri}}/GeckoView.html#setViewBackend-int-
+[72.12]: https://developer.android.com/reference/android/view/TextureView
+[72.13]: https://developer.android.com/reference/android/view/SurfaceView
+[72.14]: {{javadoc_uri}}/WebExtension.Action.html
+[72.15]: {{javadoc_uri}}/ContentBlockingController.Event.html#LOADED_TRACKING_CONTENT
+[72.16]: {{javadoc_uri}}/ContentBlockingController.Event.html#LOADED_LEVEL_1_TRACKING_CONTENT
+[72.17]: {{javadoc_uri}}/ContentBlockingController.Event.html#LOADED_LEVEL_2_TRACKING_CONTENT
+[72.18]: {{javadoc_uri}}/WebPushController.html#onPushEvent-org.mozilla.geckoview.WebPushSubscription-byte:A-
+[72.19]: {{javadoc_uri}}/WebPushSubscription.html
+[72.20]: https://developer.android.com/reference/java/lang/String
+[72.21]: {{javadoc_uri}}/WebExtension.Icon.html
+[72.22]: {{javadoc_uri}}/GeckoWebExecutor.html#FETCH_FLAGS_STREAM_FAILURE_TEST
+[72.23]: {{javadoc_uri}}/CrashReporter.html#sendCrashReport-android.content.Context-java.io.File-org.json.JSONObject-
+[72.24]: {{javadoc_uri}}/GeckoSession.PermissionDelegate.html#PERMISSION_PERSISTENT_XR
+
+=
 ## v71
+- Added a content blocking flag for blocked social cookies to [`ContentBlocking`][70.17].
+  ([bug 1584479]({{bugzilla}}1584479))
 - Added [`onBooleanScalar`][71.1], [`onLongScalar`][71.2],
   [`onStringScalar`][71.3] to [`RuntimeTelemetry.Delegate`][70.12] to support
   scalars in streaming telemetry. ⚠️  As part of this change,
   `onTelemetryReceived` has been renamed to [`onHistogram`][71.4], and
   [`Metric`][71.5] now takes a type parameter.
   ([bug 1576730]({{bugzilla}}1576730))
-- Added overloads of [`GeckoSession.loadUri()`][71.6] that accept a map of 
+- Added overloads of [`GeckoSession.loadUri`][71.6] that accept a map of
   additional HTTP request headers.
+  ([bug 1567549]({{bugzilla}}1567549))
+- Added support for exposing the content blocking log in [`ContentBlockingController`][71.7].
+  ([bug 1580201]({{bugzilla}}1580201))
+- ⚠️  Added `nativeApp` to [`WebExtension.MessageDelegate.onMessage`][71.8] which
+  exposes the native application identifier that was used to send the message.
+  ([bug 1546445]({{bugzilla}}1546445))
+- Added [`GeckoRuntime.ServiceWorkerDelegate`][71.9] set via
+  [`setServiceWorkerDelegate`][71.10] to support [`ServiceWorkerClients.openWindow`][71.11]
+  ([bug 1511033]({{bugzilla}}1511033))
+- Added [`GeckoRuntimeSettings.Builder#aboutConfigEnabled`][71.12] to control whether or
+  not `about:config` should be available.
+  ([bug 1540065]({{bugzilla}}1540065))
+- Added [`GeckoSession.ContentDelegate.onFirstContentfulPaint`][71.13]
+  ([bug 1578947]({{bugzilla}}1578947))
+- Added `setEnhancedTrackingProtectionLevel` to [`ContentBlocking.Settings`][71.14].
+  ([bug 1580854]({{bugzilla}}1580854))
+- ⚠️ Added [`GeckoView.onTouchEventForResult`][71.15] and modified
+  [`PanZoomController.onTouchEvent`][71.16] to return how the touch event was handled. This
+  allows apps to know if an event is handled by touch event listeners in web content. The methods in `PanZoomController` now return `int` instead of `boolean`.
+- Added [`GeckoSession.purgeHistory`][71.17] allowing apps to clear a session's history.
+  ([bug 1583265]({{bugzilla}}1583265))
+- Added [`GeckoRuntimeSettings.Builder#forceUserScalableEnabled`][71.18] to control whether or
+  not to force user scalable zooming.
+  ([bug 1540615]({{bugzilla}}1540615))
+- ⚠️ Moved Autofill related methods from `SessionTextInput` and `GeckoSession.TextInputDelegate`
+  into `GeckoSession` and `AutofillDelegate`.
+- Added [`GeckoSession.getAutofillElements()`][71.19], which is a new method for getting
+  an autofill virtual structure without using `ViewStructure`. It relies on a new class,
+  [`AutofillElement`][71.20], for representing the virtual tree.
+- Added [`GeckoView.setAutofillEnabled`][71.21] for controlling whether or not the `GeckoView`
+  instance participates in Android autofill. When enabled, this connects an `AutofillDelegate`
+  to the session it holds.
+- Changed [`AutofillElement.children`][71.20] interface to `Collection` to provide
+  an efficient way to pre-allocate memory when filling `ViewStructure`.
+- Added [`GeckoSession.PromptDelegate.onSharePrompt`][71.22] to support the WebShare API.
+  ([bug 1402369]({{bugzilla}}1402369))
+- Added [`GeckoDisplay.screenshot`][71.23] allowing apps finer grain control over screenshots.
+  ([bug 1577192]({{bugzilla}}1577192))
+- Added `GeckoView.setDynamicToolbarMaxHeight` to make ICB size static, ICB doesn't include the dynamic toolbar region.
+  ([bug 1586144]({{bugzilla}}1586144))
 
 [71.1]: {{javadoc_uri}}/RuntimeTelemetry.Delegate.html#onBooleanScalar-org.mozilla.geckoview.RuntimeTelemetry.Metric-
 [71.2]: {{javadoc_uri}}/RuntimeTelemetry.Delegate.html#onLongScalar-org.mozilla.geckoview.RuntimeTelemetry.Metric-
@@ -29,6 +208,22 @@ exclude: true
 [71.4]: {{javadoc_uri}}/RuntimeTelemetry.Delegate.html#onHistogram-org.mozilla.geckoview.RuntimeTelemetry.Metric-
 [71.5]: {{javadoc_uri}}/RuntimeTelemetry.Metric.html
 [71.6]: {{javadoc_uri}}/GeckoSession.html#loadUri-java.lang.String-java.io.File-java.util.Map-
+[71.7]: {{javadoc_uri}}/ContentBlockingController.html
+[71.8]: {{javadoc_uri}}/WebExtension.MessageDelegate.html#onMessage-java.lang.String-java.lang.Object-org.mozilla.geckoview.WebExtension.MessageSender-
+[71.9]: {{javadoc_uri}}/GeckoRuntime.ServiceWorkerDelegate.html
+[71.10]: {{javadoc_uri}}/GeckoRuntime#setServiceWorkerDelegate-org.mozilla.geckoview.GeckoRuntime.ServiceWorkerDelegate-
+[71.11]: https://developer.mozilla.org/en-US/docs/Web/API/Clients/openWindow
+[71.12]: {{javadoc_uri}}/GeckoRuntimeSettings.Builder.html#aboutConfigEnabled-boolean-
+[71.13]: {{javadoc_uri}}/GeckoSession.ContentDelegate.html#onFirstContentfulPaint-org.mozilla.geckoview.GeckoSession-
+[71.15]: {{javadoc_uri}}/GeckoView.html#onTouchEventForResult-android.view.MotionEvent-
+[71.16]: {{javadoc_uri}}/PanZoomController.html#onTouchEvent-android.view.MotionEvent-
+[71.17]: {{javadoc_uri}}/GeckoSession.html#purgeHistory--
+[71.18]: {{javadoc_uri}}/GeckoRuntimeSettings.Builder.html#forceUserScalableEnabled-boolean-
+[71.19]: {{javadoc_uri}}/GeckoSession.html#getAutofillElements--
+[71.20]: {{javadoc_uri}}/AutofillElement.html
+[71.21]: {{javadoc_uri}}/GeckoView.html#setAutofillEnabled-boolean-
+[71.22]: {{javadoc_uri}}/GeckoSession.PromptDelegate.html#onSharePrompt-org.mozilla.geckoview.GeckoSession-org.mozilla.geckoview.GeckoSession.PromptDelegate.SharePrompt-
+[71.23]: {{javadoc_uri}}/GeckoDisplay.html#screenshot--
 
 ## v70
 - Added API for session context assignment
@@ -110,7 +305,7 @@ exclude: true
 [70.28]: {{javadoc_uri}}/GeckoRuntime.html#getContentBlockingController--
 
 ## v69
-- Modified behavior of ['setAutomaticFontSizeAdjustment'][69.1] so that it no 
+- Modified behavior of ['setAutomaticFontSizeAdjustment'][69.1] so that it no
   longer has any effect on ['setFontInflationEnabled'][69.2]
 - Add [GeckoSession.LOAD_FLAGS_FORCE_ALLOW_DATA_URI][69.14]
 - Added [`GeckoResult.accept`][69.3] for consuming a result without
@@ -147,7 +342,7 @@ exclude: true
 - [`RuntimeTelemetry#getSnapshots`][68.10] returns a [`JSONObject`][68.30] now.
 - Removed all `org.mozilla.gecko` references in the API.
 - Added [`ContentBlocking#AT_FINGERPRINTING`][68.11] to block fingerprinting trackers.
-- Added [`HistoryItem`][68.31] and [`HistoryList`][68.32] interfaces and [`onHistoryStateChange`][68.34] to 
+- Added [`HistoryItem`][68.31] and [`HistoryList`][68.32] interfaces and [`onHistoryStateChange`][68.34] to
   [`HistoryDelegate`][68.12] and added [`gotoHistoryIndex`][68.33] to [`GeckoSession`][68.13].
 - [`GeckoView`][70.5] will not create a [`GeckoSession`][65.9] anymore when
   attached to a window without a session.
@@ -341,14 +536,14 @@ exclude: true
 [65.14]: {{javadoc_uri}}/WebRequest.html
 [65.15]: {{javadoc_uri}}/WebResponse.html
 [65.16]: {{javadoc_uri}}/GeckoWebExecutor.html
-[65.17]: {{javadoc_uri}}/GeckoSession.HistoryDelegate.html    
+[65.17]: {{javadoc_uri}}/GeckoSession.HistoryDelegate.html
 [65.18]: {{javadoc_uri}}/GeckoSession.ContentDelegate.html#onFirstComposite-org.mozilla.geckoview.GeckoSession-
 [65.19]: {{javadoc_uri}}/GeckoSession.NavigationDelegate.LoadRequest.html#isRedirect
-[65.20]: {{javadoc_uri}}/GeckoSession.html#LOAD_FLAGS_BYPASS_CLASSIFIER    
+[65.20]: {{javadoc_uri}}/GeckoSession.html#LOAD_FLAGS_BYPASS_CLASSIFIER
 [65.21]: {{javadoc_uri}}/GeckoSession.ContentDelegate.ContextElement.html
 [65.22]: {{javadoc_uri}}/GeckoSession.ContentDelegate.html#onContextMenu-org.mozilla.geckoview.GeckoSession-int-int-org.mozilla.geckoview.GeckoSession.ContentDelegate.ContextElement-
 [65.23]: {{javadoc_uri}}/GeckoSession.FinderResult.html
 [65.24]: {{javadoc_uri}}/CrashReporter.html#sendCrashReport-android.content.Context-android.os.Bundle-java.lang.String-
 [65.25]: {{javadoc_uri}}/GeckoResult.html
 
-[api-version]: ccc454a846e5d3c22667842aecbbdef182524f94
+[api-version]: 34255117d007cf40a19b289285f00206f55ea792

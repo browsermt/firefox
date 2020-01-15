@@ -9,6 +9,7 @@
 #include "nsContentUtils.h"
 #include "nsCycleCollector.h"
 #include "mozilla/dom/AtomList.h"
+#include "mozilla/ipc/BackgroundChild.h"
 #include "mozilla/Attributes.h"
 #include "mozilla/EventQueue.h"
 #include "mozilla/ThreadEventQueue.h"
@@ -20,9 +21,6 @@ namespace {
 
 // The size of the worklet runtime heaps in bytes.
 #define WORKLET_DEFAULT_RUNTIME_HEAPSIZE 32 * 1024 * 1024
-
-// The size of the generational GC nursery for worklet, in bytes.
-#define WORKLET_DEFAULT_NURSERY_SIZE 1 * 1024 * 1024
 
 // The C stack size. We use the same stack size on all platforms for
 // consistency.
@@ -85,7 +83,7 @@ class WorkletJSRuntime final : public mozilla::CycleCollectedJSRuntime {
     // destructor will trigger a final GC.  The nsCycleCollector_collect()
     // call can be skipped in this GC as ~CycleCollectedJSContext removes the
     // context from |this|.
-    if (aStatus == JSGC_END && !Contexts().isEmpty()) {
+    if (aStatus == JSGC_END && GetContext()) {
       nsCycleCollector_collect(nullptr);
     }
   }
@@ -123,8 +121,7 @@ class WorkletJSContext final : public CycleCollectedJSContext {
     MOZ_ASSERT(!NS_IsMainThread());
 
     nsresult rv = CycleCollectedJSContext::Initialize(
-        aParentRuntime, WORKLET_DEFAULT_RUNTIME_HEAPSIZE,
-        WORKLET_DEFAULT_NURSERY_SIZE);
+        aParentRuntime, WORKLET_DEFAULT_RUNTIME_HEAPSIZE);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
     }
@@ -186,8 +183,22 @@ void WorkletJSContext::ReportError(JSErrorReport* aReport,
   RefPtr<xpc::ErrorReport> xpcReport = new xpc::ErrorReport();
   xpcReport->Init(aReport, aToStringResult.c_str(), IsSystemCaller(),
                   GetCurrentWorkletWindowID());
-
   RefPtr<AsyncErrorReporter> reporter = new AsyncErrorReporter(xpcReport);
+
+  JSContext* cx = Context();
+  JS::Rooted<JS::Value> exn(cx);
+  if (JS_GetPendingException(cx, &exn)) {
+    JS::Rooted<JSObject*> exnStack(cx, JS::GetPendingExceptionStack(cx));
+    JS_ClearPendingException(cx);
+    JS::Rooted<JSObject*> stack(cx);
+    JS::Rooted<JSObject*> stackGlobal(cx);
+    xpc::FindExceptionStackForConsoleReport(nullptr, exn, exnStack, &stack,
+                                            &stackGlobal);
+    if (stack) {
+      reporter->SerializeStack(cx, stack);
+    }
+  }
+
   NS_DispatchToMainThread(reporter);
 }
 
@@ -359,7 +370,7 @@ void WorkletThread::Terminate() {
 }
 
 void WorkletThread::TerminateInternal() {
-  AssertIsOnWorkletThread();
+  MOZ_ASSERT(!CycleCollectedJSContext::Get() || IsOnWorkletThread());
 
   mExitLoop = true;
 
@@ -374,6 +385,9 @@ void WorkletThread::DeleteCycleCollectedJSContext() {
   if (!ccjscx) {
     return;
   }
+
+  // Release any MessagePort kept alive by its ipc actor.
+  mozilla::ipc::BackgroundChild::CloseForCurrentThread();
 
   WorkletJSContext* workletjscx = ccjscx->GetAsWorkletJSContext();
   MOZ_ASSERT(workletjscx);

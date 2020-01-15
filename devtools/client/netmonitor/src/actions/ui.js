@@ -13,12 +13,15 @@ const {
   OPEN_STATISTICS,
   RESET_COLUMNS,
   SELECT_DETAILS_PANEL_TAB,
+  SELECT_ACTION_BAR_TAB,
   TOGGLE_COLUMN,
   WATERFALL_RESIZE,
   SET_COLUMNS_WIDTH,
-} = require("../constants");
+} = require("devtools/client/netmonitor/src/constants");
 
-const { getDisplayedRequests } = require("../selectors/index");
+const {
+  getDisplayedRequests,
+} = require("devtools/client/netmonitor/src/selectors/index");
 
 const DEVTOOLS_DISABLE_CACHE_PREF = "devtools.cache.disabled";
 
@@ -137,6 +140,18 @@ function selectDetailsPanelTab(id) {
 }
 
 /**
+ * Change the selected tab for network action bar.
+ *
+ * @param {string} id - tab id to be selected
+ */
+function selectActionBarTab(id) {
+  return {
+    type: SELECT_ACTION_BAR_TAB,
+    id,
+  };
+}
+
+/**
  * Toggles a column
  *
  * @param {string} column - The column that is going to be toggled
@@ -201,6 +216,7 @@ module.exports = {
   resetColumns,
   resizeWaterfall,
   selectDetailsPanelTab,
+  selectActionBarTab,
   toggleColumn,
   setColumnsWidth,
   toggleNetworkDetails,

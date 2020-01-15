@@ -14,10 +14,11 @@ job-defaults:
         by-test-platform:
             linux64/debug: ['fission', 'serviceworker']
             default: ['fission']
+    fission-tier: 2
     run-on-projects:
         by-test-platform:
             android-hw-.*-qr/debug: ['try', 'mozilla-central']
-            android-hw-.*-qr/opt: ['try', 'mozilla-central', 'mozilla-inbound', 'autoland']
+            android-hw-.*-qr/opt: ['try', 'mozilla-central', 'autoland']
             windows10-aarch64/opt: ['try', 'mozilla-central']
             default: built-projects
     mozharness:
@@ -50,10 +51,7 @@ crashtest:
             android-em-7.*: 1
             default: 1
     e10s: true
-    max-run-time:
-        by-test-platform:
-            android-em.*: 7200
-            default: 3600
+    max-run-time: 3600
     tier:
         by-test-platform:
             windows10-aarch64.*: 2
@@ -72,19 +70,19 @@ jsreftest:
             windows.*\/opt: 2
             windows10-64-asan/opt: 3
             windows10-64-ccov/debug: 5
+            windows10-64-ccov/opt: 5
             linux64-ccov/.*: 5
             linux64-qr/opt: 4
             linux64-qr/debug: 5
             linux64/debug: 5
-            macosx.*-64-ccov/debug: 5
+            macosx.*-64-ccov/.*: 5
             macosx.*-64(-shippable)?/opt: 2
             default: 3
     max-run-time:
         by-test-platform:
-            android-em.*: 7200
-            windows10-64-ccov/debug: 7200
-            macosx.*64-ccov/debug: 7200
-            linux.*64-ccov/debug: 7200
+            windows10-64-ccov/.*: 7200
+            macosx.*64-ccov/.*: 7200
+            linux.*64-ccov/.*: 7200
             default: 3600
     tier:
         by-test-platform:
@@ -92,7 +90,7 @@ jsreftest:
             default: default
     run-on-projects:
         by-test-platform:
-            windows10-aarch64/opt: ['try', 'mozilla-central']
+            windows10-aarch64/opt: ['try']
             android-hw-.*-api-16/debug: ['try', 'mozilla-central']
             default: built-projects
 
@@ -109,16 +107,17 @@ reftest:
             macosx101.*-64(-ccov|-qr)/debug: 6
             windows.*/opt: 2
             windows.*/debug: 4
+            windows10-64-asan/opt: 3
             windows10-64-ccov/debug: 9
+            windows10-64-ccov/opt: 9
             default: 8
     e10s: true
     max-run-time:
         by-test-platform:
-            android-em.*: 7200
             windows7-32-mingwclang/debug: 5400
-            windows10-64-ccov/debug: 5400
+            windows10-64-ccov/.*: 5400
             windows10-64-asan/opt: 5400
-            macosx.*64-ccov/debug: 5400
+            macosx.*64-ccov/.*: 5400
             default: 3600
     mozharness:
         chunked:
@@ -132,6 +131,14 @@ reftest:
             windows10-aarch64.*: 2
             android-hw-.*-qr/.*: 2
             default: default
+    fission-tier:
+        by-test-platform:
+            linux64-qr/debug: 1
+            default: 2
+    fission-run-on-projects:
+        by-test-platform:
+            linux64-qr/debug: ['trunk']
+            default: []
 
 reftest-gpu:
     description: "Reftest GPU run"

@@ -43,6 +43,10 @@
  *   Preference Objects, about which see below.
  * @property {string} experimentType
  *   The type to report to Telemetry's experiment marker API.
+ * @property {string} enrollmentId
+ *   A random ID generated at time of enrollment. It should be included on all
+ *   telemetry related to this experiment. It should not be re-used by other
+ *   studies, or any other purpose. May be null on old experiments.
  */
 
 /**
@@ -96,6 +100,11 @@ ChromeUtils.defineModuleGetter(
   this,
   "TelemetryEvents",
   "resource://normandy/lib/TelemetryEvents.jsm"
+);
+ChromeUtils.defineModuleGetter(
+  this,
+  "NormandyUtils",
+  "resource://normandy/lib/NormandyUtils.jsm"
 );
 
 var EXPORTED_SYMBOLS = ["PreferenceExperiments"];
@@ -264,7 +273,11 @@ var PreferenceExperiments = {
       TelemetryEnvironment.setExperimentActive(
         experiment.slug,
         experiment.branch,
-        { type: EXPERIMENT_TYPE_PREFIX + experiment.experimentType }
+        {
+          type: EXPERIMENT_TYPE_PREFIX + experiment.experimentType,
+          enrollmentId:
+            experiment.enrollmentId || TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
+        }
       );
 
       // Watch for changes to the experiment's preference
@@ -360,6 +373,15 @@ var PreferenceExperiments = {
     };
   },
 
+  /** When Telemetry is disabled, clear all identifiers from the stored experiments.  */
+  async onTelemetryDisabled() {
+    const store = await ensureStorage();
+    for (const experiment of Object.values(store.data.experiments)) {
+      experiment.enrollmentId = TelemetryEvents.NO_ENROLLMENT_ID_MARKER;
+    }
+    store.saveSoon();
+  },
+
   /**
    * Clear all stored data about active and past experiments.
    */
@@ -382,6 +404,7 @@ var PreferenceExperiments = {
    * @param {string} experiment.preferenceName
    * @param {string|integer|boolean} experiment.preferenceValue
    * @param {PreferenceBranchType} experiment.preferenceBranchType
+   * @returns {Experiment} The experiment object stored in the data store
    * @rejects {Error}
    *   - If an experiment with the given name already exists
    *   - if an experiment for the given preference is active
@@ -426,7 +449,7 @@ var PreferenceExperiments = {
       }
     );
 
-    if (preferencesWithConflicts.length > 0) {
+    if (preferencesWithConflicts.length) {
       TelemetryEvents.sendEvent("enrollFailed", "preference_study", slug, {
         reason: "pref-conflict",
       });
@@ -451,6 +474,11 @@ var PreferenceExperiments = {
     for (const [preferenceName, preferenceInfo] of Object.entries(
       preferences
     )) {
+      // Ensure preferenceBranchType is set, using the default from
+      // the schema. This also modifies the preferenceInfo for use in
+      // the rest of the function.
+      preferenceInfo.preferenceBranchType =
+        preferenceInfo.preferenceBranchType || "default";
       const { preferenceBranchType, preferenceType } = preferenceInfo;
       const preferenceBranch = PreferenceBranchType[preferenceBranchType];
       if (!preferenceBranch) {
@@ -512,6 +540,8 @@ var PreferenceExperiments = {
     }
     PreferenceExperiments.startObserver(slug, preferences);
 
+    const enrollmentId = NormandyUtils.generateUuid();
+
     /** @type {Experiment} */
     const experiment = {
       slug,
@@ -523,6 +553,7 @@ var PreferenceExperiments = {
       experimentType,
       userFacingName,
       userFacingDescription,
+      enrollmentId,
     };
 
     store.data.experiments[slug] = experiment;
@@ -530,12 +561,16 @@ var PreferenceExperiments = {
 
     TelemetryEnvironment.setExperimentActive(slug, branch, {
       type: EXPERIMENT_TYPE_PREFIX + experimentType,
+      enrollmentId: enrollmentId || TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
     });
     TelemetryEvents.sendEvent("enroll", "preference_study", slug, {
       experimentType,
       branch,
+      enrollmentId: enrollmentId || TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
     });
     await this.saveStartupPrefs();
+
+    return experiment;
   },
 
   /**
@@ -687,7 +722,11 @@ var PreferenceExperiments = {
         "unenrollFailed",
         "preference_study",
         experimentSlug,
-        { reason: "already-unenrolled" }
+        {
+          reason: "already-unenrolled",
+          enrollmentId:
+            experiment.enrollmentId || TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
+        }
       );
       throw new Error(
         `Cannot stop preference experiment "${experimentSlug}" because it is already expired`
@@ -739,6 +778,8 @@ var PreferenceExperiments = {
       didResetValue: resetValue ? "true" : "false",
       branch: experiment.branch,
       reason,
+      enrollmentId:
+        experiment.enrollmentId || TelemetryEvents.NO_ENROLLMENT_ID_MARKER,
     });
     await this.saveStartupPrefs();
   },

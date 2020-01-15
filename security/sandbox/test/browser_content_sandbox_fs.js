@@ -235,7 +235,7 @@ async function createFileInHome() {
   let browser = gBrowser.selectedBrowser;
   let homeFile = fileInHomeDir();
   let path = homeFile.path;
-  let fileCreated = await ContentTask.spawn(browser, path, createFile);
+  let fileCreated = await SpecialPowers.spawn(browser, [path], createFile);
   ok(!fileCreated, "creating a file in home dir is not permitted");
   if (fileCreated) {
     // content process successfully created the file, now remove it
@@ -249,14 +249,14 @@ async function createFileInHome() {
 async function createTempFile() {
   let browser = gBrowser.selectedBrowser;
   let path = fileInTempDir().path;
-  let fileCreated = await ContentTask.spawn(browser, path, createFile);
+  let fileCreated = await SpecialPowers.spawn(browser, [path], createFile);
   if (isMac()) {
     ok(!fileCreated, "creating a file in content temp is not permitted");
   } else {
     ok(!!fileCreated, "creating a file in content temp is permitted");
   }
   // now delete the file
-  let fileDeleted = await ContentTask.spawn(browser, path, deleteFile);
+  let fileDeleted = await SpecialPowers.spawn(browser, [path], deleteFile);
   if (isMac()) {
     // On macOS we do not allow file deletion - it is not needed by the content
     // process itself, and macOS uses a different permission to control access
@@ -264,7 +264,11 @@ async function createTempFile() {
     ok(!fileDeleted, "deleting a file in content temp is not permitted");
 
     let path = fileInTempDir().path;
-    let symlinkCreated = await ContentTask.spawn(browser, path, createSymlink);
+    let symlinkCreated = await SpecialPowers.spawn(
+      browser,
+      [path],
+      createSymlink
+    );
     ok(!symlinkCreated, "created a symlink in content temp is not permitted");
   } else {
     ok(!!fileDeleted, "deleting a file in content temp is permitted");
@@ -423,6 +427,21 @@ async function testFileAccess() {
     }
   }
 
+  // Test /proc/self/fd, because that can be used to unfreeze
+  // frozen shared memory.
+  if (isLinux()) {
+    let selfFdDir = GetDir("/proc/self/fd");
+
+    tests.push({
+      desc: "/proc/self/fd",
+      ok: false,
+      browser: webBrowser,
+      file: selfFdDir,
+      minLevel: isContentFileIOSandboxed(),
+      func: readDir,
+    });
+  }
+
   if (isMac()) {
     // Test if we can read from $TMPDIR because we expect it
     // to be within /private/var. Reading from it should be
@@ -464,16 +483,21 @@ async function testFileAccess() {
       minLevel: minHomeReadSandboxLevel(),
       func: readDir,
     });
-    // Test that we cannot read from /Network at level 3
-    let network = GetDir("/Network");
-    tests.push({
-      desc: "/Network",
-      ok: false,
-      browser: webBrowser,
-      file: network,
-      minLevel: minHomeReadSandboxLevel(),
-      func: readDir,
-    });
+
+    // /Network is not present on macOS 10.15 (xnu 19). Don't
+    // test this directory on 10.15 and later.
+    if (AppConstants.isPlatformAndVersionAtMost("macosx", 18)) {
+      // Test that we cannot read from /Network at level 3
+      let network = GetDir("/Network");
+      tests.push({
+        desc: "/Network",
+        ok: false,
+        browser: webBrowser,
+        file: network,
+        minLevel: minHomeReadSandboxLevel(),
+        func: readDir,
+      });
+    }
     // Test that we cannot read from /Users at level 3
     let users = GetDir("/Users");
     tests.push({
@@ -495,11 +519,9 @@ async function testFileAccess() {
       func: statPath,
     });
 
-    // Test that we can stat /Library at level 3, but can't
-    // stat something within /Library. This test uses "/Library"
-    // because it's a path that is expected to always be present
-    // and isn't something content processes have read access to
-    // (just read-metadata).
+    // Test that we can stat /Library at level 3, but can't get a
+    // directory listing of /Library. This test uses "/Library"
+    // because it's a path that is expected to always be present.
     let libraryDir = GetDir("/Library");
     tests.push({
       desc: "/Library",
@@ -517,15 +539,6 @@ async function testFileAccess() {
       minLevel: minHomeReadSandboxLevel(),
       func: readDir,
     });
-    let libraryWidgetsDir = GetDir("/Library/Widgets");
-    tests.push({
-      desc: "/Library/Widgets",
-      ok: false,
-      browser: webBrowser,
-      file: libraryWidgetsDir,
-      minLevel: minHomeReadSandboxLevel(),
-      func: statPath,
-    });
 
     // Similarly, test that we can stat /private, but not /private/etc.
     let privateDir = GetDir("/private");
@@ -534,15 +547,6 @@ async function testFileAccess() {
       ok: true,
       browser: webBrowser,
       file: privateDir,
-      minLevel: minHomeReadSandboxLevel(),
-      func: statPath,
-    });
-    let privateEtcDir = GetFile("/private/etc");
-    tests.push({
-      desc: "/private/etc",
-      ok: false,
-      browser: webBrowser,
-      file: privateEtcDir,
       minLevel: minHomeReadSandboxLevel(),
       func: statPath,
     });

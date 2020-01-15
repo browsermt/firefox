@@ -9,7 +9,9 @@
  */
 
 #include "mozilla/css/ImageLoader.h"
-#include "nsAutoPtr.h"
+
+#include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 #include "nsContentUtils.h"
 #include "nsLayoutUtils.h"
 #include "nsError.h"
@@ -98,7 +100,7 @@ void ImageLoader::AssociateRequestToFrame(imgIRequest* aRequest,
 
   MOZ_ASSERT(observer == this);
 
-  FrameSet* frameSet =
+  const auto& frameSet =
       mRequestToFrameMap.LookupForAdd(aRequest).OrInsert([=]() {
         nsPresContext* presContext = GetPresContext();
         if (presContext) {
@@ -108,7 +110,7 @@ void ImageLoader::AssociateRequestToFrame(imgIRequest* aRequest,
         return new FrameSet();
       });
 
-  RequestSet* requestSet =
+  const auto& requestSet =
       mFrameToRequestMap.LookupForAdd(aFrame).OrInsert([=]() {
         aFrame->SetHasImageRequest(true);
         return new RequestSet();
@@ -269,7 +271,7 @@ void ImageLoader::DeregisterCSSImageFromAllLoaders(uint64_t aImageLoadID) {
   MOZ_ASSERT(aImageLoadID != 0);
 
   if (auto e = sImages->Lookup(aImageLoadID)) {
-    ImageTableEntry* tableEntry = e.Data();
+    const auto& tableEntry = e.Data();
     if (imgRequestProxy* request = tableEntry->mCanonicalRequest) {
       request->CancelAndForgetObserver(NS_BINDING_ABORTED);
     }
@@ -300,7 +302,7 @@ void ImageLoader::RemoveRequestToFrameMapping(imgIRequest* aRequest,
 #endif
 
   if (auto entry = mRequestToFrameMap.Lookup(aRequest)) {
-    FrameSet* frameSet = entry.Data();
+    const auto& frameSet = entry.Data();
     MOZ_ASSERT(frameSet, "This should never be null");
 
     // Before we remove aFrame from the frameSet, unblock onload if needed.
@@ -330,7 +332,7 @@ void ImageLoader::RemoveRequestToFrameMapping(imgIRequest* aRequest,
 void ImageLoader::RemoveFrameToRequestMapping(imgIRequest* aRequest,
                                               nsIFrame* aFrame) {
   if (auto entry = mFrameToRequestMap.Lookup(aFrame)) {
-    RequestSet* requestSet = entry.Data();
+    const auto& requestSet = entry.Data();
     MOZ_ASSERT(requestSet, "This should never be null");
     if (recordreplay::IsRecordingOrReplaying()) {
       requestSet->RemoveElement(aRequest);
@@ -357,7 +359,7 @@ void ImageLoader::DropRequestsForFrame(nsIFrame* aFrame) {
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aFrame->HasImageRequest(), "why call me?");
 
-  nsAutoPtr<RequestSet> requestSet;
+  UniquePtr<RequestSet> requestSet;
   mFrameToRequestMap.Remove(aFrame, &requestSet);
   aFrame->SetHasImageRequest(false);
   if (MOZ_UNLIKELY(!requestSet)) {
@@ -443,16 +445,12 @@ void ImageLoader::LoadImage(const StyleComputedImageUrl& aImage,
     return;
   }
 
-  ImageTableEntry* entry;
-
-  {
-    auto lookup = sImages->LookupForAdd(loadId);
-    if (lookup) {
-      // This url has already been loaded.
-      return;
-    }
-    entry = lookup.OrInsert([]() { return new ImageTableEntry(); });
+  auto lookup = sImages->LookupForAdd(loadId);
+  if (lookup) {
+    // This url has already been loaded.
+    return;
   }
+  const auto& entry = lookup.OrInsert([]() { return new ImageTableEntry(); });
 
   nsIURI* uri = aImage.GetURI();
   if (!uri) {
@@ -529,7 +527,7 @@ static void InvalidateImages(nsIFrame* aFrame, imgIRequest* aRequest) {
                   ->UsingSharedSurface(aRequest->GetProducerId())) {
             break;
           }
-          MOZ_FALLTHROUGH;
+          [[fallthrough]];
         default:
           invalidateFrame = true;
           break;
@@ -788,6 +786,30 @@ nsresult ImageLoader::OnLoadComplete(imgIRequest* aRequest) {
   }
 
   return NS_OK;
+}
+
+void ImageLoader::MediaFeatureValuesChangedAllDocuments(
+    const MediaFeatureChange& aChange) {
+  // Inform every CSS image used in the document that media feature values have
+  // changed.  If the same image is used in multiple places, then we can end up
+  // informing them multiple times.  Theme changes are rare though and we don't
+  // bother trying to ensure we only do this once per image.
+  //
+  // Pull the images out into an array and iterate over them, in case the
+  // image notifications do something that ends up modifying the table.
+  nsTArray<nsCOMPtr<imgIContainer>> images;
+  for (auto iter = mRegisteredImages.Iter(); !iter.Done(); iter.Next()) {
+    imgRequestProxy* req = iter.Data();
+    nsCOMPtr<imgIContainer> image;
+    req->GetImage(getter_AddRefs(image));
+    if (!image) {
+      continue;
+    }
+    images.AppendElement(image->Unwrap());
+  }
+  for (imgIContainer* image : images) {
+    image->MediaFeatureValuesChangedAllDocuments(aChange);
+  }
 }
 
 bool ImageLoader::ImageReflowCallback::ReflowFinished() {

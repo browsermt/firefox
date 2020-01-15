@@ -20,8 +20,11 @@ import mozharness
 
 from mozharness.base.errors import PythonErrorList
 from mozharness.base.log import OutputParser, DEBUG, ERROR, CRITICAL, INFO
+from mozharness.mozilla.automation import (
+    EXIT_STATUS_DICT, TBPL_SUCCESS, TBPL_RETRY, TBPL_WORST_LEVEL_TUPLE
+)
 from mozharness.mozilla.testing.android import AndroidMixin
-from mozharness.mozilla.testing.errors import HarnessErrorList
+from mozharness.mozilla.testing.errors import HarnessErrorList, TinderBoxPrintRe
 from mozharness.mozilla.testing.testbase import TestingMixin, testing_config_options
 from mozharness.base.vcs.vcsbase import MercurialScript
 from mozharness.mozilla.testing.codecoverage import (
@@ -78,6 +81,12 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             "default": None,
             "help": argparse.SUPPRESS
         }],
+        [["--browsertime-video"], {
+            "dest": "browsertime_video",
+            "action": "store_true",
+            "default": False,
+            "help": argparse.SUPPRESS
+        }],
         [["--browsertime"], {
             "dest": "browsertime",
             "action": "store_true",
@@ -125,6 +134,17 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             "dest": "enable_webrender",
             "default": False,
             "help": "Enable the WebRender compositor in Gecko.",
+        }],
+        [["--no-conditioned-profile"], {
+            "action": "store_true",
+            "dest": "no_conditioned_profile",
+            "default": False,
+            "help": "Run without the conditioned profile.",
+        }],
+        [["--device-name"], {
+            "dest": "device_name",
+            "default": None,
+            "help": "Device name of mobile device.",
         }],
         [["--geckoProfile"], {
             "dest": "gecko_profile",
@@ -223,6 +243,24 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             "default": True,
             "help": "Run without multiple processes (e10s).",
         }],
+        [["--enable-fission"], {
+            "action": "store_true",
+            "dest": "enable_fission",
+            "default": False,
+            "help": "Enable Fission (site isolation) in Gecko.",
+        }],
+        [["--setpref"], {
+            "action": "append",
+            "dest": "extra_prefs",
+            "default": [],
+            "help": "A preference to set. Must be a key-value pair separated by a ':'."
+        }],
+        [["--cold"], {
+            "action": "store_true",
+            "dest": "cold",
+            "default": False,
+            "help": "Enable cold page-load for browsertime tp6",
+        }],
 
     ] + testing_config_options + \
         copy.deepcopy(code_coverage_config_options) + \
@@ -309,6 +347,7 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
         self.power_test = self.config.get('power_test')
         self.memory_test = self.config.get('memory_test')
         self.cpu_test = self.config.get('cpu_test')
+        self.extra_prefs = self.config.get('extra_prefs')
         self.is_release_build = self.config.get('is_release_build')
         self.debug_mode = self.config.get('debug_mode', False)
         self.firefox_android_browsers = ["fennec", "geckoview", "refbrow", "fenix"]
@@ -366,6 +405,27 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             self.info("Google Chrome or Chromium distributions are not required.")
             return
 
+        if self.app == 'chrome':
+            self.info("Chrome should be preinstalled.")
+            if win in self.platform_name():
+                self.chromium_dist_path = "C:\\Progra~2\\Google\\Chrome\\Application\\chrome.exe"
+            elif linux in self.platform_name():
+                self.chromium_dist_path = "/usr/bin/google-chrome"
+            elif mac in self.platform_name():
+                self.chromium_dist_path = "/Applications/Google Chrome.app/" \
+                    "Contents/MacOS/Google Chrome"
+            else:
+                self.error(
+                    "Chrome is not installed on the platform %s yet." % self.platform_name()
+                )
+
+            if os.path.exists(self.chromium_dist_path):
+                self.info("Google Chrome found in expected location %s" % self.chromium_dist_path)
+            else:
+                self.error("Cannot find Google Chrome at %s" % self.chromium_dist_path)
+
+            return
+
         chromium_dist = self.app
 
         if self.config.get("run_local"):
@@ -402,6 +462,11 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
         options = []
         kw_options = {}
 
+        # Get the APK location to be able to get the browser version
+        # through mozversion
+        if self.app in self.firefox_android_browsers and not self.run_local:
+            kw_options['installerpath'] = self.installer_path
+
         # If testing on Firefox, the binary path already came from mozharness/pro;
         # otherwise the binary path is forwarded from command-line arg (raptor_cmd_line_args).
         kw_options['app'] = self.app
@@ -426,12 +491,18 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
         # Options overwritten from **kw
         if 'test' in self.config:
             kw_options['test'] = self.config['test']
+        if 'binary' in self.config:
+            kw_options['binary'] = self.config['binary']
         if self.symbols_path:
             kw_options['symbolsPath'] = self.symbols_path
         if self.config.get('obj_path', None) is not None:
             kw_options['obj-path'] = self.config['obj_path']
         if self.test_url_params:
             kw_options['test-url-params'] = self.test_url_params
+        if self.config.get('device_name') is not None:
+            kw_options['device-name'] = self.config['device_name']
+        if self.config.get('activity') is not None:
+            kw_options['activity'] = self.config['activity']
 
         kw_options.update(kw)
         if self.host:
@@ -455,8 +526,16 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
             options.extend(['--memory-test'])
         if self.config.get('cpu_test', False):
             options.extend(['--cpu-test'])
+        if self.config.get('cold', False):
+            options.extend(['--cold'])
         if self.config.get('enable_webrender', False):
             options.extend(['--enable-webrender'])
+        if self.config.get('no_conditioned_profile', False):
+            options.extend(['--no-conditioned-profile'])
+        if self.config.get('enable_fission', False):
+            options.extend(['--enable-fission'])
+        if self.config.get('extra_prefs'):
+            options.extend(['--setpref={}'.format(i) for i in self.config.get('extra_prefs')])
 
         for (arg,), details in Raptor.browsertime_options:
             # Allow overriding defaults on the `./mach raptor-test ...` command-line
@@ -500,7 +579,7 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
 
     def download_and_extract(self, extract_dirs=None, suite_categories=None):
         return super(Raptor, self).download_and_extract(
-            suite_categories=['common', 'raptor']
+            suite_categories=['common', 'condprof', 'raptor']
         )
 
     def create_virtualenv(self, **kwargs):
@@ -714,6 +793,15 @@ class Raptor(TestingMixin, MercurialScript, CodeCoverageMixin, AndroidMixin):
                 self.info(str(dest))
                 self._artifact_perf_data(src, dest)
 
+        # Allow log failures to over-ride successful runs of the test harness and
+        # give log failures priority, so that, for instance, log failures resulting
+        # in TBPL_RETRY cause a retry rather than simply reporting an error.
+        if parser.tbpl_status != TBPL_SUCCESS:
+            parser_status = EXIT_STATUS_DICT[parser.tbpl_status]
+            self.info('return code %s changed to %s due to log output' %
+                      (str(self.return_code), str(parser_status)))
+            self.return_code = parser_status
+
 
 class RaptorOutputParser(OutputParser):
     minidump_regex = re.compile(r'''raptorError: "error executing: '(\S+) (\S+) (\S+)'"''')
@@ -723,6 +811,9 @@ class RaptorOutputParser(OutputParser):
         super(RaptorOutputParser, self).__init__(**kwargs)
         self.minidump_output = None
         self.found_perf_data = []
+        self.tbpl_status = TBPL_SUCCESS
+        self.worst_log_level = INFO
+        self.harness_retry_re = TinderBoxPrintRe['harness_error']['retry_regex']
 
     def parse_single_line(self, line):
         m = self.minidump_regex.search(line)
@@ -732,4 +823,11 @@ class RaptorOutputParser(OutputParser):
         m = self.RE_PERF_DATA.match(line)
         if m:
             self.found_perf_data.append(m.group(1))
+
+        if self.harness_retry_re.search(line):
+            self.critical(' %s' % line)
+            self.worst_log_level = self.worst_level(CRITICAL, self.worst_log_level)
+            self.tbpl_status = self.worst_level(TBPL_RETRY, self.tbpl_status,
+                                                levels=TBPL_WORST_LEVEL_TUPLE)
+            return  # skip base parse_single_line
         super(RaptorOutputParser, self).parse_single_line(line)

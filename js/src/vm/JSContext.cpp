@@ -34,6 +34,7 @@
 
 #include "gc/FreeOp.h"
 #include "gc/Marking.h"
+#include "gc/PublicIterators.h"
 #include "jit/Ion.h"
 #include "jit/PcScriptCache.h"
 #include "js/CharacterEncoding.h"
@@ -45,10 +46,12 @@
 #ifdef JS_SIMULATOR_ARM
 #  include "jit/arm/Simulator-arm.h"
 #endif
+#include "util/DiagnosticAssertions.h"
 #include "util/DoubleToString.h"
 #include "util/NativeStack.h"
 #include "util/Windows.h"
 #include "vm/BytecodeUtil.h"
+#include "vm/ErrorObject.h"
 #include "vm/ErrorReporting.h"
 #include "vm/HelperThreads.h"
 #include "vm/Iteration.h"
@@ -58,6 +61,7 @@
 #include "vm/JSScript.h"
 #include "vm/Realm.h"
 #include "vm/Shape.h"
+#include "vm/StringType.h"  // StringToNewUTF8CharsZ
 
 #include "vm/Compartment-inl.h"
 #include "vm/JSObject-inl.h"
@@ -135,8 +139,7 @@ bool JSContext::init(ContextKind kind) {
   return true;
 }
 
-JSContext* js::NewContext(uint32_t maxBytes, uint32_t maxNurseryBytes,
-                          JSRuntime* parentRuntime) {
+JSContext* js::NewContext(uint32_t maxBytes, JSRuntime* parentRuntime) {
   AutoNoteSingleThreadedRegion anstr;
 
   MOZ_RELEASE_ASSERT(!TlsContext.get());
@@ -163,7 +166,7 @@ JSContext* js::NewContext(uint32_t maxBytes, uint32_t maxNurseryBytes,
     return nullptr;
   }
 
-  if (!runtime->init(cx, maxBytes, maxNurseryBytes)) {
+  if (!runtime->init(cx, maxBytes)) {
     runtime->destroyRuntime();
     js_delete(cx);
     js_delete(runtime);
@@ -878,10 +881,24 @@ void js::ReportIsNotDefined(JSContext* cx, HandlePropertyName name) {
   ReportIsNotDefined(cx, id);
 }
 
-void js::ReportIsNullOrUndefined(JSContext* cx, int spindex, HandleValue v) {
+const char* NullOrUndefinedToCharZ(HandleValue v) {
+  MOZ_ASSERT(v.isNullOrUndefined());
+  return v.isNull() ? js_null_str : js_undefined_str;
+}
+
+void js::ReportIsNullOrUndefinedForPropertyAccess(JSContext* cx, HandleValue v,
+                                                  bool reportScanStack) {
   MOZ_ASSERT(v.isNullOrUndefined());
 
-  UniqueChars bytes = DecompileValueGenerator(cx, spindex, v, nullptr);
+  if (!reportScanStack) {
+    JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
+                              JSMSG_CANT_CONVERT_TO,
+                              NullOrUndefinedToCharZ(v), "object");
+    return;
+  }
+
+  UniqueChars bytes =
+      DecompileValueGenerator(cx, JSDVG_SEARCH_STACK, v, nullptr);
   if (!bytes) {
     return;
   }
@@ -890,31 +907,54 @@ void js::ReportIsNullOrUndefined(JSContext* cx, int spindex, HandleValue v) {
       strcmp(bytes.get(), js_null_str) == 0) {
     JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_NO_PROPERTIES,
                              bytes.get());
-  } else if (v.isUndefined()) {
+  } else {
     JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
                              JSMSG_UNEXPECTED_TYPE, bytes.get(),
-                             js_undefined_str);
-  } else {
-    MOZ_ASSERT(v.isNull());
-    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
-                             JSMSG_UNEXPECTED_TYPE, bytes.get(), js_null_str);
+                             NullOrUndefinedToCharZ(v));
   }
 }
 
-void js::ReportMissingArg(JSContext* cx, HandleValue v, unsigned arg) {
-  char argbuf[11];
-  UniqueChars bytes;
+void js::ReportIsNullOrUndefinedForPropertyAccess(JSContext* cx, HandleValue v,
+                                                  HandleId key,
+                                                  bool reportScanStack) {
+  MOZ_ASSERT(v.isNullOrUndefined());
 
-  SprintfLiteral(argbuf, "%u", arg);
-  if (IsFunctionObject(v)) {
-    RootedAtom name(cx, v.toObject().as<JSFunction>().explicitName());
-    bytes = DecompileValueGenerator(cx, JSDVG_SEARCH_STACK, v, name);
-    if (!bytes) {
-      return;
-    }
+  if (!cx->realm()->creationOptions().getPropertyErrorMessageFixEnabled()) {
+    ReportIsNullOrUndefinedForPropertyAccess(cx, v, reportScanStack);
+    return;
   }
-  JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_MISSING_FUN_ARG,
-                           argbuf, bytes ? bytes.get() : "");
+
+  RootedValue idVal(cx, IdToValue(key));
+  RootedString idStr(cx, ValueToSource(cx, idVal));
+  if (!idStr) {
+    return;
+  }
+
+  UniqueChars keyStr = StringToNewUTF8CharsZ(cx, *idStr);
+
+  if (!reportScanStack) {
+    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_PROPERTY_FAIL,
+                             keyStr.get(),
+                             NullOrUndefinedToCharZ(v));
+    return;
+  }
+
+  UniqueChars bytes =
+      DecompileValueGenerator(cx, JSDVG_SEARCH_STACK, v, nullptr);
+  if (!bytes) {
+    return;
+  }
+
+  if (strcmp(bytes.get(), js_undefined_str) == 0 ||
+      strcmp(bytes.get(), js_null_str) == 0) {
+    JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr, JSMSG_PROPERTY_FAIL,
+                             keyStr.get(), bytes.get());
+    return;
+  }
+
+  JS_ReportErrorNumberUTF8(cx, GetErrorMessage, nullptr,
+                           JSMSG_PROPERTY_FAIL_EXPR, keyStr.get(),
+                           bytes.get(), NullOrUndefinedToCharZ(v));
 }
 
 bool js::ReportValueErrorFlags(JSContext* cx, unsigned flags,
@@ -1049,6 +1089,9 @@ JS_FRIEND_API void js::StopDrainingJobQueue(JSContext* cx) {
 JS_FRIEND_API void js::RunJobs(JSContext* cx) {
   MOZ_ASSERT(cx->jobQueue);
   cx->jobQueue->runJobs(cx);
+  for (ZonesIter zone(cx->runtime(), WithAtoms); !zone.done(); zone.next()) {
+    zone->clearKeptObjects();
+  }
 }
 
 JSObject* InternalJobQueue::getIncumbentGlobal(JSContext* cx) {
@@ -1244,11 +1287,12 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
 #ifdef JS_TRACE_LOGGING
       traceLogger(nullptr),
 #endif
-      autoFlushICache_(this, nullptr),
       dtoaState(this, nullptr),
       suppressGC(this, 0),
-      gcSweeping(this, false),
 #ifdef DEBUG
+      gcSweeping(this, false),
+      gcSweepingZone(this, nullptr),
+      gcMarking(this, false),
       isTouchingGrayThings(this, false),
       noNurseryAllocationCheck(this, 0),
       disableStrictProxyCheckingCount(this, 0),
@@ -1286,7 +1330,6 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
       interruptCallbacks_(this),
       interruptCallbackDisabled(this, false),
       interruptBits_(0),
-      osrTempData_(this, nullptr),
       ionReturnOverride_(this, MagicValue(JS_ARG_POISON)),
       jitStackLimit(UINTPTR_MAX),
       jitStackLimitNoInterrupt(this, UINTPTR_MAX),
@@ -1294,12 +1337,11 @@ JSContext::JSContext(JSRuntime* runtime, const JS::ContextOptions& options)
       internalJobQueue(this),
       canSkipEnqueuingJobs(this, false),
       promiseRejectionTrackerCallback(this, nullptr),
-      promiseRejectionTrackerCallbackData(this, nullptr)
+      promiseRejectionTrackerCallbackData(this, nullptr),
 #ifdef JS_STRUCTURED_SPEW
-      ,
-      structuredSpewer_()
+      structuredSpewer_(),
 #endif
-{
+      insideDebuggerEvaluationWithOnNativeCallHook(this, nullptr) {
   MOZ_ASSERT(static_cast<JS::RootingContext*>(this) ==
              JS::RootingContext::get(this));
 }
@@ -1317,7 +1359,6 @@ JSContext::~JSContext() {
   }
 
   fx.destroyInstance();
-  freeOsrTempData();
 
 #ifdef JS_SIMULATOR
   js::jit::Simulator::Destroy(simulator_);
@@ -1404,13 +1445,9 @@ void JSContext::setPendingException(HandleValue v, HandleSavedFrame stack) {
   check(v);
 }
 
-static const size_t MAX_REPORTED_STACK_DEPTH = 1u << 7;
-
 void JSContext::setPendingExceptionAndCaptureStack(HandleValue value) {
   RootedObject stack(this);
-  if (!CaptureCurrentStack(
-          this, &stack,
-          JS::StackCapture(JS::MaxFrames(MAX_REPORTED_STACK_DEPTH)))) {
+  if (!CaptureStack(this, &stack)) {
     clearPendingException();
   }
 
@@ -1477,14 +1514,6 @@ void JSContext::trace(JSTracer* trc) {
   geckoProfiler().trace(trc);
 }
 
-void* JSContext::stackLimitAddressForJitCode(JS::StackKind kind) {
-#ifdef JS_SIMULATOR
-  return addressOfSimulatorStackLimit();
-#else
-  return stackLimitAddress(kind);
-#endif
-}
-
 uintptr_t JSContext::stackLimitForJitCode(JS::StackKind kind) {
 #ifdef JS_SIMULATOR
   return simulator()->stackLimit();
@@ -1519,12 +1548,18 @@ void AutoEnterOOMUnsafeRegion::crash(const char* reason) {
   char msgbuf[1024];
   js::NoteIntentionalCrash();
   SprintfLiteral(msgbuf, "[unhandlable oom] %s", reason);
-  MOZ_ReportAssertionFailure(msgbuf, __FILE__, __LINE__);
-  MOZ_CRASH();
+#ifndef DEBUG
+  // In non-DEBUG builds MOZ_CRASH normally doesn't print to stderr so we have
+  // to do this explicitly (the jit-test allow-unhandlable-oom annotation and
+  // fuzzers depend on it).
+  MOZ_ReportCrash(msgbuf, __FILE__, __LINE__);
+#endif
+  MOZ_CRASH_UNSAFE(msgbuf);
 }
 
-AutoEnterOOMUnsafeRegion::AnnotateOOMAllocationSizeCallback
-    AutoEnterOOMUnsafeRegion::annotateOOMSizeCallback = nullptr;
+mozilla::Atomic<AutoEnterOOMUnsafeRegion::AnnotateOOMAllocationSizeCallback,
+                mozilla::Relaxed>
+    AutoEnterOOMUnsafeRegion::annotateOOMSizeCallback(nullptr);
 
 void AutoEnterOOMUnsafeRegion::crash(size_t size, const char* reason) {
   {

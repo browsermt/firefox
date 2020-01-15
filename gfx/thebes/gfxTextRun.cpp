@@ -183,7 +183,9 @@ gfxTextRun::gfxTextRun(const gfxTextRunFactory::Parameters* aParams,
   AccountStorageForTextRun(this, 1);
 #endif
 
-  mSkipDrawing = mFontGroup->ShouldSkipDrawing();
+  mSkipDrawing =
+      mFontGroup->ShouldSkipDrawing() &&
+      !(aFlags2 & nsTextFrameUtils::Flags::DontSkipDrawingForPendingUserFonts);
 }
 
 gfxTextRun::~gfxTextRun() {
@@ -372,9 +374,12 @@ static void GetAdjustedSpacing(
 bool gfxTextRun::GetAdjustedSpacingArray(
     Range aRange, PropertyProvider* aProvider, Range aSpacingRange,
     nsTArray<PropertyProvider::Spacing>* aSpacing) const {
-  if (!aProvider || !(mFlags & gfx::ShapedTextFlags::TEXT_ENABLE_SPACING))
+  if (!aProvider || !(mFlags & gfx::ShapedTextFlags::TEXT_ENABLE_SPACING)) {
     return false;
-  if (!aSpacing->AppendElements(aRange.Length())) return false;
+  }
+  if (!aSpacing->AppendElements(aRange.Length(), fallible)) {
+    return false;
+  }
   auto spacingOffset = aSpacingRange.start - aRange.start;
   memset(aSpacing->Elements(), 0, sizeof(gfxFont::Spacing) * spacingOffset);
   GetAdjustedSpacing(this, aSpacingRange, aProvider,
@@ -488,30 +493,23 @@ void gfxTextRun::DrawPartialLigature(gfxFont* aFont, Range aRange,
   }
 }
 
-// Returns true if a glyph run is using a font with synthetic bolding enabled,
-// or a color font (COLR/SVG/sbix/CBDT), false otherwise. This is used to
+// Returns true if the font has synthetic bolding enabled,
+// or is a color font (COLR/SVG/sbix/CBDT), false otherwise. This is used to
 // check whether the text run needs to be explicitly composited in order to
 // support opacity.
-static bool HasSyntheticBoldOrColor(const gfxTextRun* aRun,
-                                    gfxTextRun::Range aRange) {
-  gfxTextRun::GlyphRunIterator iter(aRun, aRange);
-  while (iter.NextRun()) {
-    gfxFont* font = iter.GetGlyphRun()->mFont;
-    if (font) {
-      if (font->IsSyntheticBold()) {
-        return true;
-      }
-      gfxFontEntry* fe = font->GetFontEntry();
-      if (fe->TryGetSVGData(font) || fe->TryGetColorGlyphs()) {
-        return true;
-      }
-#if defined(XP_MACOSX)  // sbix fonts only supported via Core Text
-      if (fe->HasFontTable(TRUETYPE_TAG('s', 'b', 'i', 'x'))) {
-        return true;
-      }
-#endif
-    }
+static bool HasSyntheticBoldOrColor(gfxFont* aFont) {
+  if (aFont->IsSyntheticBold()) {
+    return true;
   }
+  gfxFontEntry* fe = aFont->GetFontEntry();
+  if (fe->TryGetSVGData(aFont) || fe->TryGetColorGlyphs()) {
+    return true;
+  }
+#if defined(XP_MACOSX)  // sbix fonts only supported via Core Text
+  if (fe->HasFontTable(TRUETYPE_TAG('s', 'b', 'i', 'x'))) {
+    return true;
+  }
+#endif
   return false;
 }
 
@@ -579,27 +577,10 @@ void gfxTextRun::Draw(Range aRange, gfx::Point aPt,
   // correctly unless first drawn without alpha
   BufferAlphaColor syntheticBoldBuffer(aParams.context);
   Color currentColor;
-  bool needToRestore = false;
-
-  if (aParams.drawMode & DrawMode::GLYPH_FILL &&
+  bool mayNeedBuffering =
+      aParams.drawMode & DrawMode::GLYPH_FILL &&
       aParams.context->HasNonOpaqueNonTransparentColor(currentColor) &&
-      HasSyntheticBoldOrColor(this, aRange) &&
-      !aParams.context->GetTextDrawer()) {
-    needToRestore = true;
-    // Measure text; use the bounding box to determine the area we need
-    // to buffer.
-    gfxTextRun::Metrics metrics =
-        MeasureText(aRange, gfxFont::LOOSE_INK_EXTENTS,
-                    aParams.context->GetDrawTarget(), aParams.provider);
-    if (IsRightToLeft()) {
-      metrics.mBoundingBox.MoveBy(
-          gfxPoint(aPt.x - metrics.mAdvanceWidth, aPt.y));
-    } else {
-      metrics.mBoundingBox.MoveBy(gfxPoint(aPt.x, aPt.y));
-    }
-    syntheticBoldBuffer.PushSolidColor(metrics.mBoundingBox, currentColor,
-                                       GetAppUnitsPerDevUnit());
-  }
+      !aParams.context->GetTextDrawer();
 
   // Set up parameters that will be constant across all glyph runs we need
   // to draw, regardless of the font used.
@@ -625,9 +606,27 @@ void gfxTextRun::Draw(Range aRange, gfx::Point aPt,
 
   while (iter.NextRun()) {
     gfxFont* font = iter.GetGlyphRun()->mFont;
-    uint32_t start = iter.GetStringStart();
-    uint32_t end = iter.GetStringEnd();
-    Range ligatureRange(start, end);
+    Range runRange(iter.GetStringStart(), iter.GetStringEnd());
+
+    bool needToRestore = false;
+    if (mayNeedBuffering && HasSyntheticBoldOrColor(font)) {
+      needToRestore = true;
+      // Measure text; use the bounding box to determine the area we need
+      // to buffer.
+      gfxTextRun::Metrics metrics =
+          MeasureText(runRange, gfxFont::LOOSE_INK_EXTENTS,
+                      aParams.context->GetDrawTarget(), aParams.provider);
+      if (IsRightToLeft()) {
+        metrics.mBoundingBox.MoveBy(
+            gfxPoint(aPt.x - metrics.mAdvanceWidth, aPt.y));
+      } else {
+        metrics.mBoundingBox.MoveBy(gfxPoint(aPt.x, aPt.y));
+      }
+      syntheticBoldBuffer.PushSolidColor(metrics.mBoundingBox, currentColor,
+                                         GetAppUnitsPerDevUnit());
+    }
+
+    Range ligatureRange(runRange);
     ShrinkToLigatureBoundaries(&ligatureRange);
 
     bool drawPartial =
@@ -636,8 +635,8 @@ void gfxTextRun::Draw(Range aRange, gfx::Point aPt,
     gfx::Point origPt = aPt;
 
     if (drawPartial) {
-      DrawPartialLigature(font, Range(start, ligatureRange.start), &aPt,
-                          aParams.provider, params,
+      DrawPartialLigature(font, Range(runRange.start, ligatureRange.start),
+                          &aPt, aParams.provider, params,
                           iter.GetGlyphRun()->mOrientation);
     }
 
@@ -645,7 +644,7 @@ void gfxTextRun::Draw(Range aRange, gfx::Point aPt,
                params, iter.GetGlyphRun()->mOrientation);
 
     if (drawPartial) {
-      DrawPartialLigature(font, Range(ligatureRange.end, end), &aPt,
+      DrawPartialLigature(font, Range(ligatureRange.end, runRange.end), &aPt,
                           aParams.provider, params,
                           iter.GetGlyphRun()->mOrientation);
     }
@@ -655,11 +654,11 @@ void gfxTextRun::Draw(Range aRange, gfx::Point aPt,
     } else {
       advance += (aPt.x - origPt.x) * params.direction;
     }
-  }
 
-  // composite result when synthetic bolding used
-  if (needToRestore) {
-    syntheticBoldBuffer.PopAlpha();
+    // composite result when synthetic bolding used
+    if (needToRestore) {
+      syntheticBoldBuffer.PopAlpha();
+    }
   }
 
   if (aParams.advanceWidth) {
@@ -1164,7 +1163,7 @@ gfxFloat gfxTextRun::GetAdvanceWidth(
   if (aProvider && (mFlags & gfx::ShapedTextFlags::TEXT_ENABLE_SPACING)) {
     uint32_t i;
     AutoTArray<PropertyProvider::Spacing, 200> spacingBuffer;
-    if (spacingBuffer.AppendElements(aRange.Length())) {
+    if (spacingBuffer.AppendElements(aRange.Length(), fallible)) {
       GetAdjustedSpacing(this, ligatureRange, aProvider,
                          spacingBuffer.Elements());
       for (i = 0; i < ligatureRange.Length(); ++i) {
@@ -1740,6 +1739,8 @@ void gfxFontGroup::BuildFontList() {
       AddFamilyToFontList(f.mFamily.mUnshared, f.mGeneric);
     }
   }
+
+  mFontListGeneration = pfl->GetGeneration();
 }
 
 void gfxFontGroup::AddPlatformFont(const nsACString& aName, bool aQuotedName,
@@ -1884,7 +1885,7 @@ void gfxFontGroup::FamilyFace::CheckState(bool& aSkipDrawing) {
       case gfxUserFontEntry::STATUS_FAILED:
         SetInvalid();
         // fall-thru to the default case
-        MOZ_FALLTHROUGH;
+        [[fallthrough]];
       default:
         SetLoading(false);
     }
@@ -1992,10 +1993,19 @@ gfxFont* gfxFontGroup::GetDefaultFont() {
     // If we're a content process, it's possible this is failing because the
     // chrome process has just updated the shared font list and we haven't yet
     // refreshed our reference to it. If that's the case, update and retry.
-    uint32_t oldGeneration = pfl->SharedFontList()->GetGeneration();
-    pfl->UpdateFontList();
-    if (pfl->SharedFontList()->GetGeneration() != oldGeneration) {
-      return GetDefaultFont();
+    // But if we're not on the main thread, we can't do this, so just use
+    // the platform default font directly.
+    if (NS_IsMainThread()) {
+      uint32_t oldGeneration = pfl->SharedFontList()->GetGeneration();
+      pfl->UpdateFontList();
+      if (pfl->SharedFontList()->GetGeneration() != oldGeneration) {
+        return GetDefaultFont();
+      }
+    } else {
+      gfxFontEntry* fe = pfl->GetDefaultFontEntry();
+      if (fe) {
+        return fe->FindOrMakeFont(&mStyle);
+      }
     }
   }
 
@@ -2174,9 +2184,10 @@ already_AddRefed<gfxTextRun> gfxFontGroup::MakeSpaceTextRun(
   return textRun.forget();
 }
 
+template <typename T>
 already_AddRefed<gfxTextRun> gfxFontGroup::MakeBlankTextRun(
-    uint32_t aLength, const Parameters* aParams, gfx::ShapedTextFlags aFlags,
-    nsTextFrameUtils::Flags aFlags2) {
+    const T* aString, uint32_t aLength, const Parameters* aParams,
+    gfx::ShapedTextFlags aFlags, nsTextFrameUtils::Flags aFlags2) {
   RefPtr<gfxTextRun> textRun =
       gfxTextRun::Create(aParams, aLength, this, aFlags, aFlags2);
   if (!textRun) {
@@ -2189,6 +2200,15 @@ already_AddRefed<gfxTextRun> gfxFontGroup::MakeBlankTextRun(
   }
   textRun->AddGlyphRun(GetFirstValidFont(), FontMatchType::Kind::kUnspecified,
                        0, false, orientation, false);
+
+  for (uint32_t i = 0; i < aLength; i++) {
+    if (aString[i] == '\n') {
+      textRun->SetIsNewline(i);
+    } else if (aString[i] == '\t') {
+      textRun->SetIsTab(i);
+    }
+  }
+
   return textRun.forget();
 }
 
@@ -2240,7 +2260,7 @@ already_AddRefed<gfxTextRun> gfxFontGroup::MakeTextRun(
     // Short-circuit for size-0 fonts, as Windows and ATSUI can't handle
     // them, and always create at least size 1 fonts, i.e. they still
     // render something for size 0 fonts.
-    return MakeBlankTextRun(aLength, aParams, aFlags, aFlags2);
+    return MakeBlankTextRun(aString, aLength, aParams, aFlags, aFlags2);
   }
 
   RefPtr<gfxTextRun> textRun =
@@ -2268,7 +2288,7 @@ already_AddRefed<gfxTextRun> gfxFontGroup::MakeTextRun(
   }
   if (MOZ_UNLIKELY(GetStyle()->size == 0) ||
       MOZ_UNLIKELY(GetStyle()->sizeAdjust == 0.0f)) {
-    return MakeBlankTextRun(aLength, aParams, aFlags, aFlags2);
+    return MakeBlankTextRun(aString, aLength, aParams, aFlags, aFlags2);
   }
 
   RefPtr<gfxTextRun> textRun =
@@ -2607,8 +2627,8 @@ void gfxFontGroup::InitScriptRun(DrawTarget* aDrawTarget, gfxTextRun* aTextRun,
         // for 16-bit textruns only, check for surrogate pairs and
         // special Unicode spaces; omit these checks in 8-bit runs
         if (sizeof(T) == sizeof(char16_t)) {
-          if (NS_IS_HIGH_SURROGATE(ch) && index + 1 < aLength &&
-              NS_IS_LOW_SURROGATE(aString[index + 1])) {
+          if (index + 1 < aLength &&
+              NS_IS_SURROGATE_PAIR(ch, aString[index + 1])) {
             uint32_t usv = SURROGATE_TO_UCS4(ch, aString[index + 1]);
             aTextRun->SetMissingGlyph(aOffset + index, usv, mainFont);
             index++;
@@ -2878,54 +2898,55 @@ gfxFont* gfxFontGroup::FindFontForChar(uint32_t aCh, uint32_t aPrevCh,
       continue;
     }
 
-    // if available, use already made gfxFont and check for character
     gfxFont* font = ff.Font();
     if (font) {
+      // if available, use already-made gfxFont and check for character
       if (font->HasCharacter(aCh)) {
         *aMatchType = {FontMatchType::Kind::kFontGroup, ff.Generic()};
         return font;
       }
-      continue;
-    }
+    } else {
+      // don't have a gfxFont yet, test charmap before instantiating
+      gfxFontEntry* fe = ff.FontEntry();
+      if (fe->mIsUserFontContainer) {
+        // for userfonts, need to test both the unicode range map and
+        // the cmap of the platform font entry
+        gfxUserFontEntry* ufe = static_cast<gfxUserFontEntry*>(fe);
 
-    // don't have a gfxFont yet, test before building
-    gfxFontEntry* fe = ff.FontEntry();
-    if (fe->mIsUserFontContainer) {
-      // for userfonts, need to test both the unicode range map and
-      // the cmap of the platform font entry
-      gfxUserFontEntry* ufe = static_cast<gfxUserFontEntry*>(fe);
+        // never match a character outside the defined unicode range
+        if (!ufe->CharacterInUnicodeRange(aCh)) {
+          continue;
+        }
 
-      // never match a character outside the defined unicode range
-      if (!ufe->CharacterInUnicodeRange(aCh)) {
-        continue;
-      }
+        // Load if not already loaded, unless we've already seen an in-
+        // progress load that is expected to satisfy this request.
+        if (!loading &&
+            ufe->LoadState() == gfxUserFontEntry::STATUS_NOT_LOADED) {
+          ufe->Load();
+          ff.CheckState(mSkipDrawing);
+        }
 
-      // Load if not already loaded, unless we've already seen an in-
-      // progress load that is expected to satisfy this request.
-      if (!loading && ufe->LoadState() == gfxUserFontEntry::STATUS_NOT_LOADED) {
-        ufe->Load();
-        ff.CheckState(mSkipDrawing);
-      }
+        if (ff.IsLoading()) {
+          loading = true;
+        }
 
-      if (ff.IsLoading()) {
-        loading = true;
-      }
-
-      gfxFontEntry* pfe = ufe->GetPlatformFontEntry();
-      if (pfe && pfe->HasCharacter(aCh)) {
+        gfxFontEntry* pfe = ufe->GetPlatformFontEntry();
+        if (pfe && pfe->HasCharacter(aCh)) {
+          font = GetFontAt(i, aCh, &loading);
+          if (font) {
+            *aMatchType = {FontMatchType::Kind::kFontGroup,
+                           mFonts[i].Generic()};
+            return font;
+          }
+        }
+      } else if (fe->HasCharacter(aCh)) {
+        // for normal platform fonts, after checking the cmap
+        // build the font via GetFontAt
         font = GetFontAt(i, aCh, &loading);
         if (font) {
           *aMatchType = {FontMatchType::Kind::kFontGroup, mFonts[i].Generic()};
           return font;
         }
-      }
-    } else if (fe->HasCharacter(aCh)) {
-      // for normal platform fonts, after checking the cmap
-      // build the font via GetFontAt
-      font = GetFontAt(i, aCh, &loading);
-      if (font) {
-        *aMatchType = {FontMatchType::Kind::kFontGroup, mFonts[i].Generic()};
-        return font;
       }
     }
 
@@ -2954,7 +2975,7 @@ gfxFont* gfxFontGroup::FindFontForChar(uint32_t aCh, uint32_t aPrevCh,
       // For platform fonts, but not user fonts, consider intra-family
       // fallback to handle styles with reduced character sets (see
       // also above).
-      fe = ff.FontEntry();
+      gfxFontEntry* fe = ff.FontEntry();
       if (!fe->mIsUserFontContainer && !fe->IsUserFont()) {
         font = FindFallbackFaceForChar(ff, aCh);
         if (font) {
@@ -3018,8 +3039,7 @@ void gfxFontGroup::ComputeRanges(nsTArray<TextRange>& aRanges, const T* aString,
   uint32_t prevCh = 0;
   uint32_t nextCh = aString[0];
   if (sizeof(T) == sizeof(char16_t)) {
-    if (aLength > 1 && NS_IS_HIGH_SURROGATE(nextCh) &&
-        NS_IS_LOW_SURROGATE(aString[1])) {
+    if (aLength > 1 && NS_IS_SURROGATE_PAIR(nextCh, aString[1])) {
       nextCh = SURROGATE_TO_UCS4(nextCh, aString[1]);
     }
   }
@@ -3051,8 +3071,7 @@ void gfxFontGroup::ComputeRanges(nsTArray<TextRange>& aRanges, const T* aString,
       }
       if (i < aLength - 1) {
         nextCh = aString[i + 1];
-        if ((i + 2 < aLength) && NS_IS_HIGH_SURROGATE(nextCh) &&
-            NS_IS_LOW_SURROGATE(aString[i + 2])) {
+        if (i + 2 < aLength && NS_IS_SURROGATE_PAIR(nextCh, aString[i + 2])) {
           nextCh = SURROGATE_TO_UCS4(nextCh, aString[i + 2]);
         }
       } else {

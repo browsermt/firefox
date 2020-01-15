@@ -5,6 +5,8 @@
 
 const { Arg, RetVal, generateActorSpec } = require("devtools/shared/protocol");
 
+// Bug 1606852: Delete this file when Firefox 73 is on release.
+
 const emulationSpec = generateActorSpec({
   typeName: "emulation",
 
@@ -131,6 +133,20 @@ const emulationSpec = generateActorSpec({
       response: {},
     },
 
+    getEmulatedColorScheme: {
+      request: {},
+      response: {
+        emulated: RetVal("nullable:string"),
+      },
+    },
+
+    setEmulatedColorScheme: {
+      request: {
+        scheme: Arg(0, "nullable:string"),
+      },
+      response: {},
+    },
+
     getIsPrintSimulationEnabled: {
       request: {},
       response: {
@@ -155,6 +171,20 @@ const emulationSpec = generateActorSpec({
         orientation: Arg(0, "string"),
         angle: Arg(1, "number"),
         deviceChange: Arg(2, "boolean"),
+      },
+      response: {},
+    },
+
+    captureScreenshot: {
+      request: {},
+      response: {
+        value: RetVal("json"),
+      },
+    },
+
+    setDocumentInRDMPane: {
+      request: {
+        state: Arg(0, "boolean"),
       },
       response: {},
     },

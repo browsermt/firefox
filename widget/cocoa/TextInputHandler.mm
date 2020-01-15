@@ -2037,6 +2037,7 @@ void TextInputHandler::HandleFlagsChanged(NSEvent* aNativeEvent) {
     // corresponding to a single modifier key being pressed.
     default: {
       NSUInteger modifiers = sLastModifierState;
+      AutoTArray<unsigned short, 10> dispatchedKeyCodes;
       for (int32_t bit = 0; bit < 32; ++bit) {
         NSUInteger flag = 1 << bit;
         if (!(diff & flag)) {
@@ -2171,6 +2172,14 @@ void TextInputHandler::HandleFlagsChanged(NSEvent* aNativeEvent) {
           default:
             break;
         }
+
+        // Avoid dispatching same keydown/keyup events twice or more.
+        // We must be able to assume that there is no case to dispatch
+        // both keydown and keyup events with same key code value here.
+        if (dispatchedKeyCodes.Contains(keyCode)) {
+          continue;
+        }
+        dispatchedKeyCodes.AppendElement(keyCode);
 
         NSEvent* event = [NSEvent keyEventWithType:NSFlagsChanged
                                           location:[aNativeEvent locationInWindow]
@@ -3020,7 +3029,7 @@ void IMEInputHandler::OnCurrentTextInputSourceChange(CFNotificationCenterRef aCe
     }
     // 72 is kMaximumKeyStringLength in TelemetryScalar.cpp
     if (key.Length() > 72) {
-      if (NS_IS_LOW_SURROGATE(key[72 - 1]) && NS_IS_HIGH_SURROGATE(key[72 - 2])) {
+      if (NS_IS_SURROGATE_PAIR(key[72 - 2], key[72 - 1])) {
         key.Truncate(72 - 2);
       } else {
         key.Truncate(72 - 1);

@@ -35,7 +35,6 @@ XPIDL_SOURCES += [
     'nsIClassifiedChannel.idl',
     'nsIClassOfService.idl',
     'nsIContentSniffer.idl',
-    'nsICrossProcessSwitchChannel.idl',
     'nsIDashboard.idl',
     'nsIDashboardEventNotifier.idl',
     'nsIDeprecationWarner.idl',
@@ -76,6 +75,7 @@ XPIDL_SOURCES += [
     'nsIPermission.idl',
     'nsIPermissionManager.idl',
     'nsIPrivateBrowsingChannel.idl',
+    'nsIProcessSwitchRequestor.idl',
     'nsIProgressEventSink.idl',
     'nsIPrompt.idl',
     'nsIProtocolHandler.idl',
@@ -127,6 +127,7 @@ XPIDL_SOURCES += [
     'nsIURIWithSpecialOrigin.idl',
     'nsIURL.idl',
     'nsIURLParser.idl',
+    'nsIWrapperChannel.idl',
     'nsPISocketTransportService.idl',
 ]
 
@@ -166,6 +167,7 @@ EXPORTS.mozilla.net += [
     'ChannelDiverterParent.h',
     'Dashboard.h',
     'DashboardTypes.h',
+    'DefaultURI.h',
     'IOActivityMonitor.h',
     'MemoryDownloader.h',
     'NetworkConnectivityService.h',
@@ -186,6 +188,7 @@ UNIFIED_SOURCES += [
     'ChannelDiverterChild.cpp',
     'ChannelDiverterParent.cpp',
     'Dashboard.cpp',
+    'DefaultURI.cpp',
     'EventTokenBucket.cpp',
     'IOActivityMonitor.cpp',
     'LoadContextInfo.cpp',
@@ -318,9 +321,11 @@ FINAL_LIBRARY = 'xul'
 LOCAL_INCLUDES += [
     '/docshell/base',
     '/dom/base',
+    '/extensions/permissions',
     '/netwerk/protocol/http',
     '/netwerk/socket',
     '/netwerk/url-classifier',
+    '/security/manager/ssl',
 ]
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'cocoa':

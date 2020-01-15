@@ -5,6 +5,7 @@ mod binemit;
 mod enc_tables;
 mod registers;
 pub mod settings;
+mod unwind;
 
 use super::super::settings as shared_settings;
 #[cfg(feature = "testing_hooks")]
@@ -17,8 +18,10 @@ use crate::isa::{EncInfo, RegClass, RegInfo, TargetIsa};
 use crate::regalloc;
 use crate::result::CodegenResult;
 use crate::timing;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt;
-use std::boxed::Box;
 use target_lexicon::{PointerWidth, Triple};
 
 #[allow(dead_code)]
@@ -105,7 +108,7 @@ impl TargetIsa for Isa {
         )
     }
 
-    fn legalize_signature(&self, sig: &mut ir::Signature, current: bool) {
+    fn legalize_signature(&self, sig: &mut Cow<ir::Signature>, current: bool) {
         abi::legalize_signature(
             sig,
             &self.triple,
@@ -119,8 +122,8 @@ impl TargetIsa for Isa {
         abi::regclass_for_abi_type(ty)
     }
 
-    fn allocatable_registers(&self, func: &ir::Function) -> regalloc::RegisterSet {
-        abi::allocatable_registers(func, &self.triple)
+    fn allocatable_registers(&self, _func: &ir::Function) -> regalloc::RegisterSet {
+        abi::allocatable_registers(&self.triple, &self.shared_flags)
     }
 
     #[cfg(feature = "testing_hooks")]
@@ -141,6 +144,21 @@ impl TargetIsa for Isa {
     fn prologue_epilogue(&self, func: &mut ir::Function) -> CodegenResult<()> {
         let _tt = timing::prologue_epilogue();
         abi::prologue_epilogue(func, self)
+    }
+
+    fn unsigned_add_overflow_condition(&self) -> ir::condcodes::IntCC {
+        ir::condcodes::IntCC::UnsignedLessThan
+    }
+
+    fn unsigned_sub_overflow_condition(&self) -> ir::condcodes::IntCC {
+        ir::condcodes::IntCC::UnsignedLessThan
+    }
+
+    /// Emit unwind information for the given function.
+    ///
+    /// Only some calling conventions (e.g. Windows fastcall) will have unwind information.
+    fn emit_unwind_info(&self, func: &ir::Function, mem: &mut Vec<u8>) {
+        abi::emit_unwind_info(func, self, mem);
     }
 }
 

@@ -18,7 +18,6 @@
 #include "mozilla/Telemetry.h"
 #include "mozilla/Unused.h"
 #include "nsContentUtils.h"
-#include "nsICertOverrideService.h"
 #include "nsIHttpChannelInternal.h"
 #include "nsIPrompt.h"
 #include "nsIProtocolProxyService.h"
@@ -39,6 +38,7 @@
 #include "mozpkix/pkixtypes.h"
 #include "ssl.h"
 #include "sslproto.h"
+#include "SSLTokensCache.h"
 
 #include "TrustOverrideUtils.h"
 #include "TrustOverride-SymantecData.inc"
@@ -594,7 +594,7 @@ char* PK11PasswordPrompt(PK11SlotInfo* slot, PRBool /*retry*/, void* arg) {
   return runnable->mResult;
 }
 
-static nsCString getKeaGroupName(uint32_t aKeaGroup) {
+nsCString getKeaGroupName(uint32_t aKeaGroup) {
   nsCString groupName;
   switch (aKeaGroup) {
     case ssl_grp_ec_secp256r1:
@@ -631,7 +631,7 @@ static nsCString getKeaGroupName(uint32_t aKeaGroup) {
   return groupName;
 }
 
-static nsCString getSignatureName(uint32_t aSignatureScheme) {
+nsCString getSignatureName(uint32_t aSignatureScheme) {
   nsCString signatureName;
   switch (aSignatureScheme) {
     case ssl_sig_none:
@@ -707,6 +707,12 @@ static void PreliminaryHandshakeDone(PRFileDesc* fd) {
       infoObject->SetKEAUsed(channelInfo.keaType);
       infoObject->SetKEAKeyBits(channelInfo.keaKeyBits);
       infoObject->SetMACAlgorithmUsed(cipherInfo.macAlgorithm);
+      infoObject->mIsDelegatedCredential = channelInfo.peerDelegCred;
+
+      if (infoObject->mIsDelegatedCredential) {
+        Telemetry::ScalarAdd(
+            Telemetry::ScalarID::SECURITY_TLS_DELEGATED_CREDENTIALS_TXN, 1);
+      }
     }
   }
 
@@ -1036,6 +1042,27 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
     return;
   }
 
+  Maybe<nsTArray<nsTArray<uint8_t>>> maybePeerCertsBytes;
+  UniqueCERTCertList peerCertChain(SSL_PeerCertificateChain(fd));
+  if (!peerCertChain) {
+    MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
+            ("RebuildVerifiedCertificateInformation: failed to get peer "
+             "certificate chain"));
+  } else {
+    nsTArray<nsTArray<uint8_t>> peerCertsBytes;
+    for (CERTCertListNode* n = CERT_LIST_HEAD(peerCertChain);
+         !CERT_LIST_END(n, peerCertChain); n = CERT_LIST_NEXT(n)) {
+      // Don't include the end-entity certificate.
+      if (n == CERT_LIST_HEAD(peerCertChain)) {
+        continue;
+      }
+      nsTArray<uint8_t> certBytes;
+      certBytes.AppendElements(n->cert->derCert.data, n->cert->derCert.len);
+      peerCertsBytes.AppendElement(std::move(certBytes));
+    }
+    maybePeerCertsBytes.emplace(std::move(peerCertsBytes));
+  }
+
   RefPtr<SharedCertVerifier> certVerifier(GetDefaultCertVerifier());
   MOZ_ASSERT(certVerifier,
              "Certificate verifier uninitialized in TLS handshake callback?");
@@ -1074,9 +1101,10 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
   UniqueCERTCertList builtChain;
   const bool saveIntermediates = false;
   mozilla::pkix::Result rv = certVerifier->VerifySSLServerCert(
-      cert, stapledOCSPResponse, sctsFromTLSExtension, mozilla::pkix::Now(),
-      infoObject, infoObject->GetHostName(), builtChain, saveIntermediates,
-      flags, infoObject->GetOriginAttributes(), &evOidPolicy,
+      cert, mozilla::pkix::Now(), infoObject, infoObject->GetHostName(),
+      builtChain, flags, maybePeerCertsBytes, stapledOCSPResponse,
+      sctsFromTLSExtension, Nothing(), infoObject->GetOriginAttributes(),
+      saveIntermediates, &evOidPolicy,
       nullptr,  // OCSP stapling telemetry
       nullptr,  // key size telemetry
       nullptr,  // SHA-1 telemetry
@@ -1106,18 +1134,19 @@ static void RebuildVerifiedCertificateInformation(PRFileDesc* fd,
   }
 }
 
-static nsresult IsCertificateDistrustImminent(nsIX509CertList* aCertList,
-                                              /* out */ bool& isDistrusted) {
-  if (!aCertList) {
-    return NS_ERROR_INVALID_POINTER;
+nsresult IsCertificateDistrustImminent(
+    const nsTArray<RefPtr<nsIX509Cert>>& aCertArray,
+    /* out */ bool& isDistrusted) {
+  if (aCertArray.IsEmpty()) {
+    return NS_ERROR_INVALID_ARG;
   }
 
   nsCOMPtr<nsIX509Cert> rootCert;
-  nsCOMPtr<nsIX509CertList> intCerts;
+  nsTArray<RefPtr<nsIX509Cert>> intCerts;
   nsCOMPtr<nsIX509Cert> eeCert;
 
-  RefPtr<nsNSSCertList> certList = aCertList->GetCertList();
-  nsresult rv = certList->SegmentCertificateChain(rootCert, intCerts, eeCert);
+  nsresult rv = nsNSSCertificate::SegmentCertificateChain(aCertArray, rootCert,
+                                                          intCerts, eeCert);
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -1156,6 +1185,80 @@ static nsresult IsCertificateDistrustImminent(nsIX509CertList* aCertList,
     }
   }
   return NS_OK;
+}
+
+static bool ConstructCERTCertListFromBytesArray(
+    nsTArray<nsTArray<uint8_t>>& aCertArray,
+    /*out*/ UniqueCERTCertList& aCertList) {
+  aCertList = UniqueCERTCertList(CERT_NewCertList());
+  if (!aCertList) {
+    return false;
+  }
+
+  CERTCertDBHandle* certDB(CERT_GetDefaultCertDB());  // non-owning
+  for (auto& cert : aCertArray) {
+    SECItem certDER = {siBuffer, cert.Elements(),
+                       static_cast<unsigned int>(cert.Length())};
+    UniqueCERTCertificate tmpCert(
+        CERT_NewTempCertificate(certDB, &certDER, nullptr, false, true));
+    if (!tmpCert) {
+      return false;
+    }
+
+    if (CERT_AddCertToListTail(aCertList.get(), tmpCert.get()) != SECSuccess) {
+      return false;
+    }
+    Unused << tmpCert.release();  // tmpCert is now owned by aCertList.
+  }
+
+  return true;
+}
+
+static void RebuildCertificateInfoFromSSLTokenCache(
+    nsNSSSocketInfo* aInfoObject) {
+  MOZ_ASSERT(aInfoObject);
+
+  if (!aInfoObject) {
+    return;
+  }
+
+  nsAutoCString key;
+  aInfoObject->GetPeerId(key);
+  mozilla::net::SessionCacheInfo info;
+  if (!mozilla::net::SSLTokensCache::GetSessionCacheInfo(key, info)) {
+    MOZ_LOG(
+        gPIPNSSLog, LogLevel::Debug,
+        ("RebuildCertificateInfoFromSSLTokenCache cannot find cached info."));
+    return;
+  }
+
+  RefPtr<nsNSSCertificate> nssc = nsNSSCertificate::ConstructFromDER(
+      BitwiseCast<char*, uint8_t*>(info.mServerCertBytes.Elements()),
+      info.mServerCertBytes.Length());
+  if (!nssc) {
+    MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
+            ("RebuildCertificateInfoFromSSLTokenCache failed to construct "
+             "server cert"));
+    return;
+  }
+
+  UniqueCERTCertList builtCertChain;
+  if (info.mSucceededCertChainBytes) {
+    if (!ConstructCERTCertListFromBytesArray(
+            info.mSucceededCertChainBytes.ref(), builtCertChain)) {
+      MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
+              ("RebuildCertificateInfoFromSSLTokenCache failed to construct "
+               "cert list"));
+      return;
+    }
+  }
+
+  aInfoObject->SetServerCert(nssc, info.mEVStatus);
+  aInfoObject->SetCertificateTransparencyStatus(
+      info.mCertificateTransparencyStatus);
+  if (builtCertChain) {
+    aInfoObject->SetSucceededCertChain(std::move(builtCertChain));
+  }
 }
 
 void HandshakeCallback(PRFileDesc* fd, void* client_data) {
@@ -1295,18 +1398,25 @@ void HandshakeCallback(PRFileDesc* fd, void* client_data) {
     MOZ_LOG(gPIPNSSLog, LogLevel::Debug,
             ("HandshakeCallback KEEPING existing cert\n"));
   } else {
-    RebuildVerifiedCertificateInformation(fd, infoObject);
+    if (mozilla::net::SSLTokensCache::IsEnabled()) {
+      RebuildCertificateInfoFromSSLTokenCache(infoObject);
+      infoObject->NoteSessionResumptionTime(true);
+    } else {
+      RebuildVerifiedCertificateInformation(fd, infoObject);
+      infoObject->NoteSessionResumptionTime(false);
+    }
   }
 
-  nsCOMPtr<nsIX509CertList> succeededCertChain;
-  // This always returns NS_OK, but the list could be empty. This is a
-  // best-effort check for now. Bug 731478 will reduce the incidence of empty
+  nsTArray<RefPtr<nsIX509Cert>> succeededCertArray;
+  // The list could be empty. Bug 731478 will reduce the incidence of empty
   // succeeded cert chains through better caching.
-  Unused << infoObject->GetSucceededCertChain(
-      getter_AddRefs(succeededCertChain));
+  nsresult srv = infoObject->GetSucceededCertChain(succeededCertArray);
+
   bool distrustImminent;
-  nsresult srv =
-      IsCertificateDistrustImminent(succeededCertChain, distrustImminent);
+  if (NS_SUCCEEDED(srv)) {
+    srv = IsCertificateDistrustImminent(succeededCertArray, distrustImminent);
+  }
+
   if (NS_SUCCEEDED(srv) && distrustImminent) {
     state |= nsIWebProgressListener::STATE_CERT_DISTRUST_IMMINENT;
   }

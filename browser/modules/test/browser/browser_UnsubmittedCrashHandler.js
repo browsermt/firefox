@@ -111,7 +111,7 @@ function createPendingCrashReports(howMany, accessDate) {
   );
   // CrashSubmit expects there to be a ServerURL key-value
   // pair in the .extra file, so we'll satisfy it.
-  let extraFileContents = "ServerURL=" + SERVER_URL;
+  let extraFileContents = JSON.stringify({ ServerURL: SERVER_URL });
 
   return (async function() {
     let uuids = [];
@@ -575,7 +575,7 @@ add_task(async function test_dont_decrement_chances_on_same_day() {
   let initChances = UnsubmittedCrashHandler.prefs.getIntPref(
     "chancesUntilSuppress"
   );
-  Assert.ok(initChances > 1, "We should start with at least 1 chance.");
+  Assert.greater(initChances, 1, "We should start with at least 1 chance.");
 
   await createPendingCrashReports(1);
   let notification = await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();
@@ -625,7 +625,7 @@ add_task(async function test_decrement_chances_on_other_day() {
   let initChances = UnsubmittedCrashHandler.prefs.getIntPref(
     "chancesUntilSuppress"
   );
-  Assert.ok(initChances > 1, "We should start with at least 1 chance.");
+  Assert.greater(initChances, 1, "We should start with at least 1 chance.");
 
   await createPendingCrashReports(1);
   let notification = await UnsubmittedCrashHandler.checkForUnsubmittedCrashReports();

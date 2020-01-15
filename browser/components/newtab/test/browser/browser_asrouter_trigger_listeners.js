@@ -20,6 +20,65 @@ async function openURLInWindow(window, url) {
   await BrowserTestUtils.browserLoaded(selectedBrowser, false, url);
 }
 
+add_task(async function check_matchPatternFailureCase() {
+  const articleTrigger = ASRouterTriggerListeners.get("openArticleURL");
+
+  articleTrigger.uninit();
+
+  articleTrigger.init(() => {}, [], ["example.com"]);
+
+  is(
+    articleTrigger._matchPatternSet.matches("http://example.com"),
+    false,
+    "Should fail, bad pattern"
+  );
+
+  articleTrigger.init(() => {}, [], ["*://*.example.com"]);
+
+  is(
+    articleTrigger._matchPatternSet.matches("http://www.example.com"),
+    true,
+    "Should work, updated pattern"
+  );
+
+  articleTrigger.uninit();
+});
+
+add_task(async function check_openArticleURL() {
+  const TEST_URL =
+    "https://example.com/browser/browser/components/newtab/test/browser/red_page.html";
+  const articleTrigger = ASRouterTriggerListeners.get("openArticleURL");
+
+  // Previously initialized by the Router
+  articleTrigger.uninit();
+
+  // Initialize the trigger with a new triggerHandler that resolves a promise
+  // with the URL match
+  const listenerTriggered = new Promise(resolve =>
+    articleTrigger.init((browser, match) => resolve(match), ["example.com"])
+  );
+
+  const win = await BrowserTestUtils.openNewBrowserWindow();
+  await openURLInWindow(win, TEST_URL);
+  // Send a message from the content page (the TEST_URL) to the parent
+  // This should trigger the `receiveMessage` cb in the articleTrigger
+  await ContentTask.spawn(win.gBrowser.selectedBrowser, null, async () => {
+    sendAsyncMessage("Reader:UpdateReaderButton", { isArticle: true });
+  });
+
+  await listenerTriggered.then(data =>
+    is(
+      data.param.url,
+      TEST_URL,
+      "We should match on the TEST_URL as a website article"
+    )
+  );
+
+  // Cleanup
+  articleTrigger.uninit();
+  await BrowserTestUtils.closeWindow(win);
+});
+
 add_task(async function check_openURL_listener() {
   const TEST_URL =
     "https://example.com/browser/browser/components/newtab/test/browser/red_page.html";
@@ -138,6 +197,231 @@ add_task(async function check_newSavedLogin_listener() {
       Services.obs.notifyObservers(browser, "LoginStats:NewSavedPassword");
       await new Promise(resolve => executeSoon(resolve));
       is(loginsSaved, 1, "shouldn't receive obs. notification after uninit");
+    }
+  );
+});
+
+add_task(async function check_contentBlocking_listener() {
+  const TEST_URL =
+    "https://example.com/browser/browser/components/newtab/test/browser/red_page.html";
+
+  const event1 = 0x0001;
+  const event2 = 0x0010;
+  const event3 = 0x0100;
+  const event4 = 0x1000;
+
+  // Initialise listener to listen 2 events, for any incoming event e,
+  // it will be triggered if and only if:
+  // 1. (e & event1) && (e & event2)
+  // 2. (e & event3)
+  const bindEvents = [event1 | event2, event3];
+
+  let observerEvent = 0;
+  let pageLoadSum = 0;
+  const triggerHandler = (target, trigger) => {
+    const {
+      id,
+      param: { host, type },
+      context: { pageLoad },
+    } = trigger;
+    is(id, "contentBlocking", "should match event name");
+    is(host, TEST_URL, "should match test URL");
+    is(
+      bindEvents.filter(e => (type & e) === e).length,
+      1,
+      `event ${type} is valid`
+    );
+    ok(pageLoadSum <= pageLoad, "pageLoad is non-decreasing");
+
+    observerEvent += 1;
+    pageLoadSum = pageLoad;
+  };
+  const contentBlockingListener = ASRouterTriggerListeners.get(
+    "contentBlocking"
+  );
+
+  // Previously initialized by the Router
+  contentBlockingListener.uninit();
+
+  await contentBlockingListener.init(triggerHandler, bindEvents);
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlocking(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            host: TEST_URL,
+            event: event1, // won't trigger
+          },
+        },
+        "SiteProtection:ContentBlockingEvent"
+      );
+    }
+  );
+
+  is(observerEvent, 0, "shouldn't receive unrelated observer notification");
+  is(pageLoadSum, 0, "shouldn't receive unrelated observer notification");
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlocking(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            host: TEST_URL,
+            event: event3, // will trigger
+          },
+        },
+        "SiteProtection:ContentBlockingEvent"
+      );
+
+      await BrowserTestUtils.waitForCondition(
+        () => observerEvent !== 0,
+        "Wait for the observer notification to run"
+      );
+      is(observerEvent, 1, "should receive observer notification");
+      is(pageLoadSum, 2, "should receive observer notification");
+
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            host: TEST_URL,
+            event: event1 | event2 | event4, // still trigger
+          },
+        },
+        "SiteProtection:ContentBlockingEvent"
+      );
+
+      await BrowserTestUtils.waitForCondition(
+        () => observerEvent !== 1,
+        "Wait for the observer notification to run"
+      );
+      is(observerEvent, 2, "should receive another observer notification");
+      is(pageLoadSum, 2, "should receive another observer notification");
+
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            host: TEST_URL,
+            event: event1, // no trigger
+          },
+        },
+        "SiteProtection:ContentBlockingEvent"
+      );
+
+      await new Promise(resolve => executeSoon(resolve));
+      is(observerEvent, 2, "shouldn't receive unrelated notification");
+      is(pageLoadSum, 2, "shouldn't receive unrelated notification");
+    }
+  );
+
+  // Uninitialise listener
+  contentBlockingListener.uninit();
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlockingAfterUninit(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            host: TEST_URL,
+            event: event3, // wont trigger after uninit
+          },
+        },
+        "SiteProtection:ContentBlockingEvent"
+      );
+      await new Promise(resolve => executeSoon(resolve));
+      is(observerEvent, 2, "shouldn't receive obs. notification after uninit");
+      is(pageLoadSum, 2, "shouldn't receive obs. notification after uninit");
+    }
+  );
+});
+
+add_task(async function check_contentBlockingMilestone_listener() {
+  const TEST_URL =
+    "https://example.com/browser/browser/components/newtab/test/browser/red_page.html";
+
+  let observerEvent = 0;
+  const triggerHandler = (target, trigger) => {
+    const {
+      id,
+      param: { host },
+    } = trigger;
+    is(id, "contentBlocking", "should match event name");
+    is(host, "ContentBlockingMilestone", "Should be the correct event type");
+    observerEvent += 1;
+  };
+  const contentBlockingListener = ASRouterTriggerListeners.get(
+    "contentBlocking"
+  );
+
+  // Previously initialized by the Router
+  contentBlockingListener.uninit();
+
+  // Initialise listener
+  contentBlockingListener.init(triggerHandler, ["ContentBlockingMilestone"]);
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlocking(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            event: "Other Event",
+          },
+        },
+        "SiteProtection:ContentBlockingMilestone"
+      );
+    }
+  );
+
+  is(observerEvent, 0, "shouldn't receive unrelated observer notification");
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlocking(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            event: "ContentBlockingMilestone",
+          },
+        },
+        "SiteProtection:ContentBlockingMilestone"
+      );
+
+      await BrowserTestUtils.waitForCondition(
+        () => observerEvent !== 0,
+        "Wait for the observer notification to run"
+      );
+      is(observerEvent, 1, "should receive observer notification");
+    }
+  );
+
+  // Uninitialise listener
+  contentBlockingListener.uninit();
+
+  await BrowserTestUtils.withNewTab(
+    TEST_URL,
+    async function triggercontentBlockingAfterUninit(browser) {
+      Services.obs.notifyObservers(
+        {
+          wrappedJSObject: {
+            browser,
+            event: "ContentBlockingMilestone",
+          },
+        },
+        "SiteProtection:ContentBlockingMilestone"
+      );
+      await new Promise(resolve => executeSoon(resolve));
+      is(observerEvent, 1, "shouldn't receive obs. notification after uninit");
     }
   );
 });

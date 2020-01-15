@@ -10,7 +10,9 @@ const { XPCOMUtils } = ChromeUtils.import(
 );
 
 XPCOMUtils.defineLazyModuleGetters(this, {
+  AppConstants: "resource://gre/modules/AppConstants.jsm",
   BrowserTestUtils: "resource://testing-common/BrowserTestUtils.jsm",
+  UrlbarController: "resource:///modules/UrlbarController.jsm",
   UrlbarUtils: "resource:///modules/UrlbarUtils.jsm",
 });
 
@@ -33,7 +35,7 @@ var UrlbarTestUtils = {
    * @param {function} options.waitForFocus The SimpleTest function
    * @param {boolean} [options.fireInputEvent] whether an input event should be
    *        used when starting the query (simulates the user's typing, sets
-   *        userTypedValued, etc.)
+   *        userTypedValued, triggers engagement event telemetry, etc.)
    * @param {number} [options.selectionStart] The input's selectionStart
    * @param {number} [options.selectionEnd] The input's selectionEnd
    */
@@ -130,6 +132,7 @@ var UrlbarTestUtils = {
     details.url = url;
     details.postData = postData;
     details.type = result.type;
+    details.source = result.source;
     details.heuristic = result.heuristic;
     details.autofill = !!result.autofill;
     details.image = element.getElementsByClassName("urlbarView-favicon")[0].src;
@@ -138,12 +141,13 @@ var UrlbarTestUtils = {
     let actions = element.getElementsByClassName("urlbarView-action");
     let urls = element.getElementsByClassName("urlbarView-url");
     let typeIcon = element.querySelector(".urlbarView-type-icon");
-    let typeIconStyle = win.getComputedStyle(typeIcon);
     details.displayed = {
       title: element.getElementsByClassName("urlbarView-title")[0].textContent,
-      action: actions.length > 0 ? actions[0].textContent : null,
-      url: urls.length > 0 ? urls[0].textContent : null,
-      typeIcon: typeIconStyle["background-image"],
+      action: actions.length ? actions[0].textContent : null,
+      url: urls.length ? urls[0].textContent : null,
+      typeIcon: typeIcon
+        ? win.getComputedStyle(typeIcon)["background-image"]
+        : null,
     };
     details.element = {
       action: element.getElementsByClassName("urlbarView-action")[0],
@@ -160,6 +164,8 @@ var UrlbarTestUtils = {
         keyword: result.payload.keyword,
         query: result.payload.query,
         suggestion: result.payload.suggestion,
+        inPrivateWindow: result.payload.inPrivateWindow,
+        isPrivateEngine: result.payload.isPrivateEngine,
       };
     } else if (details.type == UrlbarUtils.RESULT_TYPE.KEYWORD) {
       details.keyword = result.payload.keyword;
@@ -169,29 +175,48 @@ var UrlbarTestUtils = {
 
   /**
    * Gets the currently selected element.
-   * @param {object} win The window containing the urlbar
-   * @returns {HtmlElement|XulElement} the selected element.
+   * @param {object} win The window containing the urlbar.
+   * @returns {HtmlElement|XulElement} The selected element.
    */
   getSelectedElement(win) {
-    return win.gURLBar.view._selected || null;
+    return win.gURLBar.view.selectedElement || null;
   },
 
   /**
-   * Gets the index of the currently selected item.
+   * Gets the index of the currently selected element.
    * @param {object} win The window containing the urlbar.
    * @returns {number} The selected index.
    */
-  getSelectedIndex(win) {
-    return win.gURLBar.view.selectedIndex;
+  getSelectedElementIndex(win) {
+    return win.gURLBar.view.selectedElementIndex;
   },
 
   /**
-   * Selects the item at the index specified.
+   * Gets the currently selected row. If the selected element is a descendant of
+   * a row, this will return the ancestor row.
+   * @param {object} win The window containing the urlbar.
+   * @returns {HTMLElement|XulElement} The selected row.
+   */
+  getSelectedRow(win) {
+    return win.gURLBar.view._getSelectedRow() || null;
+  },
+
+  /**
+   * Gets the index of the currently selected element.
+   * @param {object} win The window containing the urlbar.
+   * @returns {number} The selected row index.
+   */
+  getSelectedRowIndex(win) {
+    return win.gURLBar.view.selectedRowIndex;
+  },
+
+  /**
+   * Selects the element at the index specified.
    * @param {object} win The window containing the urlbar.
    * @param {index} index The index to select.
    */
-  setSelectedIndex(win, index) {
-    win.gURLBar.view.selectedIndex = index;
+  setSelectedRowIndex(win, index) {
+    win.gURLBar.view.selectedRowIndex = index;
   },
 
   /**
@@ -202,10 +227,6 @@ var UrlbarTestUtils = {
    */
   getResultCount(win) {
     return win.gURLBar.view._rows.children.length;
-  },
-
-  getDropMarker(win) {
-    return win.gURLBar.dropmarker;
   },
 
   /**
@@ -220,12 +241,13 @@ var UrlbarTestUtils = {
     // complete.
     return this.promiseSearchComplete(win).then(context => {
       // Look for search suggestions.
-      let hasSearchSuggestion = context.results.some(
+      let firstSearchSuggestionIndex = context.results.findIndex(
         r => r.type == UrlbarUtils.RESULT_TYPE.SEARCH && r.payload.suggestion
       );
-      if (!hasSearchSuggestion) {
+      if (firstSearchSuggestionIndex == -1) {
         throw new Error("Cannot find a search suggestion");
       }
+      return firstSearchSuggestionIndex;
     });
   },
 
@@ -326,5 +348,29 @@ var UrlbarTestUtils = {
       data: win.gURLBar.value[win.gURLBar.value.length - 1] || null,
     });
     win.gURLBar.inputField.dispatchEvent(event);
+  },
+
+  /**
+   * Returns a new mock controller.  This is useful for xpcshell tests.
+   * @param {object} options Additional options to pass to the UrlbarController
+   *        constructor.
+   * @returns {UrlbarController} A new controller.
+   */
+  newMockController(options = {}) {
+    return new UrlbarController(
+      Object.assign(
+        {
+          input: {
+            isPrivate: false,
+            window: {
+              location: {
+                href: AppConstants.BROWSER_CHROME_URL,
+              },
+            },
+          },
+        },
+        options
+      )
+    );
   },
 };

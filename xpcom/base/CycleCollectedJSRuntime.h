@@ -112,7 +112,7 @@ class CycleCollectedJSRuntime {
   virtual void CustomGCCallback(JSGCStatus aStatus) {}
   virtual void CustomOutOfMemoryCallback() {}
 
-  LinkedList<CycleCollectedJSContext>& Contexts() { return mContexts; }
+  CycleCollectedJSContext* GetContext() { return mContext; }
 
  private:
   void DescribeGCThing(bool aIsMarked, JS::GCCellPtr aThing,
@@ -155,11 +155,6 @@ class CycleCollectedJSRuntime {
                                           JS::GCNurseryProgress aProgress,
                                           JS::GCReason aReason);
   static void OutOfMemoryCallback(JSContext* aContext, void* aData);
-  /**
-   * Callback for reporting external string memory.
-   */
-  static size_t SizeofExternalStringCallback(
-      JSString* aStr, mozilla::MallocSizeOf aMallocSizeOf);
 
   static bool ContextCallback(JSContext* aCx, unsigned aOperation, void* aData);
 
@@ -291,8 +286,7 @@ class CycleCollectedJSRuntime {
   // isn't one.
   static CycleCollectedJSRuntime* Get();
 
-  void AddContext(CycleCollectedJSContext* aContext);
-  void RemoveContext(CycleCollectedJSContext* aContext);
+  void SetContext(CycleCollectedJSContext* aContext);
 
 #ifdef NIGHTLY_BUILD
   bool GetRecentDevError(JSContext* aContext,
@@ -301,7 +295,7 @@ class CycleCollectedJSRuntime {
 #endif  // defined(NIGHTLY_BUILD)
 
  private:
-  LinkedList<CycleCollectedJSContext> mContexts;
+  CycleCollectedJSContext* mContext;
 
   JSGCThingParticipant mGCThingCycleCollectorGlobal;
 

@@ -69,6 +69,7 @@ struct CraneliftStaticEnvironment {
   bool platformIsWindows;
   size_t staticMemoryBound;
   size_t memoryGuardSize;
+  size_t memoryBaseTlsOffset;
   size_t instanceTlsOffset;
   size_t interruptTlsOffset;
   size_t cxTlsOffset;
@@ -171,13 +172,26 @@ struct BD_ValType {
   uint32_t packed;
 };
 
-// A subset of the wasm SymbolicAddress enum.
-// XXX this is not quite maintenable, because the number of values in this
-// enum is hardcoded in wasm2clif.rs.
+// A subset of the wasm SymbolicAddress enum. This is converted to wasm using
+// ToSymbolicAddress in WasmCraneliftCompile.
 
-enum class BD_SymbolicAddress {
-  MemoryGrow,
+enum class BD_SymbolicAddress : uint32_t {
+  MemoryGrow = 0,
   MemorySize,
+  MemoryCopy,
+  MemoryCopyShared,
+  DataDrop,
+  MemoryFill,
+  MemoryFillShared,
+  MemoryInit,
+  TableCopy,
+  ElemDrop,
+  TableFill,
+  TableGet,
+  TableGrow,
+  TableInit,
+  TableSet,
+  TableSize,
   FloorF32,
   FloorF64,
   CeilF32,
@@ -192,6 +206,7 @@ enum class BD_SymbolicAddress {
 extern "C" {
 js::wasm::TypeCode env_unpack(BD_ValType type);
 
+bool env_uses_shared_memory(const CraneliftModuleEnvironment* env);
 const js::wasm::FuncTypeWithId* env_function_signature(
     const CraneliftModuleEnvironment* env, size_t funcIndex);
 size_t env_func_import_tls_offset(const CraneliftModuleEnvironment* env,
@@ -215,7 +230,8 @@ size_t table_tlsOffset(const js::wasm::TableDesc*);
 
 size_t funcType_numArgs(const js::wasm::FuncTypeWithId*);
 const BD_ValType* funcType_args(const js::wasm::FuncTypeWithId*);
-js::wasm::TypeCode funcType_retType(const js::wasm::FuncTypeWithId*);
+size_t funcType_numResults(const js::wasm::FuncTypeWithId*);
+const BD_ValType* funcType_results(const js::wasm::FuncTypeWithId*);
 js::wasm::FuncTypeIdDescKind funcType_idKind(const js::wasm::FuncTypeWithId*);
 size_t funcType_idImmediate(const js::wasm::FuncTypeWithId*);
 size_t funcType_idTlsOffset(const js::wasm::FuncTypeWithId*);

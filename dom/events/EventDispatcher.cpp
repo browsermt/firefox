@@ -25,6 +25,7 @@
 #include "GeckoProfiler.h"
 #include "KeyboardEvent.h"
 #include "Layers.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/ContentEvents.h"
 #include "mozilla/dom/CloseEvent.h"
 #include "mozilla/dom/CustomEvent.h"
@@ -121,7 +122,7 @@ static bool IsEventTargetChrome(EventTarget* aEventTarget,
     }
   } else if (nsCOMPtr<nsIScriptObjectPrincipal> sop =
                  do_QueryInterface(aEventTarget->GetOwnerGlobal())) {
-    isChrome = nsContentUtils::IsSystemPrincipal(sop->GetPrincipal());
+    isChrome = sop->GetPrincipal()->IsSystemPrincipal();
   }
   return isChrome;
 }
@@ -346,6 +347,12 @@ class EventTargetChainItem {
     if (mManager) {
       NS_ASSERTION(aVisitor.mEvent->mCurrentTarget == nullptr,
                    "CurrentTarget should be null!");
+
+      if (aVisitor.mEvent->mMessage == eMouseClick) {
+        aVisitor.mEvent->mFlags.mHadNonPrivilegedClickListeners =
+            aVisitor.mEvent->mFlags.mHadNonPrivilegedClickListeners ||
+            mManager->HasNonPrivilegedClickListeners();
+      }
       mManager->HandleEvent(aVisitor.mPresContext, aVisitor.mEvent,
                             &aVisitor.mDOMEvent, CurrentTarget(),
                             &aVisitor.mEventStatus, IsItemInShadowTree());
@@ -1026,11 +1033,15 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
 
           nsCOMPtr<nsIDocShell> docShell;
           docShell = nsContentUtils::GetDocShellForEventTarget(aEvent->mTarget);
-          DECLARE_DOCSHELL_AND_HISTORY_ID(docShell);
+          Maybe<uint64_t> innerWindowID;
+          if (nsCOMPtr<nsPIDOMWindowInner> inner =
+                  do_QueryInterface(aEvent->mTarget->GetOwnerGlobal())) {
+            innerWindowID = Some(inner->WindowID());
+          }
           PROFILER_ADD_MARKER_WITH_PAYLOAD(
               "DOMEvent", DOM, DOMEventMarkerPayload,
               (typeStr, aEvent->mTimeStamp, "DOMEvent", TRACING_INTERVAL_START,
-               docShellId, docShellHistoryId));
+               innerWindowID));
 
           EventTargetChainItem::HandleEventTargetChain(chain, postVisitor,
                                                        aCallback, cd);
@@ -1038,7 +1049,7 @@ nsresult EventDispatcher::Dispatch(nsISupports* aTarget,
           PROFILER_ADD_MARKER_WITH_PAYLOAD(
               "DOMEvent", DOM, DOMEventMarkerPayload,
               (typeStr, aEvent->mTimeStamp, "DOMEvent", TRACING_INTERVAL_END,
-               docShellId, docShellHistoryId));
+               innerWindowID));
         } else
 #endif
         {
@@ -1122,6 +1133,11 @@ nsresult EventDispatcher::DispatchDOMEvent(nsISupports* aTarget,
   if (aDOMEvent) {
     WidgetEvent* innerEvent = aDOMEvent->WidgetEventPtr();
     NS_ENSURE_TRUE(innerEvent, NS_ERROR_ILLEGAL_VALUE);
+
+    // Don't modify the event if it's being dispatched right now.
+    if (innerEvent->mFlags.mIsBeingDispatched) {
+      return NS_ERROR_DOM_INVALID_STATE_ERR;
+    }
 
     bool dontResetTrusted = false;
     if (innerEvent->mFlags.mDispatchedAtLeastOnce) {

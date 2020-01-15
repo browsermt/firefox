@@ -18,9 +18,9 @@
 #include "nsGkAtoms.h"
 #include "nsObjCExceptions.h"
 #include "nsThreadUtils.h"
+#include "nsTouchBarNativeAPIDefines.h"
 
 #include "nsIContent.h"
-#include "nsITouchBarUpdater.h"
 #include "nsIWidget.h"
 #include "mozilla/dom/Document.h"
 #include "nsIAppStartup.h"
@@ -554,9 +554,9 @@ NSMenuItem* nsMenuBarX::CreateNativeAppMenuItem(nsMenuX* inMenu, const nsAString
   nsAutoString label;
   nsAutoString modifiers;
   nsAutoString key;
-  menuItem->GetAttribute(NS_LITERAL_STRING("label"), label);
-  menuItem->GetAttribute(NS_LITERAL_STRING("modifiers"), modifiers);
-  menuItem->GetAttribute(NS_LITERAL_STRING("key"), key);
+  menuItem->GetAttr(nsGkAtoms::label, label);
+  menuItem->GetAttr(nsGkAtoms::modifiers, modifiers);
+  menuItem->GetAttr(nsGkAtoms::key, key);
 
   // Get more information about the key equivalent. Start by
   // finding the key node we need.
@@ -853,12 +853,6 @@ static BOOL gMenuItemsExecuteCommands = YES;
 }
 
 @end
-
-#if !defined(MAC_OS_X_VERSION_10_12_2) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_X_VERSION_10_12_2
-@interface NSApplication (TouchBarMenu)
-- (IBAction)toggleTouchBarCustomizationPalette:(id)sender;
-@end
-#endif
 
 //
 // Objective-C class used as action target for menu items

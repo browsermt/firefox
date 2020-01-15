@@ -8,8 +8,9 @@ https://github.com/crossbeam-rs/crossbeam-deque)
 https://crates.io/crates/crossbeam-deque)
 [![Documentation](https://docs.rs/crossbeam-deque/badge.svg)](
 https://docs.rs/crossbeam-deque)
-[![Rust 1.26+](https://img.shields.io/badge/rust-1.26+-lightgray.svg)](
+[![Rust 1.28+](https://img.shields.io/badge/rust-1.28+-lightgray.svg)](
 https://www.rust-lang.org)
+[![chat](https://img.shields.io/discord/569610676205781012.svg?logo=discord)](https://discord.gg/BBYwKq)
 
 This crate provides work-stealing deques, which are primarily intended for
 building task schedulers.
@@ -20,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-crossbeam-deque = "0.6"
+crossbeam-deque = "0.7"
 ```
 
 Next, add this to your crate:
@@ -31,9 +32,7 @@ extern crate crossbeam_deque;
 
 ## Compatibility
 
-The minimum supported Rust version is 1.26.
-
-This crate does not work in `no_std` environments.
+The minimum supported Rust version is 1.28. Any change to this is considered a breaking change.
 
 ## License
 
@@ -44,7 +43,7 @@ Licensed under either of
 
 at your option.
 
-### Contribution
+#### Contribution
 
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, as defined in the Apache-2.0 license, shall be

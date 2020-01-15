@@ -6,6 +6,10 @@ job-defaults:
     run:
         using: mozharness
         use-caches: false
+        tooltool-downloads: internal
+    fetches:
+        toolchain:
+            - win64-dump-syms
 
 win32/debug:
     description: "Win32 Debug"
@@ -13,6 +17,7 @@ win32/debug:
         product: firefox
         job-name: win32-debug
     attributes:
+        enable-build-signing: true
         enable-full-crashsymbols: true
     treeherder:
         platform: windows2012-32/debug
@@ -49,6 +54,7 @@ win32/opt:
         product: firefox
         job-name: win32-opt
     attributes:
+        enable-build-signing: true
         enable-full-crashsymbols: true
     treeherder:
         platform: windows2012-32/opt
@@ -86,6 +92,7 @@ win64/debug:
         product: firefox
         job-name: win64-debug
     attributes:
+        enable-build-signing: true
         enable-full-crashsymbols: true
     treeherder:
         platform: windows2012-64/debug
@@ -196,6 +203,7 @@ win64/opt:
         product: firefox
         job-name: win64-opt
     attributes:
+        enable-build-signing: true
         enable-full-crashsymbols: true
     treeherder:
         platform: windows2012-64/opt
@@ -527,7 +535,7 @@ win32-rusttests/opt:
             build_targets: ['pre-export', 'export', 'recurse_rusttests']
             disable_package_metrics: true
         mozconfig-variant: rusttests
-    run-on-projects: ['trunk', 'try']
+    run-on-projects: ['mozilla-central', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -566,7 +574,7 @@ win32-rusttests/debug:
             build_targets: ['pre-export', 'export', 'recurse_rusttests']
             disable_package_metrics: true
         mozconfig-variant: rusttests-debug
-    run-on-projects: ['trunk', 'try']
+    run-on-projects: ['mozilla-central', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -602,7 +610,7 @@ win64-rusttests/opt:
             - builds/taskcluster_base_win64.py
             - builds/taskcluster_sub_win64/rusttests_opt.py
         mozconfig-variant: rusttests
-    run-on-projects: ['trunk', 'try']
+    run-on-projects: ['mozilla-central', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -648,11 +656,13 @@ win64-rusttests/debug:
             - win64-nasm
             - win64-node
 
-win64-ccov/debug:
-    description: "Win64 Debug Code Coverage"
+win64-ccov/opt:
+    description: "Win64 Opt Code Coverage"
     index:
         product: firefox
-        job-name: win64-ccov-debug
+        job-name: win64-ccov-opt
+    attributes:
+        enable-build-signing: true
     treeherder:
         platform: windows2012-64/ccov
         symbol: B
@@ -666,6 +676,7 @@ win64-ccov/debug:
         max-run-time: 7200
         env:
             TOOLTOOL_MANIFEST: "browser/config/tooltool-manifests/win64/releng.manifest"
+            RUSTC_BOOTSTRAP: '1'
     run:
         options: [append-env-variables-from-configs]
         script: mozharness/scripts/fx_desktop_build.py
@@ -674,13 +685,13 @@ win64-ccov/debug:
             - builds/releng_base_firefox.py
             - builds/taskcluster_base_windows.py
             - builds/taskcluster_base_win64.py
-            - builds/taskcluster_sub_win64/ccov_debug.py
+            - builds/taskcluster_sub_win64/ccov_opt.py
         mozconfig-variant: code-coverage
     run-on-projects: ['mozilla-central', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
-            - win64-rust-nightly
+            - win64-rust
             - win64-rust-size
             - win64-cbindgen
             - win64-grcov
@@ -713,7 +724,6 @@ win64-asan/debug:
             - builds/taskcluster_base_win64.py
             - builds/taskcluster_sub_win64/asan_debug.py
         mozconfig-variant: debug-asan
-    run-on-projects: ['trunk', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -750,7 +760,6 @@ win64-asan/opt:
         extra-config:
             stage_platform: win64-asan
         mozconfig-variant: nightly-asan
-    run-on-projects: ['trunk', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -797,6 +806,8 @@ win64-asan-reporter-nightly/opt:
         mozconfig-variant: nightly-asan-reporter
         mar-channel-id:
             firefox-mozilla-central-asan
+        accepted-mar-channel-ids:
+            firefox-mozilla-central-asan
     run-on-projects: ['mozilla-central']
     fetches:
         toolchain:
@@ -832,7 +843,6 @@ win64-asan-fuzzing/opt:
         extra-config:
             stage_platform: win64-fuzzing-asan
         mozconfig-variant: nightly-fuzzing-asan
-    run-on-projects: ['trunk', 'try']
     fetches:
         toolchain:
             - win64-clang-cl
@@ -877,7 +887,7 @@ win32-devedition-nightly/opt:
     run:
         script: mozharness/scripts/fx_desktop_build.py
         secrets: true
-        options: [enable-pgo, append-env-variables-from-configs]
+        options: [append-env-variables-from-configs]
         config:
             - builds/releng_base_firefox.py
             - builds/taskcluster_base_windows.py
@@ -984,6 +994,7 @@ win64-aarch64/opt:
         product: firefox
         job-name: win64-aarch64-opt
     attributes:
+        enable-build-signing: true
         enable-full-crashsymbols: true
     treeherder:
         platform: windows2012-aarch64/opt
@@ -1119,6 +1130,9 @@ win64-aarch64-shippable/opt:
               extract: false
               dest: ../public/build
             - artifact: target.raptor.tests.tar.gz
+              extract: false
+              dest: ../public/build
+            - artifact: target.condprof.tests.tar.gz
               extract: false
               dest: ../public/build
             - artifact: target.awsy.tests.tar.gz

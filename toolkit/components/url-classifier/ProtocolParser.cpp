@@ -30,7 +30,7 @@ namespace mozilla {
 namespace safebrowsing {
 
 // Updates will fail if fed chunks larger than this
-const uint32_t MAX_CHUNK_SIZE = (1024 * 1024);
+const uint32_t MAX_CHUNK_SIZE = (4 * 1024 * 1024);
 // Updates will fail if the total number of tocuhed chunks is larger than this
 const uint32_t MAX_CHUNK_RANGE = 1000000;
 
@@ -124,7 +124,9 @@ nsresult ProtocolParserV2::AppendStream(const nsACString& aData) {
   if (NS_FAILED(mUpdateStatus)) return mUpdateStatus;
 
   nsresult rv;
-  mPending.Append(aData);
+  if (!mPending.Append(aData, mozilla::fallible)) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
 #ifdef MOZ_SAFEBROWSING_DUMP_FAILED_UPDATES
   mRawUpdate.Append(aData);
 #endif
@@ -722,7 +724,9 @@ RefPtr<TableUpdate> ProtocolParserProtobuf::CreateTableUpdate(
 
 nsresult ProtocolParserProtobuf::AppendStream(const nsACString& aData) {
   // Protobuf data cannot be parsed progressively. Just save the incoming data.
-  mPending.Append(aData);
+  if (!mPending.Append(aData, mozilla::fallible)) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
   return NS_OK;
 }
 

@@ -7,6 +7,7 @@
 #ifndef _mozilla_dom_ClientInfo_h
 #define _mozilla_dom_ClientInfo_h
 
+#include "X11UndefineNone.h"
 #include "mozilla/dom/ClientBinding.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/UniquePtr.h"
@@ -46,9 +47,16 @@ class ClientInfo final {
   ~ClientInfo();
 
   bool operator==(const ClientInfo& aRight) const;
+  bool operator!=(const ClientInfo& aRight) const;
 
   // Get the unique identifier chosen at the time of the global's creation.
   const nsID& Id() const;
+
+  // This function should only be called on EnsureClientSource().
+  // XXX Bug 1579785 will merge this into the constructor (requiring pass a
+  // AgentClusterId)
+  void SetAgentClusterId(const nsID& aId);
+  const Maybe<nsID>& AgentClusterId() const;
 
   // Determine what kind of global this is; e.g. Window, Worker, SharedWorker,
   // etc.

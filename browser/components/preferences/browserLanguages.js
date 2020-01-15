@@ -30,10 +30,9 @@ ChromeUtils.defineModuleGetter(
   "resource:///modules/SelectionChangedMenulist.jsm"
 );
 
-document.documentElement.addEventListener(
-  "dialoghelp",
-  window.top.openPrefsHelp
-);
+document
+  .getElementById("BrowserLanguagesDialog")
+  .addEventListener("dialoghelp", window.top.openPrefsHelp);
 
 /* This dialog provides an interface for managing what language the browser is
  * displayed in.
@@ -66,7 +65,7 @@ async function dictionaryIdsForLocale(locale) {
   let entries = await RemoteSettings("language-dictionaries").get({
     filters: { id: locale },
   });
-  if (entries.length > 0) {
+  if (entries.length) {
     return entries[0].dictionaries;
   }
   return [];
@@ -384,9 +383,9 @@ var gBrowserLanguagesDialog = {
   },
 
   async onLoad() {
-    document.documentElement.addEventListener("beforeaccept", () =>
-      this.beforeAccept()
-    );
+    document
+      .getElementById("BrowserLanguagesDialog")
+      .addEventListener("beforeaccept", () => this.beforeAccept());
     // Maintain the previously selected locales even if we cancel out.
     let { telemetryId, selected, search } = window.arguments[0];
     this.telemetryId = telemetryId;
@@ -512,7 +511,7 @@ var gBrowserLanguagesDialog = {
 
   async loadLocalesFromInstalled(available) {
     let items;
-    if (available.length > 0) {
+    if (available.length) {
       items = await getLocaleDisplayInfo(available);
       items.push(await this.createInstalledLabel());
     } else {

@@ -15,20 +15,25 @@ const {
 
 const { connect } = require("devtools/client/shared/vendor/react-redux");
 
-const ManifestLoader = createFactory(require("../manifest/ManifestLoader"));
+const Types = require("devtools/client/application/src/types/index");
 
-const Manifest = createFactory(require("./Manifest"));
-const ManifestEmpty = createFactory(require("./ManifestEmpty"));
+const ManifestLoader = createFactory(
+  require("devtools/client/application/src/components/manifest/ManifestLoader")
+);
+const Manifest = createFactory(
+  require("devtools/client/application/src/components/manifest/Manifest")
+);
+const ManifestEmpty = createFactory(
+  require("devtools/client/application/src/components/manifest/ManifestEmpty")
+);
 
 class ManifestPage extends PureComponent {
-  // TODO: Use well-defined types
-  //       See https://bugzilla.mozilla.org/show_bug.cgi?id=1576881
   static get propTypes() {
     return {
       // these props are automatically injected via connect
       hasLoadingFailed: PropTypes.bool.isRequired,
       isManifestLoading: PropTypes.bool.isRequired,
-      manifest: PropTypes.object,
+      manifest: PropTypes.shape(Types.manifest),
     };
   }
 
@@ -48,7 +53,9 @@ class ManifestPage extends PureComponent {
 
     return section(
       {
-        className: `app-page ${!manifest ? "app-page--empty" : ""}`,
+        className: `app-page js-manifest-page ${
+          !manifest ? "app-page--empty" : ""
+        }`,
       },
       this.shouldShowLoader ? ManifestLoader({}) : this.renderManifest()
     );

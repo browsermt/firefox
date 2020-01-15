@@ -28,6 +28,9 @@ with Files('nsInlineFrame.*'):
 with Files('BRFrame.*'):
     BUG_COMPONENT = ('Core', 'Layout: Block and Inline')
 
+with Files('WBRFrame.*'):
+    BUG_COMPONENT = ('Core', 'Layout: Block and Inline')
+
 with Files('nsBulletFrame.*'):
     BUG_COMPONENT = ('Core', 'Layout: Block and Inline')
 
@@ -144,6 +147,7 @@ EXPORTS.mozilla += [
     'CSSOrderAwareFrameIterator.h',
     'ReflowInput.h',
     'ReflowOutput.h',
+    'ScrollbarPreferences.h',
     'ViewportFrame.h',
     'WritingModes.h',
 ]
@@ -218,6 +222,7 @@ UNIFIED_SOURCES += [
     'StickyScrollContainer.cpp',
     'TextOverflow.cpp',
     'ViewportFrame.cpp',
+    'WBRFrame.cpp'
 ]
 
 # nsPluginFrame.cpp needs to be built separately because of name clashes in the OS X headers.
@@ -225,13 +230,12 @@ SOURCES += [
     'nsPluginFrame.cpp',
 ]
 
-GENERATED_FILES += [
-    'FrameIdList.h',
-    'FrameTypeList.h',
-]
-
-GENERATED_FILES['FrameIdList.h'].script = 'GenerateFrameLists.py:generate_frame_id_list_h'
-GENERATED_FILES['FrameTypeList.h'].script = 'GenerateFrameLists.py:generate_frame_type_list_h'
+GeneratedFile('FrameIdList.h',
+              script='GenerateFrameLists.py',
+              entry_point='generate_frame_id_list_h')
+GeneratedFile('FrameTypeList.h',
+              script='GenerateFrameLists.py',
+              entry_point='generate_frame_type_list_h')
 
 include('/ipc/chromium/chromium-config.mozbuild')
 

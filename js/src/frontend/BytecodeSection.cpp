@@ -10,10 +10,13 @@
 #include "mozilla/PodOperations.h"    // PodZero
 #include "mozilla/ReverseIterator.h"  // mozilla::Reversed
 
+#include "frontend/ParseInfo.h"
 #include "frontend/ParseNode.h"      // ObjectBox
 #include "frontend/SharedContext.h"  // FunctionBox
+#include "frontend/Stencil.h"        // ScopeCreationData
 #include "vm/BytecodeUtil.h"         // INDEX_LIMIT, StackUses, StackDefs
 #include "vm/JSContext.h"            // JSContext
+#include "vm/RegExpObject.h"         // RegexpObject
 
 using namespace js;
 using namespace js::frontend;
@@ -28,7 +31,7 @@ bool GCThingList::append(ObjectBox* objbox, uint32_t* index) {
   lastbox = objbox;
 
   *index = vector.length();
-  return vector.append(JS::GCCellPtr(objbox->object()));
+  return vector.append(mozilla::AsVariant(JS::GCCellPtr(objbox->object())));
 }
 
 void GCThingList::finishInnerFunctions() {
@@ -41,13 +44,71 @@ void GCThingList::finishInnerFunctions() {
   }
 }
 
-void GCThingList::finish(mozilla::Span<JS::GCCellPtr> array) {
+bool GCThingList::finish(JSContext* cx, ParseInfo& parseInfo,
+                         mozilla::Span<JS::GCCellPtr> array) {
   MOZ_ASSERT(length() <= INDEX_LIMIT);
   MOZ_ASSERT(length() == array.size());
 
+  struct Matcher {
+    JSContext* cx;
+    ParseInfo& parseInfo;
+    uint32_t i;
+    mozilla::Span<JS::GCCellPtr>& array;
+
+    bool operator()(const JS::GCCellPtr& value) {
+      array[i] = value;
+      return true;
+    }
+
+    bool operator()(BigIntIndex& index) {
+      BigIntCreationData& data = parseInfo.bigIntData[index];
+      BigInt* bi = data.createBigInt(cx);
+      if (!bi) {
+        return false;
+      }
+      array[i] = JS::GCCellPtr(bi);
+      return true;
+    }
+
+    bool operator()(RegExpIndex& rindex) {
+      RegExpCreationData& data = parseInfo.regExpData[rindex];
+      RegExpObject* regexp = data.createRegExp(cx);
+      if (!regexp) {
+        return false;
+      }
+      array[i] = JS::GCCellPtr(regexp);
+      return true;
+    }
+
+    bool operator()(ObjLiteralCreationData& data) {
+      JSObject* obj = data.create(cx);
+      if (!obj) {
+        return false;
+      }
+      array[i] = JS::GCCellPtr(obj);
+      return true;
+    }
+
+    bool operator()(ScopeIndex& index) {
+      MutableHandle<ScopeCreationData> data =
+          parseInfo.scopeCreationData[index];
+      Scope* scope = data.get().createScope(cx);
+      if (!scope) {
+        return false;
+      }
+
+      array[i] = JS::GCCellPtr(scope);
+      return true;
+    }
+  };
+
   for (uint32_t i = 0; i < length(); i++) {
-    array[i] = vector[i].get().get();
+    Matcher m{cx, parseInfo, i, array};
+    if (!vector[i].get().match(m)) {
+      return false;
+    }
   }
+  return true;
 }
 
 bool CGTryNoteList::append(JSTryNoteKind kind, uint32_t stackDepth,
@@ -121,6 +182,10 @@ void CGResumeOffsetList::finish(mozilla::Span<uint32_t> array) {
   }
 }
 
+JSObject* ObjLiteralCreationData::create(JSContext* cx) {
+  return InterpretObjLiteral(cx, atoms_, writer_);
+}
+
 BytecodeSection::BytecodeSection(JSContext* cx, uint32_t lineNum)
     : code_(cx),
       notes_(cx),
@@ -145,7 +210,7 @@ void BytecodeSection::updateDepth(BytecodeOffset target) {
   }
 }
 
-PerScriptData::PerScriptData(JSContext* cx)
-    : gcThingList_(cx), atomIndices_(cx->frontendCollectionPool()) {}
+PerScriptData::PerScriptData(JSContext* cx, frontend::ParseInfo& parseInfo)
+    : gcThingList_(cx, parseInfo), atomIndices_(cx->frontendCollectionPool()) {}
 
 bool PerScriptData::init(JSContext* cx) { return atomIndices_.acquire(cx); }

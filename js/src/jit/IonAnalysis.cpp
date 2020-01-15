@@ -6,6 +6,7 @@
 
 #include "jit/IonAnalysis.h"
 
+#include <algorithm>
 #include <utility>  // for ::std::pair
 
 #include "jit/AliasAnalysis.h"
@@ -17,6 +18,7 @@
 #include "jit/LIR.h"
 #include "jit/Lowering.h"
 #include "jit/MIRGraph.h"
+#include "util/CheckedArithmetic.h"
 #include "vm/RegExpObject.h"
 #include "vm/SelfHosting.h"
 
@@ -1240,7 +1242,7 @@ bool jit::EliminateDeadResumePointOperands(MIRGenerator* mir, MIRGraph& graph) {
           maxDefinition = UINT32_MAX;
           break;
         }
-        maxDefinition = Max(maxDefinition, def->id());
+        maxDefinition = std::max(maxDefinition, def->id());
       }
       if (maxDefinition == UINT32_MAX) {
         continue;
@@ -1637,7 +1639,10 @@ static MIRType GuessPhiType(MPhi* phi, bool* hasInputsWithEmptyTypes) {
       }
       continue;
     }
-    if (type != in->type()) {
+
+    if (type == in->type()) {
+      convertibleToFloat32 = convertibleToFloat32 && in->canProduceFloat32();
+    } else {
       if (convertibleToFloat32 && in->type() == MIRType::Float32) {
         // If we only saw definitions that can be converted into Float32 before
         // and encounter a Float32 value, promote previous values to Float32
@@ -1646,7 +1651,7 @@ static MIRType GuessPhiType(MPhi* phi, bool* hasInputsWithEmptyTypes) {
                  IsTypeRepresentableAsDouble(in->type())) {
         // Specialize phis with int32 and double operands as double.
         type = MIRType::Double;
-        convertibleToFloat32 &= in->canProduceFloat32();
+        convertibleToFloat32 = convertibleToFloat32 && in->canProduceFloat32();
       } else {
         return MIRType::Value;
       }
@@ -1869,10 +1874,13 @@ bool TypeAnalyzer::adjustPhiInputs(MPhi* phi) {
       continue;
     }
 
-    // The input is being explicitly unboxed, so sneak past and grab
-    // the original box.
-    if (in->isUnbox() && phi->typeIncludes(in->toUnbox()->input())) {
-      in = in->toUnbox()->input();
+    // The input is being explicitly unboxed, so sneak past and grab the
+    // original box. Don't bother optimizing if magic values are involved.
+    if (in->isUnbox()) {
+      MDefinition* unboxInput = in->toUnbox()->input();
+      if (!IsMagicType(unboxInput->type()) && phi->typeIncludes(unboxInput)) {
+        in = in->toUnbox()->input();
+      }
     }
 
     if (in->type() != MIRType::Value) {
@@ -3659,8 +3667,8 @@ static bool TryEliminateBoundsCheck(BoundsCheckMap& checks, size_t blockIndex,
   // Update the dominating check to cover both ranges, denormalizing the
   // result per the constant offset in the index.
   int32_t newMinimum, newMaximum;
-  if (!SafeSub(Min(minimumA, minimumB), sumA.constant, &newMinimum) ||
-      !SafeSub(Max(maximumA, maximumB), sumA.constant, &newMaximum)) {
+  if (!SafeSub(std::min(minimumA, minimumB), sumA.constant, &newMinimum) ||
+      !SafeSub(std::max(maximumA, maximumB), sumA.constant, &newMaximum)) {
     return false;
   }
 
@@ -4529,7 +4537,7 @@ bool jit::AnalyzeNewScriptDefiniteProperties(
     return false;
   }
 
-  if (!jit::IsIonEnabled() || !jit::IsBaselineJitEnabled() ||
+  if (!jit::IsIonEnabled(cx) || !jit::IsBaselineJitEnabled() ||
       !CanBaselineInterpretScript(script)) {
     return true;
   }
@@ -4789,7 +4797,7 @@ bool jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg) {
     return true;
   }
 
-  if (!jit::IsIonEnabled()) {
+  if (!jit::IsIonEnabled(cx)) {
     return true;
   }
 
@@ -4831,7 +4839,7 @@ bool jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg) {
   }
 
   CompileInfo info(CompileRuntime::get(cx->runtime()), script,
-                   script->functionNonDelazifying(),
+                   script->function(),
                    /* osrPc = */ nullptr, Analysis_ArgumentsUsage,
                    /* needsArgsObj = */ true, inlineScriptTree);
 
@@ -4885,6 +4893,10 @@ bool jit::AnalyzeArgumentsUsage(JSContext* cx, JSScript* scriptArg) {
   MDefinition* argumentsValue = graph.entryBlock()->getSlot(info.argsObjSlot());
 
   bool argumentsContentsObserved = false;
+
+  if (argumentsValue->isImplicitlyUsed()) {
+    return true;
+  }
 
   for (MUseDefIterator uses(argumentsValue); uses; uses++) {
     MDefinition* use = uses.def();

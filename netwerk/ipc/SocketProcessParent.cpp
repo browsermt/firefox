@@ -5,15 +5,16 @@
 
 #include "SocketProcessParent.h"
 
+#include "HttpTransactionParent.h"
 #include "SocketProcessHost.h"
+#include "mozilla/ipc/FileDescriptorSetParent.h"
 #include "mozilla/net/DNSRequestParent.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/TelemetryIPC.h"
 #ifdef MOZ_WEBRTC
 #  include "mozilla/dom/ContentProcessManager.h"
 #  include "mozilla/dom/BrowserParent.h"
-#  include "mozilla/net/ProxyConfigLookupParent.h"
-#  include "mozilla/net/WebrtcProxyChannelParent.h"
+#  include "mozilla/net/WebrtcTCPSocketParent.h"
 #endif
 
 namespace mozilla {
@@ -122,10 +123,10 @@ mozilla::ipc::IPCResult SocketProcessParent::RecvRecordDiscardedData(
   return IPC_OK();
 }
 
-PWebrtcProxyChannelParent* SocketProcessParent::AllocPWebrtcProxyChannelParent(
-    const TabId& aTabId) {
+PWebrtcTCPSocketParent* SocketProcessParent::AllocPWebrtcTCPSocketParent(
+    const Maybe<TabId>& aTabId) {
 #ifdef MOZ_WEBRTC
-  WebrtcProxyChannelParent* parent = new WebrtcProxyChannelParent(aTabId);
+  WebrtcTCPSocketParent* parent = new WebrtcTCPSocketParent(aTabId);
   parent->AddRef();
   return parent;
 #else
@@ -133,22 +134,20 @@ PWebrtcProxyChannelParent* SocketProcessParent::AllocPWebrtcProxyChannelParent(
 #endif
 }
 
-bool SocketProcessParent::DeallocPWebrtcProxyChannelParent(
-    PWebrtcProxyChannelParent* aActor) {
+bool SocketProcessParent::DeallocPWebrtcTCPSocketParent(
+    PWebrtcTCPSocketParent* aActor) {
 #ifdef MOZ_WEBRTC
-  WebrtcProxyChannelParent* parent =
-      static_cast<WebrtcProxyChannelParent*>(aActor);
+  WebrtcTCPSocketParent* parent = static_cast<WebrtcTCPSocketParent*>(aActor);
   parent->Release();
 #endif
   return true;
 }
 
-PDNSRequestParent* SocketProcessParent::AllocPDNSRequestParent(
+already_AddRefed<PDNSRequestParent> SocketProcessParent::AllocPDNSRequestParent(
     const nsCString& aHost, const OriginAttributes& aOriginAttributes,
     const uint32_t& aFlags) {
-  DNSRequestParent* p = new DNSRequestParent();
-  p->AddRef();
-  return p;
+  RefPtr<DNSRequestParent> actor = new DNSRequestParent();
+  return actor.forget();
 }
 
 mozilla::ipc::IPCResult SocketProcessParent::RecvPDNSRequestConstructor(
@@ -159,39 +158,51 @@ mozilla::ipc::IPCResult SocketProcessParent::RecvPDNSRequestConstructor(
   return IPC_OK();
 }
 
-bool SocketProcessParent::DeallocPDNSRequestParent(PDNSRequestParent* aParent) {
-  DNSRequestParent* p = static_cast<DNSRequestParent*>(aParent);
-  p->Release();
+PFileDescriptorSetParent* SocketProcessParent::AllocPFileDescriptorSetParent(
+    const FileDescriptor& aFD) {
+  return new FileDescriptorSetParent(aFD);
+}
+
+bool SocketProcessParent::DeallocPFileDescriptorSetParent(
+    PFileDescriptorSetParent* aActor) {
+  delete static_cast<FileDescriptorSetParent*>(aActor);
   return true;
 }
 
-PProxyConfigLookupParent* SocketProcessParent::AllocPProxyConfigLookupParent() {
-#ifdef MOZ_WEBRTC
-  RefPtr<ProxyConfigLookupParent> actor = new ProxyConfigLookupParent();
-  return actor.forget().take();
-#else
-  return nullptr;
-#endif
+PChildToParentStreamParent*
+SocketProcessParent::AllocPChildToParentStreamParent() {
+  return mozilla::ipc::AllocPChildToParentStreamParent();
 }
 
-mozilla::ipc::IPCResult SocketProcessParent::RecvPProxyConfigLookupConstructor(
-    PProxyConfigLookupParent* aActor) {
-#ifdef MOZ_WEBRTC
-  ProxyConfigLookupParent* actor =
-      static_cast<ProxyConfigLookupParent*>(aActor);
-  actor->DoProxyLookup();
-#endif
-  return IPC_OK();
-}
-
-bool SocketProcessParent::DeallocPProxyConfigLookupParent(
-    PProxyConfigLookupParent* aActor) {
-#ifdef MOZ_WEBRTC
-  RefPtr<ProxyConfigLookupParent> actor =
-      dont_AddRef(static_cast<ProxyConfigLookupParent*>(aActor));
-  MOZ_ASSERT(actor);
-#endif
+bool SocketProcessParent::DeallocPChildToParentStreamParent(
+    PChildToParentStreamParent* aActor) {
+  delete aActor;
   return true;
+}
+
+PParentToChildStreamParent*
+SocketProcessParent::AllocPParentToChildStreamParent() {
+  MOZ_CRASH("PParentToChildStreamChild actors should be manually constructed!");
+}
+
+bool SocketProcessParent::DeallocPParentToChildStreamParent(
+    PParentToChildStreamParent* aActor) {
+  delete aActor;
+  return true;
+}
+
+PParentToChildStreamParent*
+SocketProcessParent::SendPParentToChildStreamConstructor(
+    PParentToChildStreamParent* aActor) {
+  MOZ_ASSERT(NS_IsMainThread());
+  return PSocketProcessParent::SendPParentToChildStreamConstructor(aActor);
+}
+
+PFileDescriptorSetParent*
+SocketProcessParent::SendPFileDescriptorSetConstructor(
+    const FileDescriptor& aFD) {
+  MOZ_ASSERT(NS_IsMainThread());
+  return PSocketProcessParent::SendPFileDescriptorSetConstructor(aFD);
 }
 
 // To ensure that IPDL is finished before SocketParent gets deleted.

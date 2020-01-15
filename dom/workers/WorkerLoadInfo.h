@@ -14,7 +14,6 @@
 
 #include "nsIInterfaceRequestor.h"
 #include "nsILoadContext.h"
-#include "nsIRequest.h"
 #include "nsISupportsImpl.h"
 #include "nsIWeakReferenceUtils.h"
 
@@ -113,6 +112,8 @@ struct WorkerLoadInfoData {
 
   Maybe<ServiceWorkerDescriptor> mParentController;
 
+  nsID mAgentClusterId;
+
   ChannelInfo mChannelInfo;
   nsLoadFlags mLoadFlags;
 
@@ -124,6 +125,7 @@ struct WorkerLoadInfoData {
   bool mReportCSPViolations;
   bool mXHRParamsAllowed;
   bool mPrincipalIsSystem;
+  bool mPrincipalIsAddonOrExpandedAddon;
   bool mWatchedByDevtools;
   StorageAccess mStorageAccess;
   bool mFirstPartyStorageAccessGranted;

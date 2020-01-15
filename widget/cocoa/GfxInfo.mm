@@ -13,7 +13,6 @@
 #include "nsExceptionHandler.h"
 #include "nsCocoaFeatures.h"
 #include "nsCocoaUtils.h"
-#include "nsICrashReporter.h"
 #include "mozilla/Preferences.h"
 #include <algorithm>
 
@@ -30,7 +29,7 @@ using namespace mozilla::widget;
 NS_IMPL_ISUPPORTS_INHERITED(GfxInfo, GfxInfoBase, nsIGfxInfoDebug)
 #endif
 
-GfxInfo::GfxInfo() : mOSXVersion{0} {}
+GfxInfo::GfxInfo() : mAdapterRAM(0), mOSXVersion{0} {}
 
 static OperatingSystem OSXVersionToOperatingSystem(uint32_t aOSXVersion) {
   if (nsCocoaFeatures::ExtractMajorVersion(aOSXVersion) == 10) {
@@ -51,6 +50,10 @@ static OperatingSystem OSXVersionToOperatingSystem(uint32_t aOSXVersion) {
         return OperatingSystem::OSX10_12;
       case 13:
         return OperatingSystem::OSX10_13;
+      case 14:
+        return OperatingSystem::OSX10_14;
+      case 15:
+        return OperatingSystem::OSX10_15;
     }
   }
 
@@ -135,14 +138,14 @@ GfxInfo::GetAdapterDescription2(nsAString& aAdapterDescription) { return NS_ERRO
 
 /* readonly attribute DOMString adapterRAM; */
 NS_IMETHODIMP
-GfxInfo::GetAdapterRAM(nsAString& aAdapterRAM) {
-  aAdapterRAM = mAdapterRAMString;
+GfxInfo::GetAdapterRAM(uint32_t* aAdapterRAM) {
+  *aAdapterRAM = mAdapterRAM;
   return NS_OK;
 }
 
 /* readonly attribute DOMString adapterRAM2; */
 NS_IMETHODIMP
-GfxInfo::GetAdapterRAM2(nsAString& aAdapterRAM) { return NS_ERROR_FAILURE; }
+GfxInfo::GetAdapterRAM2(uint32_t* aAdapterRAM) { return NS_ERROR_FAILURE; }
 
 /* readonly attribute DOMString adapterDriver; */
 NS_IMETHODIMP
@@ -218,6 +221,38 @@ GfxInfo::GetAdapterSubsysID(nsAString& aAdapterSubsysID) { return NS_ERROR_FAILU
 NS_IMETHODIMP
 GfxInfo::GetAdapterSubsysID2(nsAString& aAdapterSubsysID) { return NS_ERROR_FAILURE; }
 
+/* readonly attribute Array<DOMString> displayInfo; */
+NS_IMETHODIMP
+GfxInfo::GetDisplayInfo(nsTArray<nsString>& aDisplayInfo) {
+  for (NSScreen* screen in [NSScreen screens]) {
+    NSRect rect = [screen frame];
+    nsString desc;
+    desc.AppendPrintf("%dx%d scale:%f", (int32_t)rect.size.width, (int32_t)rect.size.height,
+                      nsCocoaUtils::GetBackingScaleFactor(screen));
+    aDisplayInfo.AppendElement(desc);
+  }
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfo::GetDisplayWidth(nsTArray<uint32_t>& aDisplayWidth) {
+  for (NSScreen* screen in [NSScreen screens]) {
+    NSRect rect = [screen frame];
+    aDisplayWidth.AppendElement((uint32_t)rect.size.width);
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+GfxInfo::GetDisplayHeight(nsTArray<uint32_t>& aDisplayHeight) {
+  for (NSScreen* screen in [NSScreen screens]) {
+    NSRect rect = [screen frame];
+    aDisplayHeight.AppendElement((uint32_t)rect.size.height);
+  }
+  return NS_OK;
+}
+
 /* readonly attribute boolean isGPU2Active; */
 NS_IMETHODIMP
 GfxInfo::GetIsGPU2Active(bool* aIsGPU2Active) { return NS_ERROR_FAILURE; }
@@ -262,7 +297,7 @@ const nsTArray<GfxDriverInfo>& GfxInfo::GetGfxDriverInfo() {
     IMPLEMENT_MAC_DRIVER_BLOCKLIST(
         OperatingSystem::OSX, (nsAString&)GfxDriverInfo::GetDeviceVendor(VendorIntel),
         (nsAString&)GfxDriverInfo::GetDriverVendor(DriverVendorAll),
-        (GfxDeviceFamily*)GfxDriverInfo::GetDeviceFamily(IntelHDGraphicsIvyBridge),
+        (GfxDeviceFamily*)GfxDriverInfo::GetDeviceFamily(IntelHDGraphicsToIvyBridge),
         nsIGfxInfo::FEATURE_GL_SWIZZLE, nsIGfxInfo::FEATURE_BLOCKED_DEVICE,
         "FEATURE_FAILURE_MAC_INTELHD4000_NO_SWIZZLE");
   }

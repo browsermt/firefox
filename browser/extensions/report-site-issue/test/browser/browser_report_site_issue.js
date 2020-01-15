@@ -4,27 +4,27 @@ async function clickToReportAndAwaitReportTabLoad() {
   await openPageActions();
   await isPanelItemEnabled();
 
-  let screenshotPromise;
-  let newTabPromise = new Promise(resolve => {
+  // click on "report site issue" and wait for the new tab to open
+  const tab = await new Promise(resolve => {
     gBrowser.tabContainer.addEventListener(
       "TabOpen",
       event => {
-        let tab = event.target;
-        screenshotPromise = BrowserTestUtils.waitForContentEvent(
-          tab.linkedBrowser,
-          "ScreenshotReceived",
-          false,
-          null,
-          true
-        );
-        resolve(tab);
+        resolve(event.target);
       },
       { once: true }
     );
+    document.getElementById(WC_PAGE_ACTION_PANEL_ID).click();
   });
-  document.getElementById(WC_PAGE_ACTION_PANEL_ID).click();
-  const tab = await newTabPromise;
-  await screenshotPromise;
+
+  // wait for the new tab to acknowledge that it received a screenshot
+  await BrowserTestUtils.waitForContentEvent(
+    gBrowser.selectedBrowser,
+    "ScreenshotReceived",
+    false,
+    null,
+    true
+  );
+
   return tab;
 }
 
@@ -48,7 +48,7 @@ add_task(async function test_opened_page() {
   let tab1 = await BrowserTestUtils.openNewForegroundTab(gBrowser, TEST_PAGE);
   let tab2 = await clickToReportAndAwaitReportTabLoad();
 
-  await ContentTask.spawn(tab2.linkedBrowser, { TEST_PAGE }, async function(
+  await SpecialPowers.spawn(tab2.linkedBrowser, [{ TEST_PAGE }], async function(
     args
   ) {
     async function isGreen(dataUrl) {
@@ -160,7 +160,7 @@ add_task(async function test_opened_page() {
 
     const log5 = details.consoleLog[4];
     ok(
-      log5.log[0] === "TypeError: document.access is undefined",
+      log5.log[0].match(/TypeError: .*document\.access is undefined/),
       "Script errors are logged"
     );
     ok(log5.level === "error", "Reports correct log level");
@@ -239,7 +239,7 @@ add_task(async function test_framework_detection() {
   );
   let tab2 = await clickToReportAndAwaitReportTabLoad();
 
-  await ContentTask.spawn(tab2.linkedBrowser, {}, async function(args) {
+  await SpecialPowers.spawn(tab2.linkedBrowser, [], async function(args) {
     let doc = content.document;
     let detailsParam = doc.getElementById("details").innerText;
     const details = JSON.parse(detailsParam);
@@ -263,7 +263,7 @@ add_task(async function test_fastclick_detection() {
   );
   let tab2 = await clickToReportAndAwaitReportTabLoad();
 
-  await ContentTask.spawn(tab2.linkedBrowser, {}, async function(args) {
+  await SpecialPowers.spawn(tab2.linkedBrowser, [], async function(args) {
     let doc = content.document;
     let detailsParam = doc.getElementById("details").innerText;
     const details = JSON.parse(detailsParam);
@@ -285,7 +285,7 @@ add_task(async function test_framework_label() {
   );
   let tab2 = await clickToReportAndAwaitReportTabLoad();
 
-  await ContentTask.spawn(tab2.linkedBrowser, {}, async function(args) {
+  await SpecialPowers.spawn(tab2.linkedBrowser, [], async function(args) {
     let doc = content.document;
     let labelParam = doc.getElementById("label").innerText;
     const label = JSON.parse(labelParam);

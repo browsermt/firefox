@@ -22,7 +22,6 @@
 #include "DOMSVGNumber.h"
 #include "DOMSVGPoint.h"
 #include "nsFrameSelection.h"
-#include "nsLayoutStylesheetCache.h"
 #include "nsIFrame.h"
 #include "nsISVGSVGFrame.h"
 #include "nsSVGDisplayableFrame.h"
@@ -55,7 +54,7 @@ NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(DOMSVGTranslatePoint)
   NS_WRAPPERCACHE_INTERFACE_MAP_ENTRY
   // We have to qualify nsISVGPoint because NS_GET_IID looks for a class in the
   // global namespace
-  NS_INTERFACE_MAP_ENTRY(mozilla::nsISVGPoint)
+  NS_INTERFACE_MAP_ENTRY(nsISVGPoint)
   NS_INTERFACE_MAP_ENTRY(nsISupports)
 NS_INTERFACE_MAP_END
 
@@ -374,7 +373,7 @@ nsresult SVGSVGElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   if (Document* doc = aContext.GetUncomposedDoc()) {
     if ((smilController = doc->GetAnimationController())) {
       // SMIL is enabled in this document
-      if (WillBeOutermostSVG(aParent, aContext.GetBindingParent())) {
+      if (WillBeOutermostSVG(aParent)) {
         // We'll be the outermost <svg> element.  We'll need a time container.
         if (!mTimedDocumentRoot) {
           mTimedDocumentRoot = new SMILTimeContainer();
@@ -484,10 +483,8 @@ void SVGSVGElement::FlushImageTransformInvalidation() {
 //----------------------------------------------------------------------
 // implementation helpers
 
-bool SVGSVGElement::WillBeOutermostSVG(nsINode& aParent,
-                                       Element* aBindingParent) const {
-  nsINode* parent = aBindingParent ? aBindingParent : &aParent;
-
+bool SVGSVGElement::WillBeOutermostSVG(nsINode& aParent) const {
+  nsINode* parent = &aParent;
   while (parent && parent->IsSVGElement()) {
     if (parent->IsSVGElement(nsGkAtoms::foreignObject)) {
       // SVG in a foreignObject must have its own <svg> (nsSVGOuterSVGFrame).
@@ -496,7 +493,7 @@ bool SVGSVGElement::WillBeOutermostSVG(nsINode& aParent,
     if (parent->IsSVGElement(nsGkAtoms::svg)) {
       return false;
     }
-    parent = parent->GetParent();
+    parent = parent->GetParentOrShadowHostNode();
   }
 
   return true;

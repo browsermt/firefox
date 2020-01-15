@@ -17,8 +17,6 @@
 #include "CanvasUtils.h"
 #include "GLContext.h"
 #include "GLScreenBuffer.h"
-#include "WebGL1Context.h"
-#include "WebGL2Context.h"
 
 namespace mozilla {
 namespace dom {
@@ -57,8 +55,7 @@ JSObject* OffscreenCanvas::WrapObject(JSContext* aCx,
 
 /* static */
 already_AddRefed<OffscreenCanvas> OffscreenCanvas::Constructor(
-    const GlobalObject& aGlobal, uint32_t aWidth, uint32_t aHeight,
-    ErrorResult& aRv) {
+    const GlobalObject& aGlobal, uint32_t aWidth, uint32_t aHeight) {
   nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(aGlobal.GetAsSupports());
   RefPtr<OffscreenCanvas> offscreenCanvas = new OffscreenCanvas(
       global, aWidth, aHeight, layers::LayersBackend::LAYERS_NONE, nullptr);
@@ -117,36 +114,22 @@ already_AddRefed<nsISupports> OffscreenCanvas::GetContext(
   }
 
   if (mCanvasRenderer) {
+    mCanvasRenderer->SetContextType(contextType);
     if (contextType == CanvasContextType::WebGL1 ||
         contextType == CanvasContextType::WebGL2) {
-      WebGLContext* webGL = static_cast<WebGLContext*>(mCurrentContext.get());
-      gl::GLContext* gl = webGL->GL();
-      mCanvasRenderer->mContext = mCurrentContext;
-      mCanvasRenderer->SetActiveEventTarget();
-      mCanvasRenderer->mGLContext = gl;
-      mCanvasRenderer->SetIsAlphaPremultiplied(webGL->IsPremultAlpha() ||
-                                               !gl->Caps().alpha);
-
-      if (RefPtr<ImageBridgeChild> imageBridge =
-              ImageBridgeChild::GetSingleton()) {
-        TextureFlags flags = TextureFlags::ORIGIN_BOTTOM_LEFT;
-        mCanvasClient = imageBridge->CreateCanvasClient(
-            CanvasClient::CanvasClientTypeShSurf, flags);
-        mCanvasRenderer->SetCanvasClient(mCanvasClient);
-
-        gl::GLScreenBuffer* screen = gl->Screen();
-        gl::SurfaceCaps caps = screen->mCaps;
-        auto forwarder = mCanvasClient->GetForwarder();
-
-        UniquePtr<gl::SurfaceFactory> factory =
-            gl::GLScreenBuffer::CreateFactory(gl, caps, forwarder, flags);
-
-        if (factory) screen->Morph(std::move(factory));
-      }
+      MOZ_ASSERT_UNREACHABLE("WebGL OffscreenCanvas not yet supported.");
+      return nullptr;
     }
   }
 
   return result.forget();
+}
+
+ImageContainer* OffscreenCanvas::GetImageContainer() {
+  if (!mCanvasRenderer) {
+    return nullptr;
+  }
+  return mCanvasRenderer->GetImageContainer();
 }
 
 already_AddRefed<nsICanvasRenderingContextInternal>
@@ -176,8 +159,11 @@ void OffscreenCanvas::CommitFrameToCompositor() {
     mAttrDirty = false;
   }
 
-  if (mCurrentContext) {
-    static_cast<WebGLContext*>(mCurrentContext.get())->PresentScreenBuffer();
+  CanvasContextType contentType = mCanvasRenderer->GetContextType();
+  if (mCurrentContext && (contentType == CanvasContextType::WebGL1 ||
+                          contentType == CanvasContextType::WebGL2)) {
+    MOZ_ASSERT_UNREACHABLE("WebGL OffscreenCanvas not yet supported.");
+    return;
   }
 
   if (mCanvasRenderer && mCanvasRenderer->mGLContext) {
@@ -230,12 +216,16 @@ already_AddRefed<Promise> OffscreenCanvas::ToBlob(JSContext* aCx,
         : mGlobal(aGlobal), mPromise(aPromise) {}
 
     // This is called on main thread.
-    nsresult ReceiveBlob(already_AddRefed<Blob> aBlob) override {
-      RefPtr<Blob> blob = aBlob;
+    nsresult ReceiveBlobImpl(already_AddRefed<BlobImpl> aBlobImpl) override {
+      RefPtr<BlobImpl> blobImpl = aBlobImpl;
 
       if (mPromise) {
-        RefPtr<Blob> newBlob = Blob::Create(mGlobal, blob->Impl());
-        mPromise->MaybeResolve(newBlob);
+        RefPtr<Blob> blob = Blob::Create(mGlobal, blobImpl);
+        if (NS_WARN_IF(!blob)) {
+          mPromise->MaybeReject(NS_ERROR_FAILURE);
+        } else {
+          mPromise->MaybeResolve(blob);
+        }
       }
 
       mGlobal = nullptr;

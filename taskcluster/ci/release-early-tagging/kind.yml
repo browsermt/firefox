@@ -15,11 +15,9 @@ job-defaults:
     shipping-phase: promote
     worker-type:
         by-project:
-            mozilla-(beta|release|esr.*): scriptworker-prov-v1/treescript-v1
-            maple: scriptworker-prov-v1/treescript-v1
-            birch: scriptworker-prov-v1/treescript-v1
-            jamun: scriptworker-prov-v1/treescript-v1
-            default: scriptworker-prov-v1/treescript-dev
+            mozilla-(beta|release|esr.*): scriptworker-k8s/gecko-3-tree
+            maple: scriptworker-k8s/gecko-3-tree
+            default: scriptworker-k8s/gecko-1-tree
     worker:
         implementation: treescript
         tags: ['buildN']
@@ -29,8 +27,8 @@ job-defaults:
             by-project:
                 mozilla-(beta|release|esr.*): true
                 maple: true
-                birch: true
                 default: false
+
 
 jobs:
     fennec:
@@ -40,7 +38,17 @@ jobs:
     firefox:
         name: firefox-tag-buildN
         shipping-product: firefox
+        treeherder:
+            platform: firefox-release/opt
+            symbol: Rel(TagBuild)
+            tier: 1
+            kind: build
 
     devedition:
         name: devedition-tag-buildN
         shipping-product: devedition
+        treeherder:
+            platform: devedition-release/opt
+            symbol: Rel(TagBuild)
+            tier: 1
+            kind: build

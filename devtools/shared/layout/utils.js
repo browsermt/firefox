@@ -6,6 +6,12 @@
 
 const { Ci, Cc } = require("chrome");
 const nodeFilterConstants = require("devtools/shared/dom-node-filter-constants");
+loader.lazyRequireGetter(
+  this,
+  "DevToolsUtils",
+  "devtools/shared/DevToolsUtils"
+);
+loader.lazyRequireGetter(this, "ChromeUtils");
 
 const SHEET_TYPE = {
   agent: "AGENT_SHEET",
@@ -42,16 +48,6 @@ function utilsFor(win) {
 }
 
 /**
- * Returns `true` is the window given is a top level window.
- * like win.top === win, but goes through mozbrowsers and mozapps iframes.
- *
- * @param {DOMWindow} win
- * @return {Boolean}
- */
-const isTopWindow = win => win && win.top === win;
-exports.isTopWindow = isTopWindow;
-
-/**
  * Check a window is part of the boundary window given.
  *
  * @param {DOMWindow} boundaryWindow
@@ -81,8 +77,10 @@ exports.isWindowIncluded = isWindowIncluded;
  * @return {DOMNode}
  *         The element in which the window is embedded.
  */
-const getFrameElement = win =>
-  isTopWindow(win) ? null : utilsFor(win).containerElement;
+const getFrameElement = win => {
+  const isTopWindow = win && DevToolsUtils.getTopWindow(win) === win;
+  return isTopWindow ? null : utilsFor(win).containerElement;
+};
 exports.getFrameElement = getFrameElement;
 
 /**
@@ -105,7 +103,7 @@ function getFrameOffsets(boundaryWindow, node) {
   const scale = getCurrentZoom(node);
 
   if (boundaryWindow === null) {
-    boundaryWindow = frameWin.top;
+    boundaryWindow = DevToolsUtils.getTopWindow(frameWin);
   } else if (typeof boundaryWindow === "undefined") {
     throw new Error("No boundaryWindow given. Use null for the default one.");
   }
@@ -156,7 +154,12 @@ exports.getFrameOffsets = getFrameOffsets;
  *        An array of objects that have the same structure as quads returned by
  *        getBoxQuads. An empty array if the node has no quads or is invalid.
  */
-function getAdjustedQuads(boundaryWindow, node, region, { ignoreZoom } = {}) {
+function getAdjustedQuads(
+  boundaryWindow,
+  node,
+  region,
+  { ignoreZoom, ignoreScroll } = {}
+) {
   if (!node || !node.getBoxQuads) {
     return [];
   }
@@ -164,6 +167,7 @@ function getAdjustedQuads(boundaryWindow, node, region, { ignoreZoom } = {}) {
   const quads = node.getBoxQuads({
     box: region,
     relativeTo: boundaryWindow.document,
+    createFramesForSuppressedWhitespace: false,
   });
 
   if (!quads.length) {
@@ -171,7 +175,9 @@ function getAdjustedQuads(boundaryWindow, node, region, { ignoreZoom } = {}) {
   }
 
   const scale = ignoreZoom ? 1 : getCurrentZoom(node);
-  const { scrollX, scrollY } = boundaryWindow;
+  const { scrollX, scrollY } = ignoreScroll
+    ? { scrollX: 0, scrollY: 0 }
+    : boundaryWindow;
 
   const xOffset = scrollX * scale;
   const yOffset = scrollY * scale;
@@ -240,7 +246,7 @@ function getRect(boundaryWindow, node, contentWindow) {
   const clientRect = node.getBoundingClientRect();
 
   if (boundaryWindow === null) {
-    boundaryWindow = frameWin.top;
+    boundaryWindow = DevToolsUtils.getTopWindow(frameWin);
   } else if (typeof boundaryWindow === "undefined") {
     throw new Error("No boundaryWindow given. Use null for the default one.");
   }
@@ -427,121 +433,17 @@ function isNodeConnected(node) {
 exports.isNodeConnected = isNodeConnected;
 
 /**
- * Traverse getBindingParent until arriving upon the bound element
- * responsible for the generation of the specified node.
- * See https://developer.mozilla.org/en-US/docs/XBL/XBL_1.0_Reference/DOM_Interfaces#getBindingParent.
- *
- * @param {DOMNode} node
- * @return {DOMNode}
- *         If node is not anonymous, this will return node. Otherwise,
- *         it will return the bound element
- *
- */
-function getRootBindingParent(node) {
-  let parent;
-  const doc = node.ownerDocument;
-  if (!doc) {
-    return node;
-  }
-  while ((parent = doc.getBindingParent(node))) {
-    node = parent;
-  }
-  return node;
-}
-exports.getRootBindingParent = getRootBindingParent;
-
-function getBindingParent(node) {
-  const doc = node.ownerDocument;
-  if (!doc) {
-    return null;
-  }
-
-  // If there is no binding parent then it is not anonymous.
-  const parent = doc.getBindingParent(node);
-  if (!parent) {
-    return null;
-  }
-
-  return parent;
-}
-exports.getBindingParent = getBindingParent;
-
-/**
- * Determine whether a node is anonymous by determining if there
- * is a bindingParent.
+ * Determine whether a node is anonymous.
  *
  * @param {DOMNode} node
  * @return {Boolean}
  *
+ * FIXME(bug 1597411): Remove one of these (or both, as
+ * `node.isNativeAnonymous` is quite clear).
  */
-const isAnonymous = node => getRootBindingParent(node) !== node;
+const isAnonymous = node => node.isNativeAnonymous;
 exports.isAnonymous = isAnonymous;
-
-/**
- * Determine whether a node has a bindingParent.
- *
- * @param {DOMNode} node
- * @return {Boolean}
- *
- */
-const hasBindingParent = node => !!getBindingParent(node);
-
-/**
- * Determine whether a node is native anonymous content (as opposed
- * to XBL anonymous or shadow DOM).
- * Native anonymous content includes elements like internals to form
- * controls and ::before/::after.
- *
- * @param {DOMNode} node
- * @return {Boolean}
- *
- */
-const isNativeAnonymous = node =>
-  hasBindingParent(node) && !(isXBLAnonymous(node) || isShadowAnonymous(node));
-
-exports.isNativeAnonymous = isNativeAnonymous;
-
-/**
- * Determine whether a node is XBL anonymous content (as opposed
- * to native anonymous or shadow DOM).
- * See https://developer.mozilla.org/en-US/docs/XBL/XBL_1.0_Reference/Anonymous_Content.
- *
- * @param {DOMNode} node
- * @return {Boolean}
- *
- */
-function isXBLAnonymous(node) {
-  const parent = getBindingParent(node);
-  if (!parent) {
-    return false;
-  }
-
-  const anonNodes = [...(node.ownerDocument.getAnonymousNodes(parent) || [])];
-  return anonNodes.indexOf(node) > -1;
-}
-exports.isXBLAnonymous = isXBLAnonymous;
-
-/**
- * Determine whether a node is a child of a shadow root.
- * See https://w3c.github.io/webcomponents/spec/shadow/
- *
- * @param {DOMNode} node
- * @return {Boolean}
- */
-function isShadowAnonymous(node) {
-  const parent = getBindingParent(node);
-  if (!parent) {
-    return false;
-  }
-
-  // If there is a shadowRoot and this is part of it then this
-  // is not native anonymous
-  return (
-    parent.openOrClosedShadowRoot &&
-    parent.openOrClosedShadowRoot.contains(node)
-  );
-}
-exports.isShadowAnonymous = isShadowAnonymous;
+exports.isNativeAnonymous = isAnonymous;
 
 /**
  * Determine whether a node is a template element.
@@ -562,10 +464,7 @@ exports.isTemplateElement = isTemplateElement;
  * @param {DOMNode} node
  * @return {Boolean}
  */
-function isShadowRoot(node) {
-  const isFragment = node.nodeType === Node.DOCUMENT_FRAGMENT_NODE;
-  return isFragment && !!node.host;
-}
+const isShadowRoot = node => node.containingShadowRoot == node;
 exports.isShadowRoot = isShadowRoot;
 
 /*
@@ -606,7 +505,7 @@ function isDirectShadowHostChild(node) {
     isMarkerPseudoElement(node) ||
     isBeforePseudoElement(node) ||
     isAfterPseudoElement(node) ||
-    isNativeAnonymous(node)
+    node.isNativeAnonymous
   ) {
     return false;
   }
@@ -936,3 +835,27 @@ function getAbsoluteScrollOffsetsForNode(node) {
   };
 }
 exports.getAbsoluteScrollOffsetsForNode = getAbsoluteScrollOffsetsForNode;
+
+/**
+ * Check if the provided node is representing a remote frame.
+ *
+ * - In the context of the browser toolbox, a remote frame can be the <browser remote>
+ * element found inside each tab.
+ * - In the context of the content toolbox, a remote frame can be a <iframe> that contains
+ * a different origin document.
+ *
+ * @param  {DOMNode} node
+ * @return {Boolean}
+ */
+function isRemoteFrame(node) {
+  if (ChromeUtils.getClassName(node) == "HTMLIFrameElement") {
+    return node.frameLoader && node.frameLoader.isRemoteFrame;
+  }
+
+  if (ChromeUtils.getClassName(node) == "XULFrameElement") {
+    return !node.childNodes.length && node.getAttribute("remote") == "true";
+  }
+
+  return false;
+}
+exports.isRemoteFrame = isRemoteFrame;

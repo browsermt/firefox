@@ -26,19 +26,14 @@
 #include "nsIFile.h"
 #include "nsFrameLoader.h"
 #include "nsFrameLoaderOwner.h"
-#include "nsIWebNavigation.h"
-#include "nsIDocShell.h"
 #include "nsIContent.h"
 #include "nsIContentInlines.h"
 #include "nsIImageLoadingContent.h"
-#include "nsITextControlElement.h"
 #include "nsUnicharUtils.h"
 #include "nsIURL.h"
 #include "nsIURIMutator.h"
 #include "mozilla/dom/Document.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsIPrincipal.h"
-#include "nsIDocShellTreeItem.h"
 #include "nsIWebBrowserPersist.h"
 #include "nsEscape.h"
 #include "nsContentUtils.h"
@@ -49,6 +44,8 @@
 #include "nsIMIMEInfo.h"
 #include "nsRange.h"
 #include "BrowserParent.h"
+#include "mozilla/TextControlElement.h"
+#include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/HTMLAreaElement.h"
 #include "mozilla/dom/HTMLAnchorElement.h"
@@ -56,6 +53,7 @@
 #include "nsVariant.h"
 #include "nsQueryObject.h"
 
+using namespace mozilla;
 using namespace mozilla::dom;
 using mozilla::IgnoreErrors;
 
@@ -513,11 +511,11 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
   nsIContent* editingElement = mSelectionTargetNode->IsEditable()
                                    ? mSelectionTargetNode->GetEditingHost()
                                    : nullptr;
-  nsCOMPtr<nsITextControlElement> textControl =
-      nsITextControlElement::GetTextControlElementFromEditingHost(
-          editingElement);
-  if (textControl) {
-    nsISelectionController* selcon = textControl->GetSelectionController();
+  RefPtr<TextControlElement> textControlElement =
+      TextControlElement::GetTextControlElementFromEditingHost(editingElement);
+  if (textControlElement) {
+    nsISelectionController* selcon =
+        textControlElement->GetSelectionController();
     if (selcon) {
       selection =
           selcon->GetSelection(nsISelectionController::SELECTION_NORMAL);
@@ -544,9 +542,8 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
   // if set, serialize the content under this node
   nsCOMPtr<nsIContent> nodeToSerialize;
 
-  nsCOMPtr<nsIDocShellTreeItem> dsti = mWindow->GetDocShell();
-  const bool isChromeShell =
-      dsti && dsti->ItemType() == nsIDocShellTreeItem::typeChrome;
+  BrowsingContext* bc = mWindow->GetBrowsingContext();
+  const bool isChromeShell = bc && bc->IsChrome();
 
   // In chrome shells, only allow dragging inside editable areas.
   if (isChromeShell && !editingElement) {
@@ -556,7 +553,7 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
     return NS_OK;
   }
 
-  if (isChromeShell && textControl) {
+  if (isChromeShell && textControlElement) {
     // Only use the selection if the target node is in the selection.
     if (!selection->ContainsNode(*mSelectionTargetNode, false, IgnoreErrors()))
       return NS_OK;
@@ -625,10 +622,10 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
           HTMLAreaElement::FromNodeOrNull(draggedNode);
       if (areaElem) {
         // use the alt text (or, if missing, the href) as the title
-        areaElem->GetAttribute(NS_LITERAL_STRING("alt"), mTitleString);
+        areaElem->GetAttr(nsGkAtoms::alt, mTitleString);
         if (mTitleString.IsEmpty()) {
           // this can be a relative link
-          areaElem->GetAttribute(NS_LITERAL_STRING("href"), mTitleString);
+          areaElem->GetAttr(nsGkAtoms::href, mTitleString);
         }
 
         // we'll generate HTML like <a href="absurl">alt text</a>
@@ -665,7 +662,7 @@ nsresult DragDataProducer::Produce(DataTransfer* aDataTransfer, bool* aCanDrag,
         // XXXbz Also, what if this is an nsIImageLoadingContent
         // that's not an <html:img>?
         if (imageElement) {
-          imageElement->GetAttribute(NS_LITERAL_STRING("alt"), mTitleString);
+          imageElement->GetAttr(nsGkAtoms::alt, mTitleString);
         }
 
         if (mTitleString.IsEmpty()) {

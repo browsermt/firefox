@@ -16,10 +16,14 @@ const {
 
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 
+const Actions = require("devtools/client/application/src/actions/index");
+const { connect } = require("devtools/client/shared/vendor/react-redux");
+
 const FluentReact = require("devtools/client/shared/vendor/fluent-react");
 const Localized = createFactory(FluentReact.Localized);
 
-const { PAGE_TYPES } = require("../../constants");
+const { PAGE_TYPES } = require("devtools/client/application/src/constants");
+const Types = require("devtools/client/application/src/types/index");
 
 const ICONS = {
   [PAGE_TYPES.MANIFEST]:
@@ -36,13 +40,27 @@ const LOCALIZATION_IDS = {
 class SidebarItem extends PureComponent {
   static get propTypes() {
     return {
-      page: PropTypes.oneOf(Object.values(PAGE_TYPES)),
+      page: Types.page.isRequired,
+      isSelected: PropTypes.bool.isRequired,
+      // this prop is automatically injected via connect
+      dispatch: PropTypes.func.isRequired,
     };
   }
+
   render() {
-    const { page } = this.props;
+    const { isSelected, page } = this.props;
+
     return li(
-      { className: "sidebar-item" },
+      {
+        className: `sidebar-item js-sidebar-${page} ${
+          isSelected ? "sidebar-item--selected" : ""
+        }`,
+        onClick: () => {
+          const { dispatch } = this.props;
+          dispatch(Actions.updateSelectedPage(page));
+        },
+        role: "link",
+      },
       Localized(
         {
           id: LOCALIZATION_IDS[page],
@@ -69,5 +87,5 @@ class SidebarItem extends PureComponent {
   }
 }
 
-// Exports
-module.exports = SidebarItem;
+const mapDispatchToProps = dispatch => ({ dispatch });
+module.exports = connect(mapDispatchToProps)(SidebarItem);

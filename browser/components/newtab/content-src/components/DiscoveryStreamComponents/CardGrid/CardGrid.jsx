@@ -20,7 +20,7 @@ export class CardGrid extends React.PureComponent {
           <DSCard
             key={`dscard-${rec.id}`}
             pos={rec.pos}
-            campaignId={rec.campaign_id}
+            flightId={rec.flight_id}
             image_src={rec.image_src}
             raw_image_src={rec.raw_image_src}
             title={rec.title}
@@ -37,6 +37,7 @@ export class CardGrid extends React.PureComponent {
             context_type={rec.context_type}
             bookmarkGuid={rec.bookmarkGuid}
             engagement={rec.engagement}
+            display_engagement_labels={this.props.display_engagement_labels}
             cta={rec.cta}
             cta_variant={this.props.cta_variant}
           />

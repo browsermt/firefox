@@ -4,9 +4,9 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 DevToolsModules(
-    'background.jsm',
-    'menu-button.jsm',
+    'background.jsm.js',
+    'menu-button.jsm.js',
 )
 
 with Files('**'):
-    BUG_COMPONENT = ('Core', 'Gecko Profiler')
+    BUG_COMPONENT = ('DevTools', 'Performance Tools (Profiler/Timeline)')

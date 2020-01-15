@@ -14,6 +14,7 @@
 #include "nsError.h"
 #include "nsContentUtils.h"
 #include "nsGlobalWindow.h"
+#include "mozilla/NullPrincipal.h"
 #include "mozilla/dom/Document.h"
 
 namespace mozilla {
@@ -38,9 +39,12 @@ already_AddRefed<nsDocShellLoadState> LocationBase::CheckURL(
     return nullptr;
   }
 
-  // Check to see if URI is allowed.
+  // Check to see if URI is allowed.  We're not going to worry about a
+  // window ID here because it's not 100% clear which window's id we
+  // would want, and we're throwing a content-visible exception
+  // anyway.
   nsresult rv = ssm->CheckLoadURIWithPrincipal(
-      &aSubjectPrincipal, aURI, nsIScriptSecurityManager::STANDARD);
+      &aSubjectPrincipal, aURI, nsIScriptSecurityManager::STANDARD, 0);
   if (NS_WARN_IF(NS_FAILED(rv))) {
     nsAutoCString spec;
     aURI->GetSpec(spec);
@@ -136,7 +140,7 @@ void LocationBase::SetURI(nsIURI* aURI, nsIPrincipal& aSubjectPrincipal,
 
     // Get the incumbent script's browsing context to set as source.
     nsCOMPtr<nsPIDOMWindowInner> sourceWindow =
-        do_QueryInterface(mozilla::dom::GetIncumbentGlobal());
+        nsContentUtils::CallerInnerWindow();
     RefPtr<BrowsingContext> accessingBC;
     if (sourceWindow) {
       accessingBC = sourceWindow->GetBrowsingContext();

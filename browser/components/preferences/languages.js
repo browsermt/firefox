@@ -7,10 +7,9 @@
 
 var { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 
-document.documentElement.addEventListener(
-  "dialoghelp",
-  window.top.openPrefsHelp
-);
+document
+  .getElementById("LanguagesDialog")
+  .addEventListener("dialoghelp", window.top.openPrefsHelp);
 
 Preferences.addAll([
   { id: "intl.accept_languages", type: "wstring" },
@@ -186,7 +185,7 @@ var gLanguagesDialog = {
     // result in overflow.
     await document.l10n.translateFragment(this._activeLanguages);
 
-    if (this._activeLanguages.childNodes.length > 0) {
+    if (this._activeLanguages.childNodes.length) {
       this._activeLanguages.ensureIndexIsVisible(selectedIndex);
       this._activeLanguages.selectedIndex = selectedIndex;
     }

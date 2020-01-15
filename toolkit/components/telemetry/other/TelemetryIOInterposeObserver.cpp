@@ -6,6 +6,7 @@
 
 #include "TelemetryIOInterposeObserver.h"
 #include "core/TelemetryCommon.h"
+#include "js/Array.h"  // JS::NewArrayObject
 
 namespace mozilla {
 namespace Telemetry {
@@ -75,7 +76,7 @@ void TelemetryIOInterposeObserver::Observe(Observation& aOb) {
   // Create a new entry or retrieve the existing one
   FileIOEntryType* entry = mFileStats.PutEntry(processedName);
   if (entry) {
-    FileStats& stats = entry->mData.mStats[mCurStage];
+    FileStats& stats = entry->GetModifiableData()->mStats[mCurStage];
     // Update the statistics
     stats.totalTime += (double)aOb.Duration().ToMilliseconds();
     switch (aOb.ObservedOperation()) {
@@ -105,7 +106,7 @@ bool TelemetryIOInterposeObserver::ReflectFileStats(FileIOEntryType* entry,
                                                     JS::Handle<JSObject*> obj) {
   JS::AutoValueArray<NUM_STAGES> stages(cx);
 
-  FileStatsByStage& statsByStage = entry->mData;
+  FileStatsByStage& statsByStage = *entry->GetModifiableData();
   for (int s = STAGE_STARTUP; s < NUM_STAGES; ++s) {
     FileStats& fileStats = statsByStage.mStats[s];
 
@@ -127,7 +128,7 @@ bool TelemetryIOInterposeObserver::ReflectFileStats(FileIOEntryType* entry,
     stats[5].setNumber(fileStats.stats);
 
     // Create jsStats as array of elements above
-    JS::RootedObject jsStats(cx, JS_NewArrayObject(cx, stats));
+    JS::RootedObject jsStats(cx, JS::NewArrayObject(cx, stats));
     if (!jsStats) {
       continue;
     }
@@ -135,7 +136,7 @@ bool TelemetryIOInterposeObserver::ReflectFileStats(FileIOEntryType* entry,
     stages[s].setObject(*jsStats);
   }
 
-  JS::Rooted<JSObject*> jsEntry(cx, JS_NewArrayObject(cx, stages));
+  JS::Rooted<JSObject*> jsEntry(cx, JS::NewArrayObject(cx, stages));
   if (!jsEntry) {
     return false;
   }

@@ -16,6 +16,7 @@
 #include "mozilla/gfx/Point.h"
 #include "mozilla/MozPromise.h"
 #include "mozilla/DataMutex.h"
+#include "mozilla/Maybe.h"
 #include "mozilla/webrender/webrender_ffi.h"
 #include "mozilla/UniquePtr.h"
 #include "mozilla/webrender/WebRenderTypes.h"
@@ -31,6 +32,9 @@ namespace mozilla {
 namespace gl {
 class GLContext;
 }  // namespace gl
+namespace layers {
+class SurfacePool;
+}  // namespace layers
 namespace wr {
 
 typedef MozPromise<MemoryReport, bool, true> MemoryReportPromise;
@@ -43,7 +47,7 @@ class RenderThread;
 /// process.
 class WebRenderThreadPool {
  public:
-  WebRenderThreadPool();
+  explicit WebRenderThreadPool(bool low_priority);
 
   ~WebRenderThreadPool();
 
@@ -207,13 +211,10 @@ class RenderThread final {
   void NotifyNotUsed(uint64_t aExternalImageId);
 
   /// Can only be called from the render thread.
-  void NofityForUse(uint64_t aExternalImageId);
-
-  /// Can only be called from the render thread.
   void UnregisterExternalImageDuringShutdown(uint64_t aExternalImageId);
 
   /// Can only be called from the render thread.
-  RenderTextureHost* GetRenderTexture(WrExternalImageId aExternalImageId);
+  RenderTextureHost* GetRenderTexture(ExternalImageId aExternalImageId);
 
   /// Can be called from any thread.
   bool IsDestroyed(wr::WindowId aWindowId);
@@ -225,11 +226,16 @@ class RenderThread final {
   void IncPendingFrameCount(wr::WindowId aWindowId, const VsyncId& aStartId,
                             const TimeStamp& aStartTime,
                             uint8_t aDocFrameCount);
-
+  /// Can be called from any thread.
+  void DecPendingFrameBuildCount(wr::WindowId aWindowId);
   void NotifySlowFrame(wr::WindowId aWindowId);
 
   /// Can be called from any thread.
   WebRenderThreadPool& ThreadPool() { return mThreadPool; }
+
+  /// Thread pool for low priority scene building
+  /// Can be called from any thread.
+  WebRenderThreadPool& ThreadPoolLP() { return mThreadPoolLP; }
 
   /// Returns the cache used to serialize shader programs to disk, if enabled.
   ///
@@ -247,8 +253,9 @@ class RenderThread final {
 
   /// Can only be called from the render thread.
   gl::GLContext* SharedGL();
-
   void ClearSharedGL();
+  RefPtr<layers::SurfacePool> SharedSurfacePool();
+  void ClearSharedSurfacePool();
 
   /// Can only be called from the render thread.
   void HandleDeviceReset(const char* aWhere, bool aNotify);
@@ -270,9 +277,13 @@ class RenderThread final {
 
   void WriteCollectedFramesForWindow(wr::WindowId aWindowId);
 
+  Maybe<layers::CollectedFrames> GetCollectedFramesForWindow(
+      wr::WindowId aWindowId);
+
  private:
   explicit RenderThread(base::Thread* aThread);
 
+  void HandlePrepareForUse();
   void DeferredRenderTextureHostDestroy();
   void ShutDownTask(layers::SynchronousTask* aTask);
   void InitDeviceTask();
@@ -285,6 +296,7 @@ class RenderThread final {
   base::Thread* const mThread;
 
   WebRenderThreadPool mThreadPool;
+  WebRenderThreadPool mThreadPoolLP;
 
   UniquePtr<WebRenderProgramCache> mProgramCache;
   UniquePtr<WebRenderShaders> mShaders;
@@ -292,6 +304,8 @@ class RenderThread final {
   // An optional shared GLContext to be used for all
   // windows.
   RefPtr<gl::GLContext> mSharedGL;
+
+  RefPtr<layers::SurfacePool> mSurfacePool;
 
   std::map<wr::WindowId, UniquePtr<RendererOGL>> mRenderers;
   std::map<wr::WindowId, UniquePtr<layers::WebRenderCompositionRecorder>>
@@ -306,14 +320,11 @@ class RenderThread final {
   };
 
   struct WindowInfo {
-    // PendingCount() >= RenderingCount() at all times.
     int64_t PendingCount() { return mPendingFrames.size(); }
-    int64_t RenderingCount() { return mIsRendering ? 1 : 0; }
-
     // If mIsRendering is true, mPendingFrames.front() is currently being
     // rendered.
     std::queue<PendingFrameInfo> mPendingFrames;
-    bool mIsRendering = false;
+    uint8_t mPendingFrameBuild = 0;
     bool mIsDestroyed = false;
     bool mHadSlowFrame = false;
   };
@@ -322,6 +333,10 @@ class RenderThread final {
 
   Mutex mRenderTextureMapLock;
   std::unordered_map<uint64_t, RefPtr<RenderTextureHost>> mRenderTextures;
+  // Hold RenderTextureHosts that are waiting for handling PrepareForUse().
+  // It is for ensuring that PrepareForUse() is called before
+  // RenderTextureHost::Lock().
+  std::list<RefPtr<RenderTextureHost>> mRenderTexturesPrepareForUse;
   // Used to remove all RenderTextureHost that are going to be removed by
   // a deferred callback and remove them right away without waiting for the
   // callback. On device reset we have to remove all GL related resources right

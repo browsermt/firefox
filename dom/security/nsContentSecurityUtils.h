@@ -9,17 +9,40 @@
 #ifndef nsContentSecurityUtils_h___
 #define nsContentSecurityUtils_h___
 
+class nsIChannel;
+class nsIHttpChannel;
+
 namespace mozilla {
 namespace dom {
 class Document;
 }  // namespace dom
 }  // namespace mozilla
 
+typedef mozilla::Pair<nsCString, mozilla::Maybe<nsString>>
+    FilenameTypeAndDetails;
+
 class nsContentSecurityUtils {
  public:
-#if defined(DEBUG) && !defined(ANDROID)
-  static void AssertAboutPageHasCSP(Document* aDocument);
+  static FilenameTypeAndDetails FilenameToFilenameType(
+      const nsString& fileName);
+  static bool IsEvalAllowed(JSContext* cx, bool aIsSystemPrincipal,
+                            const nsAString& aScript);
+  static void NotifyEvalUsage(bool aIsSystemPrincipal,
+                              NS_ConvertUTF8toUTF16& aFileNameA,
+                              uint64_t aWindowID, uint32_t aLineNumber,
+                              uint32_t aColumnNumber);
+
+  // Helper function to query the HTTP Channel of a potential
+  // multi-part channel. Mostly used for querying response headers
+  static nsresult GetHttpChannelFromPotentialMultiPart(
+      nsIChannel* aChannel, nsIHttpChannel** aHttpChannel);
+
+#if defined(DEBUG)
+  static void AssertAboutPageHasCSP(mozilla::dom::Document* aDocument);
 #endif
+
+  static bool ValidateScriptFilename(const char* aFilename,
+                                     bool aIsSystemRealm);
 };
 
 #endif /* nsContentSecurityUtils_h___ */

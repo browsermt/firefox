@@ -5,11 +5,12 @@
 # This module produces a JSON file that provides basic build info and
 # configuration metadata.
 
-from __future__ import absolute_import, print_function
+from __future__ import absolute_import, print_function, unicode_literals
 
+import json
 import os
 import re
-import json
+import six
 
 
 def build_dict(config, env=os.environ):
@@ -74,6 +75,7 @@ def build_dict(config, env=os.environ):
 
     d['debug'] = substs.get('MOZ_DEBUG') == '1'
     d['nightly_build'] = substs.get('NIGHTLY_BUILD') == '1'
+    d['early_beta_or_earlier'] = substs.get('EARLY_BETA_OR_EARLIER') == '1'
     d['release_or_beta'] = substs.get('RELEASE_OR_BETA') == '1'
     d['devedition'] = substs.get('MOZ_DEV_EDITION') == '1'
     d['pgo'] = substs.get('MOZ_PGO') == '1'
@@ -116,6 +118,10 @@ def build_dict(config, env=os.environ):
         if d['buildapp'] == 'mobile/android':
             if d['processor'] == 'x86':
                 return 'android-x86'
+            if d['processor'] == 'x86_64':
+                return 'android-x86_64'
+            if d['processor'] == 'aarch64':
+                return 'android-aarch64'
             return 'android-arm'
 
     def guess_buildtype():
@@ -145,7 +151,7 @@ def write_mozinfo(file, config, env=os.environ):
     and what keys are produced.
     """
     build_conf = build_dict(config, env)
-    if isinstance(file, basestring):
-        file = open(file, 'wb')
+    if isinstance(file, six.text_type):
+        file = open(file, 'wt')
 
     json.dump(build_conf, file, sort_keys=True, indent=4)

@@ -4,31 +4,29 @@ mod state;
 
 pub(crate) use self::backup::{Backup, BackupId};
 pub(crate) use self::backup_stack::MAX_BACKUP;
-pub(crate) use self::state::{
-    State,
-    Lifecycle,
-    MAX_FUTURES,
-};
+pub(crate) use self::state::{Lifecycle, State, MAX_FUTURES};
 
 use self::backup::Handoff;
 use self::backup_stack::BackupStack;
 
 use config::Config;
 use shutdown::ShutdownTrigger;
-use task::{Blocking, Queue, Task};
+use task::{Blocking, Task};
 use worker::{self, Worker, WorkerId};
 
 use futures::Poll;
 
 use std::cell::Cell;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::num::Wrapping;
-use std::sync::atomic::Ordering::{Acquire, AcqRel};
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering::{AcqRel, Acquire};
 use std::sync::{Arc, Weak};
 use std::thread;
 
+use crossbeam_deque::Injector;
 use crossbeam_utils::CachePadded;
-use rand;
 
 #[derive(Debug)]
 pub(crate) struct Pool {
@@ -45,12 +43,6 @@ pub(crate) struct Pool {
     // Stack tracking sleeping workers.
     sleep_stack: CachePadded<worker::Stack>,
 
-    // Number of workers that haven't reached the final state of shutdown
-    //
-    // This is only used to know when to single `shutdown_task` once the
-    // shutdown process has completed.
-    pub num_workers: AtomicUsize,
-
     // Worker state
     //
     // A worker is a thread that is processing the work queue and polling
@@ -63,7 +55,7 @@ pub(crate) struct Pool {
     //
     // Spawned tasks are pushed into this queue. Although worker threads have their own dedicated
     // task queues, they periodically steal tasks from this global queue, too.
-    pub queue: Arc<Queue>,
+    pub queue: Arc<Injector<Arc<Task>>>,
 
     // Completes the shutdown process when the `ThreadPool` and all `Worker`s get dropped.
     //
@@ -96,7 +88,7 @@ impl Pool {
         trigger: Weak<ShutdownTrigger>,
         max_blocking: usize,
         config: Config,
-        queue: Arc<Queue>,
+        queue: Arc<Injector<Arc<Task>>>,
     ) -> Pool {
         let pool_size = workers.len();
         let total_size = max_blocking + pool_size;
@@ -105,15 +97,15 @@ impl Pool {
         //
         // This is `backup + pool_size` because the core thread pool running the
         // workers is spawned from backup as well.
-        let backup = (0..total_size).map(|_| {
-            Backup::new()
-        }).collect::<Vec<_>>().into_boxed_slice();
+        let backup = (0..total_size)
+            .map(|_| Backup::new())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
 
         let backup_stack = BackupStack::new();
 
         for i in (0..backup.len()).rev() {
-            backup_stack.push(&backup, BackupId(i))
-                .unwrap();
+            backup_stack.push(&backup, BackupId(i)).unwrap();
         }
 
         // Initialize the blocking state
@@ -122,7 +114,6 @@ impl Pool {
         let ret = Pool {
             state: CachePadded::new(AtomicUsize::new(State::new().into())),
             sleep_stack: CachePadded::new(worker::Stack::new()),
-            num_workers: AtomicUsize::new(0),
             workers,
             queue,
             trigger,
@@ -180,8 +171,10 @@ impl Pool {
                 }
             }
 
-            let actual = self.state.compare_and_swap(
-                state.into(), next.into(), AcqRel).into();
+            let actual = self
+                .state
+                .compare_and_swap(state.into(), next.into(), AcqRel)
+                .into();
 
             if state == actual {
                 state = next;
@@ -305,15 +298,13 @@ impl Pool {
             }
         };
 
-        let need_spawn = self.backup[backup_id.0]
-            .worker_handoff(id.clone());
+        let need_spawn = self.backup[backup_id.0].worker_handoff(id.clone());
 
         if !need_spawn {
             return;
         }
 
         let trigger = match self.trigger.upgrade() {
-            // The pool is shutting down.
             None => {
                 // The pool is shutting down.
                 return;
@@ -362,8 +353,7 @@ impl Pool {
                 // available for future handoffs.
                 //
                 // This **must** happen before notifying the task.
-                let res = pool.backup_stack
-                    .push(&pool.backup, backup_id);
+                let res = pool.backup_stack.push(&pool.backup, backup_id);
 
                 if res.is_err() {
                     // The pool is being shutdown.
@@ -377,8 +367,7 @@ impl Pool {
                 debug_assert!(pool.backup[backup_id.0].is_running());
 
                 // Wait for a handoff
-                let handoff = pool.backup[backup_id.0]
-                    .wait_for_handoff(pool.config.keep_alive);
+                let handoff = pool.backup[backup_id.0].wait_for_handoff(pool.config.keep_alive);
 
                 match handoff {
                     Handoff::Worker(id) => {
@@ -414,7 +403,8 @@ impl Pool {
 
             debug_assert!(
                 worker_state.lifecycle() != Signaled,
-                "actual={:?}", worker_state.lifecycle(),
+                "actual={:?}",
+                worker_state.lifecycle(),
             );
 
             trace!("signal_work -- notify; idx={}", idx);
@@ -431,11 +421,7 @@ impl Pool {
     /// Uses a thread-local random number generator based on XorShift.
     pub fn rand_usize(&self) -> usize {
         thread_local! {
-            static RNG: Cell<Wrapping<u32>> = {
-                // The initial seed must be non-zero.
-                let init = rand::random::<u32>() | 1;
-                Cell::new(Wrapping(init))
-            }
+            static RNG: Cell<Wrapping<u32>> = Cell::new(Wrapping(prng_seed()));
         }
 
         RNG.with(|rng| {
@@ -459,3 +445,31 @@ impl PartialEq for Pool {
 
 unsafe impl Send for Pool {}
 unsafe impl Sync for Pool {}
+
+// Return a thread-specific, 32-bit, non-zero seed value suitable for a 32-bit
+// PRNG. This uses one libstd RandomState for a default hasher and hashes on
+// the current thread ID to obtain an unpredictable, collision resistant seed.
+fn prng_seed() -> u32 {
+    // This obtains a small number of random bytes from the host system (for
+    // example, on unix via getrandom(2)) in order to seed an unpredictable and
+    // HashDoS resistant 64-bit hash function (currently: `SipHasher13` with
+    // 128-bit state). We only need one of these, to make the seeds for all
+    // process threads different via hashed IDs, collision resistant, and
+    // unpredictable.
+    lazy_static! {
+        static ref RND_STATE: RandomState = RandomState::new();
+    }
+
+    // Hash the current thread ID to produce a u32 value
+    let mut hasher = RND_STATE.build_hasher();
+    thread::current().id().hash(&mut hasher);
+    let hash: u64 = hasher.finish();
+    let seed = (hash as u32) ^ ((hash >> 32) as u32);
+
+    // Ensure non-zero seed (Xorshift yields only zero's for that seed)
+    if seed == 0 {
+        0x9b4e_6d25 // misc bits, could be any non-zero
+    } else {
+        seed
+    }
+}

@@ -33,7 +33,6 @@
 #include "mozilla/Scoped.h"
 #include "mozilla/UniquePtr.h"
 #include "MainThreadUtils.h"
-#include "nsICrashReporter.h"
 
 #if defined(ANDROID) && defined(DEBUG)
 #  include <android/log.h>
@@ -627,11 +626,6 @@ inline bool LoggingEnabledFor(const char* aTopLevelProtocol) {
 #endif
 }
 
-enum class MessageDirection {
-  eSending,
-  eReceiving,
-};
-
 MOZ_NEVER_INLINE void LogMessageForProtocol(const char* aTopLevelProtocol,
                                             base::ProcessId aOtherPid,
                                             const char* aContextDescription,
@@ -880,6 +874,8 @@ class ManagedEndpoint {
   bool IsValid() const { return mId != 0; }
 
   Maybe<int32_t> ActorId() const { return IsValid() ? Some(mId) : Nothing(); }
+
+  bool operator==(const ManagedEndpoint& _o) const { return mId == _o.mId; }
 
  private:
   friend struct IPC::ParamTraits<ManagedEndpoint<PFooSide>>;

@@ -71,6 +71,11 @@ class ComputedStyle;
 using Matrix4x4Components = float[16];
 using StyleMatrix4x4Components = Matrix4x4Components;
 
+// This is sound because std::num::NonZeroUsize is repr(transparent).
+//
+// It is just the case that cbindgen doesn't understand it natively.
+using StyleNonZeroUsize = uintptr_t;
+
 struct Keyframe;
 struct PropertyStyleAnimationValuePair;
 
@@ -82,7 +87,6 @@ class SharedFontList;
 class StyleSheet;
 class WritingMode;
 class ServoElementSnapshotTable;
-enum class StyleContentType : uint8_t;
 
 template <typename T>
 struct StyleForgottenArcSlicePtr;
@@ -122,10 +126,17 @@ struct StyleBox {
     MOZ_DIAGNOSTIC_ASSERT(mRaw);
   }
 
-  StyleBox(const StyleBox& aOther) : StyleBox(MakeUnique<T>(*aOther)) {}
   ~StyleBox() {
     MOZ_DIAGNOSTIC_ASSERT(mRaw);
     delete mRaw;
+  }
+
+  StyleBox(const StyleBox& aOther) : StyleBox(MakeUnique<T>(*aOther)) {}
+
+  StyleBox& operator=(const StyleBox& aOther) const {
+    delete mRaw;
+    mRaw = MakeUnique<T>(*aOther).release();
+    return *this;
   }
 
   const T* operator->() const {
@@ -138,11 +149,19 @@ struct StyleBox {
     return *mRaw;
   }
 
-  bool operator==(const StyleBox<T>& aOther) const {
-    return *(*this) == *aOther;
+  T* operator->() {
+    MOZ_DIAGNOSTIC_ASSERT(mRaw);
+    return mRaw;
   }
 
-  bool operator!=(const StyleBox<T>& aOther) const { return *this != *aOther; }
+  T& operator*() {
+    MOZ_DIAGNOSTIC_ASSERT(mRaw);
+    return *mRaw;
+  }
+
+  bool operator==(const StyleBox& aOther) const { return *(*this) == *aOther; }
+
+  bool operator!=(const StyleBox& aOther) const { return *(*this) != *aOther; }
 
  private:
   T* mRaw;
@@ -180,5 +199,10 @@ using StyleMatrixTransformOperator =
 using StyleAtomicUsize = std::atomic<size_t>;
 
 }  // namespace mozilla
+
+#  ifndef HAVE_64BIT_BUILD
+static_assert(sizeof(void*) == 4, "");
+#    define SERVO_32_BITS 1
+#  endif
 
 #endif

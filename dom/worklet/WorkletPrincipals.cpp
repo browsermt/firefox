@@ -6,7 +6,7 @@
 
 #include "WorkletPrincipals.h"
 
-#include "mozilla/Assertions.h"
+#include "nsJSPrincipals.h"
 
 namespace mozilla {
 namespace dom {
@@ -20,7 +20,15 @@ WorkletPrincipals::~WorkletPrincipals() = default;
 
 bool WorkletPrincipals::write(JSContext* aCx,
                               JSStructuredCloneWriter* aWriter) {
-  MOZ_CRASH("WorkletPrincipals::write not implemented");
+  // This is a serialization of the NullPrincipal corresponding to the worklet
+  // environment settings object for the WorkletGlobalScope.
+  // https://drafts.css-houdini.org/worklets/#set-up-a-worklet-environment-settings-object
+  return nsJSPrincipals::WritePrincipalInfo(aWriter,
+                                            mWorkletImpl->PrincipalInfo());
+}
+
+bool WorkletPrincipals::isSystemOrAddonPrincipal() {
+  // Per Bug 1578623 rev a83797ed249c - Worklets are always NullPrincipal
   return false;
 }
 

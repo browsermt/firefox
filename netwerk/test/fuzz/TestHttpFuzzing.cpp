@@ -7,7 +7,6 @@
 #include "nsComponentManagerUtils.h"
 #include "nsContentUtils.h"
 #include "nsILoadInfo.h"
-#include "nsIPrincipal.h"
 #include "nsIProxiedProtocolHandler.h"
 #include "nsIOService.h"
 #include "nsProtocolProxyService.h"
@@ -19,73 +18,16 @@
 #include "RequestContextService.h"
 
 #include "FuzzingInterface.h"
+#include "FuzzingStreamListener.h"
+#include "FuzzyLayer.h"
 
 namespace mozilla {
 namespace net {
 
 // Target spec and optional proxy type to use, set by the respective
 // initialization function so we can cover all combinations.
-nsAutoCString spec;
-nsAutoCString proxyType;
-
-class FuzzingStreamListener final : public nsIStreamListener {
- public:
-  NS_DECL_ISUPPORTS
-  NS_DECL_NSIREQUESTOBSERVER
-  NS_DECL_NSISTREAMLISTENER
-
-  FuzzingStreamListener() = default;
-
-  void waitUntilDone() {
-    SpinEventLoopUntil([&]() { return mChannelDone; });
-  }
-
- private:
-  ~FuzzingStreamListener() = default;
-  bool mChannelDone = false;
-};
-
-NS_IMPL_ISUPPORTS(FuzzingStreamListener, nsIStreamListener, nsIRequestObserver)
-
-NS_IMETHODIMP
-FuzzingStreamListener::OnStartRequest(nsIRequest* aRequest) {
-  FUZZING_LOG(("FuzzingStreamListener::OnStartRequest"));
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-FuzzingStreamListener::OnDataAvailable(nsIRequest* aRequest,
-                                       nsIInputStream* aInputStream,
-                                       uint64_t aOffset, uint32_t aCount) {
-  FUZZING_LOG(("FuzzingStreamListener::OnDataAvailable"));
-  static uint32_t const kCopyChunkSize = 128 * 1024;
-  uint32_t toRead = std::min<uint32_t>(aCount, kCopyChunkSize);
-  nsCString data;
-
-  while (aCount) {
-    nsresult rv = NS_ReadInputStreamToString(aInputStream, data, toRead);
-    if (NS_FAILED(rv)) {
-      return rv;
-    }
-    aOffset += toRead;
-    aCount -= toRead;
-    toRead = std::min<uint32_t>(aCount, kCopyChunkSize);
-  }
-  return NS_OK;
-}
-
-NS_IMETHODIMP
-FuzzingStreamListener::OnStopRequest(nsIRequest* aRequest,
-                                     nsresult aStatusCode) {
-  FUZZING_LOG(("FuzzingStreamListener::OnStopRequest"));
-  mChannelDone = true;
-  return NS_OK;
-}
-
-// Forward declaration to the function in FuzzyLayer.cpp,
-// used to set the buffer to the global defined there.
-void setNetworkFuzzingBuffer(const uint8_t* data, size_t size);
-extern Atomic<bool> gFuzzingConnClosed;
+static nsAutoCString httpSpec;
+static nsAutoCString proxyType;
 
 static int FuzzingInitNetworkHttp(int* argc, char*** argv) {
   Preferences::SetBool("network.dns.native-is-localhost", true);
@@ -93,22 +35,21 @@ static int FuzzingInitNetworkHttp(int* argc, char*** argv) {
   Preferences::SetInt("network.http.speculative-parallel-limit", 0);
   Preferences::SetInt("network.http.spdy.default-concurrent", 1);
 
-  if (spec.IsEmpty()) {
-    spec = "http://127.0.0.1/";
+  if (httpSpec.IsEmpty()) {
+    httpSpec = "http://127.0.0.1/";
   }
 
   return 0;
 }
 
 static int FuzzingInitNetworkHttp2(int* argc, char*** argv) {
-  spec = "https://127.0.0.1/";
+  httpSpec = "https://127.0.0.1/";
   return FuzzingInitNetworkHttp(argc, argv);
 }
 
 static int FuzzingInitNetworkHttpProxyHttp2(int* argc, char*** argv) {
   // This is http over an https proxy
   proxyType = "https";
-
 
   return FuzzingInitNetworkHttp(argc, argv);
 }
@@ -136,15 +77,19 @@ static int FuzzingInitNetworkHttp2ProxyPlain(int* argc, char*** argv) {
 
 static int FuzzingRunNetworkHttp(const uint8_t* data, size_t size) {
   // Set the data to be processed
-  setNetworkFuzzingBuffer(data, size);
+  addNetworkFuzzingBuffer(data, size);
 
   nsWeakPtr channelRef;
+
+  nsCOMPtr<nsIRequestContextService> rcsvc =
+      mozilla::net::RequestContextService::GetOrCreate();
+  uint64_t rcID;
 
   {
     nsCOMPtr<nsIURI> url;
     nsresult rv;
 
-    if (NS_NewURI(getter_AddRefs(url), spec) != NS_OK) {
+    if (NS_NewURI(getter_AddRefs(url), httpSpec) != NS_OK) {
       MOZ_CRASH("Call to NS_NewURI failed.");
     }
 
@@ -247,15 +192,14 @@ static int FuzzingRunNetworkHttp(const uint8_t* data, size_t size) {
       MOZ_CRASH("SetRequestMethod on gHttpChannel failed.");
     }
 
-    nsCOMPtr<nsIRequestContextService> rcsvc =
-        mozilla::net::RequestContextService::GetOrCreate();
     nsCOMPtr<nsIRequestContext> rc;
     rv = rcsvc->NewRequestContext(getter_AddRefs(rc));
     if (NS_FAILED(rv)) {
       MOZ_CRASH("NewRequestContext failed.");
     }
+    rcID = rc->GetID();
 
-    rv = gHttpChannel->SetRequestContextID(rc->GetID());
+    rv = gHttpChannel->SetRequestContextID(rcID);
     if (NS_FAILED(rv)) {
       MOZ_CRASH("SetRequestContextID on gHttpChannel failed.");
     }
@@ -274,6 +218,15 @@ static int FuzzingRunNetworkHttp(const uint8_t* data, size_t size) {
     // Wait for StopRequest
     gStreamListener->waitUntilDone();
 
+    bool mainPingBack = false;
+
+    NS_DispatchBackgroundTask(NS_NewRunnableFunction("Dummy", [&]() {
+      NS_DispatchToMainThread(
+          NS_NewRunnableFunction("Dummy", [&]() { mainPingBack = true; }));
+    }));
+
+    SpinEventLoopUntil([&]() -> bool { return mainPingBack; });
+
     channelRef = do_GetWeakReference(gHttpChannel);
   }
 
@@ -284,9 +237,12 @@ static int FuzzingRunNetworkHttp(const uint8_t* data, size_t size) {
     return channel == nullptr;
   });
 
-  // Wait for the connection to indicate closed
-  SpinEventLoopUntil([&]() -> bool { return gFuzzingConnClosed; });
+  if (!signalNetworkFuzzingDone()) {
+    // Wait for the connection to indicate closed
+    SpinEventLoopUntil([&]() -> bool { return gFuzzingConnClosed; });
+  }
 
+  rcsvc->RemoveRequestContext(rcID);
   return 0;
 }
 
@@ -296,17 +252,17 @@ MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp, FuzzingRunNetworkHttp,
 MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp2, FuzzingRunNetworkHttp,
                           NetworkHttp2);
 
-MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp2ProxyHttp2, FuzzingRunNetworkHttp,
-                          NetworkHttp2ProxyHttp2);
+MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp2ProxyHttp2,
+                          FuzzingRunNetworkHttp, NetworkHttp2ProxyHttp2);
 
-MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttpProxyHttp2, FuzzingRunNetworkHttp,
-                          NetworkHttpProxyHttp2);
+MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttpProxyHttp2,
+                          FuzzingRunNetworkHttp, NetworkHttpProxyHttp2);
 
-MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttpProxyPlain, FuzzingRunNetworkHttp,
-                          NetworkHttpProxyPlain);
+MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttpProxyPlain,
+                          FuzzingRunNetworkHttp, NetworkHttpProxyPlain);
 
-MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp2ProxyPlain, FuzzingRunNetworkHttp,
-                          NetworkHttp2ProxyPlain);
+MOZ_FUZZING_INTERFACE_RAW(FuzzingInitNetworkHttp2ProxyPlain,
+                          FuzzingRunNetworkHttp, NetworkHttp2ProxyPlain);
 
 }  // namespace net
 }  // namespace mozilla

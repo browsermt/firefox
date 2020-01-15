@@ -16,6 +16,7 @@
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/TemplateLib.h"
 
+#include <algorithm>
 #include <string.h>
 
 #include "jsapi.h"
@@ -23,7 +24,6 @@
 #include "jsfriendapi.h"
 #include "jsnum.h"
 #include "jstypes.h"
-#include "jsutil.h"
 
 #include "builtin/Array.h"
 #include "builtin/BigInt.h"
@@ -40,9 +40,11 @@
 #include "js/PropertyDescriptor.h"  // JS::FromPropertyDescriptor
 #include "js/PropertySpec.h"        // JSPropertySpec
 #include "js/Proxy.h"
+#include "js/Result.h"
 #include "js/UbiNode.h"
 #include "js/UniquePtr.h"
 #include "js/Wrapper.h"
+#include "util/Memory.h"
 #include "util/Text.h"
 #include "util/Windows.h"
 #include "vm/ArgumentsObject.h"
@@ -534,7 +536,7 @@ bool js::SetIntegrityLevel(JSContext* cx, HandleObject obj,
         return false;
       }
     }
-    Reverse(shapes.begin(), shapes.end());
+    std::reverse(shapes.begin(), shapes.end());
 
     for (Shape* shape : shapes) {
       Rooted<StackShape> child(cx, StackShape(shape));
@@ -1548,7 +1550,7 @@ static bool InitializePropertiesFromCompatibleNativeObject(
         return false;
       }
     }
-    Reverse(shapes.begin(), shapes.end());
+    std::reverse(shapes.begin(), shapes.end());
 
     for (Shape* shapeToClone : shapes) {
       Rooted<StackShape> child(cx, StackShape(shapeToClone));
@@ -1752,7 +1754,7 @@ void JSObject::fixDictionaryShapeAfterSwap() {
   // Dictionary shapes can point back to their containing objects, so after
   // swapping the guts of those objects fix the pointers up.
   if (isNative() && as<NativeObject>().inDictionaryMode()) {
-    as<NativeObject>().shape()->listp = as<NativeObject>().shapePtr();
+    shape()->dictNext.setObject(this);
   }
 }
 
@@ -2562,9 +2564,14 @@ bool js::LookupOwnPropertyPure(JSContext* cx, JSObject* obj, jsid id,
     }
 
     if (obj->is<TypedArrayObject>()) {
-      uint64_t index;
-      if (IsTypedArrayIndex(id, &index)) {
-        if (index < obj->as<TypedArrayObject>().length()) {
+      JS::Result<mozilla::Maybe<uint64_t>> index = IsTypedArrayIndex(cx, id);
+      if (index.isErr()) {
+        cx->recoverFromOutOfMemory();
+        return false;
+      }
+
+      if (index.inspect()) {
+        if (index.inspect().value() < obj->as<TypedArrayObject>().length()) {
           propp->setDenseOrTypedArrayElement();
         } else {
           propp->setNotFound();
@@ -2944,23 +2951,6 @@ bool js::DefineDataProperty(JSContext* cx, HandleObject obj, HandleId id,
   return NativeDefineProperty(cx, obj.as<NativeObject>(), id, desc, result);
 }
 
-bool js::DefineDataProperty(JSContext* cx, HandleObject obj, PropertyName* name,
-                            HandleValue value, unsigned attrs,
-                            ObjectOpResult& result) {
-  RootedId id(cx, NameToId(name));
-  return DefineDataProperty(cx, obj, id, value, attrs, result);
-}
-
-bool js::DefineDataElement(JSContext* cx, HandleObject obj, uint32_t index,
-                           HandleValue value, unsigned attrs,
-                           ObjectOpResult& result) {
-  RootedId id(cx);
-  if (!IndexToId(cx, index, &id)) {
-    return false;
-  }
-  return DefineDataProperty(cx, obj, id, value, attrs, result);
-}
-
 bool js::DefineAccessorProperty(JSContext* cx, HandleObject obj, HandleId id,
                                 HandleObject getter, HandleObject setter,
                                 unsigned attrs) {
@@ -3058,6 +3048,11 @@ extern bool PropertySpecNameToId(JSContext* cx, JSPropertySpec::Name name,
 // JSPropertySpec list, but omit the definition if the preference is off.
 JS_FRIEND_API bool js::ShouldIgnorePropertyDefinition(JSContext* cx,
                                                       JSProtoKey key, jsid id) {
+  if (!cx->realm()->creationOptions().getToSourceEnabled()) {
+    return id == NameToId(cx->names().toSource) ||
+           id == NameToId(cx->names().uneval);
+  }
+
   return false;
 }
 
@@ -3335,12 +3330,57 @@ JSObject* js::ToObjectSlow(JSContext* cx, JS::HandleValue val,
   MOZ_ASSERT(!val.isObject());
 
   if (val.isNullOrUndefined()) {
-    if (reportScanStack) {
-      ReportIsNullOrUndefined(cx, JSDVG_SEARCH_STACK, val);
+    ReportIsNullOrUndefinedForPropertyAccess(cx, val, reportScanStack);
+    return nullptr;
+  }
+
+  return PrimitiveToObject(cx, val);
+}
+
+JSObject* js::ToObjectSlowForPropertyAccess(JSContext* cx, JS::HandleValue val,
+                                            HandleId key,
+                                            bool reportScanStack) {
+  MOZ_ASSERT(!val.isMagic());
+  MOZ_ASSERT(!val.isObject());
+
+  if (val.isNullOrUndefined()) {
+    ReportIsNullOrUndefinedForPropertyAccess(cx, val, key, reportScanStack);
+    return nullptr;
+  }
+
+  return PrimitiveToObject(cx, val);
+}
+
+JSObject* js::ToObjectSlowForPropertyAccess(JSContext* cx, JS::HandleValue val,
+                                            HandlePropertyName key,
+                                            bool reportScanStack) {
+  MOZ_ASSERT(!val.isMagic());
+  MOZ_ASSERT(!val.isObject());
+
+  if (val.isNullOrUndefined()) {
+    RootedId keyId(cx, NameToId(key));
+    ReportIsNullOrUndefinedForPropertyAccess(cx, val, keyId, reportScanStack);
+    return nullptr;
+  }
+
+  return PrimitiveToObject(cx, val);
+}
+
+JSObject* js::ToObjectSlowForPropertyAccess(JSContext* cx, JS::HandleValue val,
+                                            HandleValue keyValue,
+                                            bool reportScanStack) {
+  MOZ_ASSERT(!val.isMagic());
+  MOZ_ASSERT(!val.isObject());
+
+  if (val.isNullOrUndefined()) {
+    RootedId key(cx);
+    if (keyValue.isPrimitive()) {
+      if (!ValueToId<CanGC>(cx, keyValue, &key)) {
+        return nullptr;
+      }
+      ReportIsNullOrUndefinedForPropertyAccess(cx, val, key, reportScanStack);
     } else {
-      JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr,
-                                JSMSG_CANT_CONVERT_TO,
-                                val.isNull() ? "null" : "undefined", "object");
+      ReportIsNullOrUndefinedForPropertyAccess(cx, val, reportScanStack);
     }
     return nullptr;
   }
@@ -3408,9 +3448,9 @@ void GetObjectSlotNameFunctor::operator()(JS::CallbackTracer* trc, char* buf,
         if (false) {
           ;
         }
-#define TEST_SLOT_MATCHES_PROTOTYPE(name, init, clasp) \
-  else if ((JSProto_##name) == slot) {                 \
-    slotname = js_##name##_str;                        \
+#define TEST_SLOT_MATCHES_PROTOTYPE(name, clasp) \
+  else if ((JSProto_##name) == slot) {           \
+    slotname = js_##name##_str;                  \
   }
         JS_FOR_EACH_PROTOTYPE(TEST_SLOT_MATCHES_PROTOTYPE)
 #undef TEST_SLOT_MATCHES_PROTOTYPE
@@ -4065,9 +4105,7 @@ void JSObject::traceChildren(JSTracer* trc) {
       // but the compiler has no way of knowing this.
       const uint32_t nslots = nobj->slotSpan();
       for (uint32_t i = 0; i < nslots; ++i) {
-        TraceManuallyBarrieredEdge(
-            trc, nobj->getSlotRef(i).unsafeUnbarrieredForTracing(),
-            "object slot");
+        TraceEdge(trc, &nobj->getSlotRef(i), "object slot");
         ++index;
       }
       MOZ_ASSERT(nslots == nobj->slotSpan());

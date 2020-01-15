@@ -17,11 +17,11 @@ job-defaults:
     target:
         by-test-platform:
             android-hw.*-aarch64.*/.*:
-                index: project.mobile.fenix.v2.performance-test.latest.aarch64
-                name: target.apk
+                index: project.mobile.fenix.v2.performance-test.latest
+                name: build/arm64-v8a/geckoNightly/target.apk
             default:
-                index: project.mobile.fenix.v2.performance-test.latest.arm
-                name: target.apk
+                index: project.mobile.fenix.v2.performance-test.latest
+                name: build/armeabi-v7a/geckoNightly/target.apk
     e10s: true
     virtualization: hardware
     mozharness:
@@ -175,9 +175,10 @@ raptor-tp6m-1-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-1
+            - --test=raptor-tp6m-1-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -189,9 +190,10 @@ raptor-tp6m-2-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-2
+            - --test=raptor-tp6m-2-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -203,9 +205,10 @@ raptor-tp6m-3-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-3
+            - --test=raptor-tp6m-3-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -217,9 +220,10 @@ raptor-tp6m-4-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-4
+            - --test=raptor-tp6m-4-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -231,9 +235,10 @@ raptor-tp6m-5-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-5
+            - --test=raptor-tp6m-5-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -245,9 +250,10 @@ raptor-tp6m-6-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-6
+            - --test=raptor-tp6m-6-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -259,9 +265,10 @@ raptor-tp6m-7-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-7
+            - --test=raptor-tp6m-7-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -273,9 +280,10 @@ raptor-tp6m-8-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-8
+            - --test=raptor-tp6m-8-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -287,9 +295,10 @@ raptor-tp6m-9-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-9
+            - --test=raptor-tp6m-9-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -301,9 +310,10 @@ raptor-tp6m-10-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-10
+            - --test=raptor-tp6m-10-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -315,9 +325,10 @@ raptor-tp6m-11-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-11
+            - --test=raptor-tp6m-11-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -329,9 +340,10 @@ raptor-tp6m-12-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-12
+            - --test=raptor-tp6m-12-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -343,9 +355,10 @@ raptor-tp6m-13-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-13
+            - --test=raptor-tp6m-13-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -357,9 +370,10 @@ raptor-tp6m-14-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-14
+            - --test=raptor-tp6m-14-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -371,9 +385,10 @@ raptor-tp6m-15-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-15
+            - --test=raptor-tp6m-15-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -385,9 +400,10 @@ raptor-tp6m-16-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-16
+            - --test=raptor-tp6m-16-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -399,9 +415,10 @@ raptor-tp6m-17-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-17
+            - --test=raptor-tp6m-17-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -413,9 +430,10 @@ raptor-tp6m-18-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-18
+            - --test=raptor-tp6m-18-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -427,9 +445,10 @@ raptor-tp6m-19-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-19
+            - --test=raptor-tp6m-19-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -441,9 +460,10 @@ raptor-tp6m-20-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-20
+            - --test=raptor-tp6m-20-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -455,9 +475,10 @@ raptor-tp6m-21-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-21
+            - --test=raptor-tp6m-21-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -469,9 +490,10 @@ raptor-tp6m-22-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-22
+            - --test=raptor-tp6m-22-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -483,9 +505,10 @@ raptor-tp6m-23-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-23
+            - --test=raptor-tp6m-23-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -497,9 +520,10 @@ raptor-tp6m-24-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-24
+            - --test=raptor-tp6m-24-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -511,9 +535,10 @@ raptor-tp6m-25-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-25
+            - --test=raptor-tp6m-25-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -525,9 +550,10 @@ raptor-tp6m-26-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-26
+            - --test=raptor-tp6m-26-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -539,9 +565,25 @@ raptor-tp6m-27-fenix-cold:
     run-on-projects: []
     e10s: true
     tier: 2
+    max-run-time: 2400
     mozharness:
         extra-options:
-            - --test=raptor-tp6m-cold-27
+            - --test=raptor-tp6m-27-cold
+            - --app=fenix
+            - --binary-path=org.mozilla.fenix.performancetest
+            - --activity=org.mozilla.fenix.IntentReceiverActivity
+
+raptor-tp6m-28-fenix-cold:
+    description: "Raptor tp6m-28 cold page-load on Fenix"
+    try-name: raptor-tp6m-28-fenix-cold
+    treeherder-symbol: Rap-fenix(tp6m-c-28)
+    run-on-projects: []
+    e10s: true
+    tier: 2
+    max-run-time: 2400
+    mozharness:
+        extra-options:
+            - --test=raptor-tp6m-28-cold
             - --app=fenix
             - --binary-path=org.mozilla.fenix.performancetest
             - --activity=org.mozilla.fenix.IntentReceiverActivity
@@ -669,3 +711,35 @@ raptor-youtube-playback-fenix:
             # Bug 1558456 - Stop tracking youtube-playback-test on motoG5 for >1080p cases
             # - --test-url-params is dynamically added from setup_raptor transform depending
             # on platform and project
+
+raptor-speedometer-fenix:
+    description: "Raptor Speedometer on Fenix"
+    try-name: raptor-speedometer-fenix
+    treeherder-symbol: Rap-fenix(sp)
+    run-on-projects: []
+    tier: 2
+    e10s: true
+    max-run-time: 2000
+    mozharness:
+        extra-options:
+            - --test=raptor-speedometer
+            - --app=fenix
+            - --binary-path=org.mozilla.fenix.performancetest
+            - --activity=org.mozilla.fenix.IntentReceiverActivity
+
+raptor-speedometer-fenix-power:
+    description: "Raptor Speedometer power on Fenix"
+    try-name: raptor-speedometer-fenix-power
+    treeherder-symbol: Rap-fenix(sp-p)
+    run-on-projects: []
+    tier: 2
+    e10s: true
+    max-run-time: 2000
+    mozharness:
+        extra-options:
+            - --test=raptor-speedometer
+            - --app=fenix
+            - --binary-path=org.mozilla.fenix.performancetest
+            - --power-test
+            - --host HOST_IP
+            - --activity=org.mozilla.fenix.IntentReceiverActivity

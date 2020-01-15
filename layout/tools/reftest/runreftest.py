@@ -5,6 +5,9 @@
 """
 Runs the reftest test harness.
 """
+from __future__ import print_function
+
+from __future__ import absolute_import, print_function
 
 import copy
 import json
@@ -39,15 +42,17 @@ import mozrunner
 from manifestparser import TestManifest, filters as mpf
 from mozrunner.utils import get_stack_fixer_function, test_environment
 from mozscreenshot import printstatus, dump_screen
+from six import reraise, string_types
+from six.moves import range
 
 try:
     from marionette_driver.addons import Addons
     from marionette_harness import Marionette
-except ImportError, e:
+except ImportError as e:  # noqa
     # Defer ImportError until attempt to use Marionette
-    def reraise(*args, **kwargs):
-        raise(e)
-    Marionette = reraise
+    def reraise_(*args, **kwargs):
+        raise(e)  # noqa
+    Marionette = reraise_
 
 from output import OutputHandler, ReftestFormatter
 import reftestcommandline
@@ -79,6 +84,18 @@ summaryLines = [('Successful', [('pass', 'pass'), ('loadOnly', 'load only')]),
                                     ('slow', 'slow')])]
 
 
+if sys.version_info[0] == 3:
+    def reraise_(tp_, value_, tb_=None):
+        if value_ is None:
+            value_ = tp_()
+        if value_.__traceback__ is not tb_:
+            raise value_.with_traceback(tb_)
+        raise value_
+
+else:
+    exec("def reraise_(tp_, value_, tb_=None):\n    raise tp_, value_, tb_\n")
+
+
 def update_mozinfo():
     """walk up directories to find mozinfo.json update the info"""
     # TODO: This should go in a more generic place, e.g. mozinfo
@@ -108,12 +125,12 @@ class ReftestThread(threading.Thread):
 
     def run(self):
         with printLock:
-            print "Starting thread with", self.cmdargs
+            print("Starting thread with", self.cmdargs)
             sys.stdout.flush()
         process = subprocess.Popen(self.cmdargs, stdout=subprocess.PIPE)
         for chunk in self.chunkForMergedOutput(process.stdout):
             with printLock:
-                print chunk,
+                print(chunk, end=' ')
                 sys.stdout.flush()
         self.retcode = process.wait()
 
@@ -213,17 +230,20 @@ class ReftestResolver(object):
         manifests = {}
         for testPath in tests:
             for manifest, filter_str in self.findManifest(suite, testPath):
-                manifest = self.manifestURL(options, manifest)
                 if manifest not in manifests:
                     manifests[manifest] = set()
                 manifests[manifest].add(filter_str)
-
+        manifests_by_url = {}
         for key in manifests.iterkeys():
+            id = os.path.relpath(os.path.abspath(os.path.dirname(key)), options.topsrcdir)
+            id = id.replace(os.sep, posixpath.sep)
             if None in manifests[key]:
-                manifests[key] = None
+                manifests[key] = (None, id)
             else:
-                manifests[key] = "|".join(list(manifests[key]))
-        return manifests
+                manifests[key] = ("|".join(list(manifests[key])), id)
+            url = self.manifestURL(options, key)
+            manifests_by_url[url] = manifests[key]
+        return manifests_by_url
 
 
 class RefTest(object):
@@ -351,6 +371,8 @@ class RefTest(object):
             prefs['reftest.repeat'] = options.repeat
         if options.runUntilFailure:
             prefs['reftest.runUntilFailure'] = True
+            if not options.repeat:
+                prefs['reftest.repeat'] = 30
         if options.verify:
             prefs['reftest.verify'] = True
         if options.cleanupCrashes:
@@ -359,6 +381,8 @@ class RefTest(object):
         prefs['reftest.logLevel'] = options.log_tbpl_level or 'info'
         prefs['reftest.suite'] = options.suite
         prefs['gfx.font_rendering.ahem_antialias_none'] = True
+        # Disable dark scrollbars because it's semi-transparent.
+        prefs['widget.disable-dark-scrollbar'] = True
 
         # Set tests to run or manifests to parse.
         if tests:
@@ -405,7 +429,7 @@ class RefTest(object):
         for v in options.extraPrefs:
             thispref = v.split('=')
             if len(thispref) < 2:
-                print "Error: syntax error in --setpref=" + v
+                print("Error: syntax error in --setpref=" + v)
                 sys.exit(1)
             prefs[thispref[0]] = thispref[1].strip()
 
@@ -427,7 +451,7 @@ class RefTest(object):
         browserEnv = self.environment(
             xrePath=options.xrePath, debugger=options.debugger)
         browserEnv["XPCOM_DEBUG_BREAK"] = "stack"
-        if hasattr(options, "topsrcdir"):
+        if options.topsrcdir:
             browserEnv["MOZ_DEVELOPER_REPO_DIR"] = options.topsrcdir
         if hasattr(options, "topobjdir"):
             browserEnv["MOZ_DEVELOPER_OBJ_DIR"] = options.topobjdir
@@ -448,7 +472,7 @@ class RefTest(object):
         for v in options.environment:
             ix = v.find("=")
             if ix <= 0:
-                print "Error: syntax error in --setenv=" + v
+                print("Error: syntax error in --setenv=" + v)
                 return None
             browserEnv[v[:ix]] = v[ix + 1:]
 
@@ -461,6 +485,10 @@ class RefTest(object):
             browserEnv["MOZ_ACCELERATED"] = "1"
         else:
             browserEnv["MOZ_WEBRENDER"] = "0"
+
+        if options.headless:
+            browserEnv["MOZ_HEADLESS"] = "1"
+
         return browserEnv
 
     def cleanup(self, profileDir):
@@ -497,7 +525,7 @@ class RefTest(object):
 
         def step2():
             stepOptions = copy.deepcopy(options)
-            for i in xrange(VERIFY_REPEAT_SINGLE_BROWSER):
+            for i in range(VERIFY_REPEAT_SINGLE_BROWSER):
                 result = self.runTests(tests, stepOptions)
                 if result != 0:
                     break
@@ -514,7 +542,7 @@ class RefTest(object):
         def step4():
             stepOptions = copy.deepcopy(options)
             stepOptions.environment.append("MOZ_CHAOSMODE=3")
-            for i in xrange(VERIFY_REPEAT_SINGLE_BROWSER):
+            for i in range(VERIFY_REPEAT_SINGLE_BROWSER):
                 result = self.runTests(tests, stepOptions)
                 if result != 0:
                     break
@@ -579,7 +607,7 @@ class RefTest(object):
 
         manifests = self.resolver.resolveManifests(options, tests)
         if options.filter:
-            manifests[""] = options.filter
+            manifests[""] = (options.filter, None)
 
         if not getattr(options, 'runTestsInParallel', False):
             return self.runSerialTests(manifests, options, cmdargs)
@@ -656,11 +684,13 @@ class RefTest(object):
                     threadMatches.group('total') if threadMatches else 0)
                 summaryObj['total'] += amount
 
-        print 'REFTEST INFO | Result summary:'
+        print('REFTEST INFO | Result summary:')
         for (summaryObj, (text, categories)) in zip(summaryObjects, summaryLines):
             details = ', '.join(["%d %s" % (summaryObj[attribute], description) for (
                 attribute, description) in categories])
-            print 'REFTEST INFO | ' + text + ': ' + str(summaryObj['total']) + ' (' + details + ')'
+            print(
+                'REFTEST INFO | ' + text + ': ' + str(summaryObj['total']) + ' (' + details + ')'
+                )
 
         return int(any(t.retcode != 0 for t in threads))
 
@@ -843,7 +873,7 @@ class RefTest(object):
 
         if marionette_exception is not None:
             exc, value, tb = marionette_exception
-            raise exc, value, tb
+            raise reraise(exc, value, tb)
 
         self.log.info("Process mode: {}".format('e10s' if options.e10s else 'non-e10s'))
         return status
@@ -887,7 +917,7 @@ class RefTest(object):
         def run(**kwargs):
             if kwargs.get('tests'):
                 self.lastTest = kwargs['tests'][-1]['identifier']
-                if not isinstance(self.lastTest, basestring):
+                if not isinstance(self.lastTest, string_types):
                     self.lastTest = ' '.join(self.lastTest)
 
             status = self.runApp(

@@ -14,6 +14,7 @@
 #include "mozilla/dom/ClientState.h"
 #include "mozilla/dom/Console.h"
 #include "mozilla/dom/CSPEvalChecker.h"
+#include "mozilla/dom/DOMMozPromiseRequestHolder.h"
 #include "mozilla/dom/DebuggerNotification.h"
 #include "mozilla/dom/DedicatedWorkerGlobalScopeBinding.h"
 #include "mozilla/dom/Fetch.h"
@@ -40,7 +41,6 @@
 #include "nsServiceManagerUtils.h"
 
 #include "mozilla/dom/Document.h"
-#include "nsIServiceWorkerManager.h"
 #include "nsIScriptError.h"
 
 #ifdef ANDROID
@@ -386,6 +386,10 @@ void WorkerGlobalScope::GetOrigin(nsAString& aOrigin) const {
   aOrigin = mWorkerPrivate->Origin();
 }
 
+bool WorkerGlobalScope::CrossOriginIsolated() const {
+  return mWorkerPrivate->CrossOriginIsolated();
+}
+
 void WorkerGlobalScope::Atob(const nsAString& aAtob, nsAString& aOutput,
                              ErrorResult& aRv) const {
   mWorkerPrivate->AssertIsOnWorkerThread();
@@ -576,6 +580,10 @@ WorkerGlobalScope::GetOrCreateServiceWorkerRegistration(
   return ref.forget();
 }
 
+uint64_t WorkerGlobalScope::WindowID() const {
+  return mWorkerPrivate->WindowID();
+}
+
 void WorkerGlobalScope::FirstPartyStorageAccessGranted() {
   // Reset the IndexedDB factory.
   mIndexedDB = nullptr;
@@ -614,7 +622,10 @@ bool DedicatedWorkerGlobalScope::WrapGlobalObject(
   xpc::SetPrefableRealmOptions(options);
 
   return DedicatedWorkerGlobalScope_Binding::Wrap(
-      aCx, this, this, options, GetWorkerPrincipal(), true, aReflector);
+      aCx, this, this, options,
+      new WorkerPrincipal(usesSystemPrincipal ||
+                          mWorkerPrivate->UsesAddonOrExpandedAddonPrincipal()),
+      true, aReflector);
 }
 
 void DedicatedWorkerGlobalScope::PostMessage(
@@ -650,7 +661,10 @@ bool SharedWorkerGlobalScope::WrapGlobalObject(
   mWorkerPrivate->CopyJSRealmOptions(options);
 
   return SharedWorkerGlobalScope_Binding::Wrap(
-      aCx, this, this, options, GetWorkerPrincipal(), true, aReflector);
+      aCx, this, this, options,
+      new WorkerPrincipal(mWorkerPrivate->UsesSystemPrincipal() ||
+                          mWorkerPrivate->UsesAddonOrExpandedAddonPrincipal()),
+      true, aReflector);
 }
 
 void SharedWorkerGlobalScope::Close() {
@@ -690,7 +704,10 @@ bool ServiceWorkerGlobalScope::WrapGlobalObject(
   mWorkerPrivate->CopyJSRealmOptions(options);
 
   return ServiceWorkerGlobalScope_Binding::Wrap(
-      aCx, this, this, options, GetWorkerPrincipal(), true, aReflector);
+      aCx, this, this, options,
+      new WorkerPrincipal(mWorkerPrivate->UsesSystemPrincipal() ||
+                          mWorkerPrivate->UsesAddonOrExpandedAddonPrincipal()),
+      true, aReflector);
 }
 
 already_AddRefed<Clients> ServiceWorkerGlobalScope::GetClients() {
@@ -860,16 +877,17 @@ already_AddRefed<Promise> ServiceWorkerGlobalScope::SkipWaiting(
   }
 
   if (ServiceWorkerParentInterceptEnabled()) {
-    mWorkerPrivate->SetServiceWorkerSkipWaitingFlag()->Then(
-        GetCurrentThreadSerialEventTarget(), __func__,
-        [promise](bool aOk) {
-          Unused << NS_WARN_IF(!aOk);
-          promise->MaybeResolveWithUndefined();
-        },
-        [promise](nsresult aRv) {
-          MOZ_ASSERT(NS_FAILED(aRv));
-          promise->MaybeResolveWithUndefined();
-        });
+    using MozPromiseType = decltype(
+        mWorkerPrivate->SetServiceWorkerSkipWaitingFlag())::element_type;
+    auto holder = MakeRefPtr<DOMMozPromiseRequestHolder<MozPromiseType>>(this);
+
+    mWorkerPrivate->SetServiceWorkerSkipWaitingFlag()
+        ->Then(GetCurrentThreadSerialEventTarget(), __func__,
+               [holder, promise](const MozPromiseType::ResolveOrRejectValue&) {
+                 holder->Complete();
+                 promise->MaybeResolveWithUndefined();
+               })
+        ->Track(*holder);
 
     return promise.forget();
   }
@@ -941,7 +959,10 @@ bool WorkerDebuggerGlobalScope::WrapGlobalObject(
   mWorkerPrivate->CopyJSRealmOptions(options);
 
   return WorkerDebuggerGlobalScope_Binding::Wrap(
-      aCx, this, this, options, GetWorkerPrincipal(), true, aReflector);
+      aCx, this, this, options,
+      new WorkerPrincipal(mWorkerPrivate->UsesSystemPrincipal() ||
+                          mWorkerPrivate->UsesAddonOrExpandedAddonPrincipal()),
+      true, aReflector);
 }
 
 void WorkerDebuggerGlobalScope::GetGlobal(JSContext* aCx,

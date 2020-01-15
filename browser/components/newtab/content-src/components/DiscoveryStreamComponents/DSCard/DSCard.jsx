@@ -12,6 +12,7 @@ import { DSContextFooter } from "../DSContextFooter/DSContextFooter.jsx";
 
 // Default Meta that displays CTA as link if cta_variant in layout is set as "link"
 export const DefaultMeta = ({
+  display_engagement_labels,
   source,
   title,
   excerpt,
@@ -35,12 +36,14 @@ export const DefaultMeta = ({
     <DSContextFooter
       context_type={context_type}
       context={context}
+      display_engagement_labels={display_engagement_labels}
       engagement={engagement}
     />
   </div>
 );
 
 export const CTAButtonMeta = ({
+  display_engagement_labels,
   source,
   title,
   excerpt,
@@ -64,6 +67,7 @@ export const CTAButtonMeta = ({
       <DSContextFooter
         context_type={context_type}
         context={context}
+        display_engagement_labels={display_engagement_labels}
         engagement={engagement}
       />
     )}
@@ -76,7 +80,7 @@ export class DSCard extends React.PureComponent {
 
     this.onLinkClick = this.onLinkClick.bind(this);
     this.setPlaceholderRef = element => {
-      this.placholderElement = element;
+      this.placeholderElement = element;
     };
 
     this.state = {
@@ -91,6 +95,7 @@ export class DSCard extends React.PureComponent {
           event: "CLICK",
           source: this.props.type.toUpperCase(),
           action_position: this.props.pos,
+          value: { card_type: this.props.flightId ? "spoc" : "organic" },
         })
       );
 
@@ -117,8 +122,8 @@ export class DSCard extends React.PureComponent {
       const entry = entries.find(e => e.isIntersecting);
 
       if (entry) {
-        if (this.placholderElement) {
-          this.observer.unobserve(this.placholderElement);
+        if (this.placeholderElement) {
+          this.observer.unobserve(this.placeholderElement);
         }
 
         // Stop observing since element has been seen
@@ -131,8 +136,8 @@ export class DSCard extends React.PureComponent {
 
   onIdleCallback() {
     if (!this.state.isSeen) {
-      if (this.observer && this.placholderElement) {
-        this.observer.unobserve(this.placholderElement);
+      if (this.observer && this.placeholderElement) {
+        this.observer.unobserve(this.placeholderElement);
       }
       this.setState({
         isSeen: true,
@@ -141,19 +146,22 @@ export class DSCard extends React.PureComponent {
   }
 
   componentDidMount() {
-    this.idleCallbackId = window.requestIdleCallback(
+    this.idleCallbackId = this.props.windowObj.requestIdleCallback(
       this.onIdleCallback.bind(this)
     );
-    if (this.placholderElement) {
+    if (this.placeholderElement) {
       this.observer = new IntersectionObserver(this.onSeen.bind(this));
-      this.observer.observe(this.placholderElement);
+      this.observer.observe(this.placeholderElement);
     }
   }
 
   componentWillUnmount() {
     // Remove observer on unmount
-    if (this.observer && this.placholderElement) {
-      this.observer.unobserve(this.placholderElement);
+    if (this.observer && this.placeholderElement) {
+      this.observer.unobserve(this.placeholderElement);
+    }
+    if (this.idleCallbackId) {
+      this.props.windowObj.cancelIdleCallback(this.idleCallbackId);
     }
   }
 
@@ -182,6 +190,7 @@ export class DSCard extends React.PureComponent {
           </div>
           {isButtonCTA ? (
             <CTAButtonMeta
+              display_engagement_labels={this.props.display_engagement_labels}
               source={this.props.source}
               title={this.props.title}
               excerpt={this.props.excerpt}
@@ -193,6 +202,7 @@ export class DSCard extends React.PureComponent {
             />
           ) : (
             <DefaultMeta
+              display_engagement_labels={this.props.display_engagement_labels}
               source={this.props.source}
               title={this.props.title}
               excerpt={this.props.excerpt}
@@ -204,7 +214,7 @@ export class DSCard extends React.PureComponent {
             />
           )}
           <ImpressionStats
-            campaignId={this.props.campaignId}
+            flightId={this.props.flightId}
             rows={[
               {
                 id: this.props.id,
@@ -229,9 +239,15 @@ export class DSCard extends React.PureComponent {
           pocket_id={this.props.pocket_id}
           shim={this.props.shim}
           bookmarkGuid={this.props.bookmarkGuid}
+          flightId={this.props.flightId}
         />
       </div>
     );
   }
 }
+
+DSCard.defaultProps = {
+  windowObj: window, // Added to support unit tests
+};
+
 export const PlaceholderDSCard = props => <DSCard placeholder={true} />;

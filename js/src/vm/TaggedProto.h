@@ -24,8 +24,6 @@ class TaggedProto {
   TaggedProto(const TaggedProto& other) : proto(other.proto) {}
   explicit TaggedProto(JSObject* proto) : proto(proto) {}
 
-  uintptr_t toWord() const { return uintptr_t(proto); }
-
   bool isDynamic() const { return proto == LazyProto; }
   bool isObject() const {
     /* Skip nullptr and LazyProto. */
@@ -51,8 +49,10 @@ class TaggedProto {
   HashNumber hashCode() const;
 
   void trace(JSTracer* trc) {
+    // It's not safe to trace unbarriered pointers except as part of root
+    // marking.
     if (isObject()) {
-      TraceManuallyBarrieredEdge(trc, &proto, "TaggedProto");
+      TraceRoot(trc, &proto, "TaggedProto");
     }
   }
 

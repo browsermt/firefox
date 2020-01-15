@@ -55,7 +55,7 @@ add_task(async function task() {
   info("console panel open again.");
 
   // Fire an XHR request.
-  await ContentTask.spawn(gBrowser.selectedBrowser, null, function() {
+  await SpecialPowers.spawn(gBrowser.selectedBrowser, [], function() {
     content.wrappedJSObject.testXhrGet();
   });
 
@@ -74,6 +74,13 @@ add_task(async function task() {
   info(
     "Wait for the event timings request which do not necessarily update the UI as timings may be undefined for cached requests"
   );
+
+  // Hide the header panel to get the eventTimings
+  const { windowRequire } = netmonitor.panelWin;
+  const Actions = windowRequire("devtools/client/netmonitor/src/actions/index");
+  info("Closing the header panel");
+  await netmonitor.panelWin.store.dispatch(Actions.toggleNetworkDetails());
+
   await waitForRequestData(netmonitor.panelWin.store, ["eventTimings"], 1);
 });
 
@@ -83,7 +90,7 @@ const {
 
 function waitForRequestData(store, fields, i) {
   return waitUntil(() => {
-    const item = getSortedRequests(store.getState()).get(i);
+    const item = getSortedRequests(store.getState())[i];
     if (!item) {
       return false;
     }

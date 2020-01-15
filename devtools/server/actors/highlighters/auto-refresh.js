@@ -7,7 +7,9 @@
 const { Cu } = require("chrome");
 const EventEmitter = require("devtools/shared/event-emitter");
 const ReplayInspector = require("devtools/server/actors/replay/inspector");
-const { isNodeValid } = require("./utils/markup");
+const {
+  isNodeValid,
+} = require("devtools/server/actors/highlighters/utils/markup");
 const {
   getAdjustedQuads,
   getWindowDimensions,
@@ -85,6 +87,7 @@ function AutoRefreshHighlighter(highlighterEnv) {
 
 AutoRefreshHighlighter.prototype = {
   _ignoreZoom: false,
+  _ignoreScroll: false,
 
   /**
    * Window corresponding to the current highlighterEnv. When replaying, this
@@ -194,7 +197,7 @@ AutoRefreshHighlighter.prototype = {
         this.contentWindow,
         this.currentNode,
         region,
-        { ignoreZoom: this._ignoreZoom }
+        { ignoreScroll: this._ignoreScroll, ignoreZoom: this._ignoreZoom }
       );
     }
   },

@@ -60,6 +60,7 @@ import {
   type SourceActorId,
   type SourceActorOuterState,
 } from "./source-actors";
+import { getThreads, getMainThread } from "./threads";
 import type {
   Source,
   SourceId,
@@ -69,6 +70,7 @@ import type {
   SourceWithContent,
   ThreadId,
   MappedLocation,
+  BreakpointPosition,
   BreakpointPositions,
 } from "../types";
 import type { PendingSelectedLocation, Selector } from "./types";
@@ -97,9 +99,10 @@ export type SourceBase = {|
   +extensionName: ?string,
   +isExtension: boolean,
   +isWasm: boolean,
+  +isOriginal: boolean,
 |};
 
-type SourceResource = Resource<{
+export type SourceResource = Resource<{
   ...SourceBase,
   content: AsyncValue<SourceContent> | null,
 }>;
@@ -129,7 +132,7 @@ export type SourcesState = {
   pendingSelectedLocation?: PendingSelectedLocation,
   selectedLocation: ?SourceLocation,
   projectDirectoryRoot: string,
-  chromeAndExtenstionsEnabled: boolean,
+  chromeAndExtensionsEnabled: boolean,
   focusedItem: ?FocusItem,
 };
 
@@ -146,7 +149,7 @@ export function initialSourcesState(): SourcesState {
     selectedLocation: undefined,
     pendingSelectedLocation: prefs.pendingSelectedLocation,
     projectDirectoryRoot: prefs.projectDirectoryRoot,
-    chromeAndExtenstionsEnabled: prefs.chromeAndExtenstionsEnabled,
+    chromeAndExtensionsEnabled: prefs.chromeAndExtensionsEnabled,
     focusedItem: null,
   };
 }
@@ -203,6 +206,7 @@ function update(
       location = {
         url: action.url,
         line: action.line,
+        column: action.column,
       };
 
       prefs.pendingSelectedLocation = location;
@@ -259,7 +263,7 @@ function update(
   return state;
 }
 
-const resourceAsSourceBase = memoizeResourceShallow(
+export const resourceAsSourceBase = memoizeResourceShallow(
   ({ content, ...source }: SourceResource): SourceBase => source
 );
 
@@ -373,33 +377,33 @@ function removeSourceActors(state: SourcesState, action) {
 function updateProjectDirectoryRoot(state: SourcesState, root: string) {
   prefs.projectDirectoryRoot = root;
 
-  return updateRootRelativeValues({
-    ...state,
-    projectDirectoryRoot: root,
-  });
+  return updateRootRelativeValues(state, undefined, root);
 }
 
 function updateRootRelativeValues(
   state: SourcesState,
-  sources?: $ReadOnlyArray<Source>
+  sources?: $ReadOnlyArray<Source>,
+  projectDirectoryRoot?: string = state.projectDirectoryRoot
 ) {
-  const ids = sources
-    ? sources.map(source => source.id)
+  const wrappedIdsOrIds: $ReadOnlyArray<Source> | Array<string> = sources
+    ? sources
     : getResourceIds(state.sources);
 
   state = {
     ...state,
+    projectDirectoryRoot,
   };
 
-  const relativeURLUpdates = [];
-  for (const id of ids) {
+  const relativeURLUpdates = wrappedIdsOrIds.map(wrappedIdOrId => {
+    const id =
+      typeof wrappedIdOrId === "string" ? wrappedIdOrId : wrappedIdOrId.id;
     const source = getResource(state.sources, id);
 
-    relativeURLUpdates.push({
+    return {
       id,
       relativeUrl: getRelativeUrl(source, state.projectDirectoryRoot),
-    });
-  }
+    };
+  });
 
   state.sources = updateResources(state.sources, relativeURLUpdates);
 
@@ -794,6 +798,7 @@ const queryAllDisplayedSources: ReduceQuery<
     projectDirectoryRoot: string,
     chromeAndExtensionsEnabled: boolean,
     debuggeeIsWebExtension: boolean,
+    threadActors: Array<ThreadId>,
   |},
   Array<SourceId>
 > = makeReduceQuery(
@@ -805,11 +810,12 @@ const queryAllDisplayedSources: ReduceQuery<
         projectDirectoryRoot,
         chromeAndExtensionsEnabled,
         debuggeeIsWebExtension,
+        threadActors,
       }
     ) => ({
       id: resource.id,
       displayed:
-        underRoot(resource, projectDirectoryRoot) &&
+        underRoot(resource, projectDirectoryRoot, threadActors) &&
         (!resource.isExtension ||
           chromeAndExtensionsEnabled ||
           debuggeeIsWebExtension),
@@ -829,8 +835,12 @@ function getAllDisplayedSources(
 ): Array<SourceId> {
   return queryAllDisplayedSources(state.sources.sources, {
     projectDirectoryRoot: state.sources.projectDirectoryRoot,
-    chromeAndExtensionsEnabled: state.sources.chromeAndExtenstionsEnabled,
+    chromeAndExtensionsEnabled: state.sources.chromeAndExtensionsEnabled,
     debuggeeIsWebExtension: state.threads.isWebExtension,
+    threadActors: [
+      getMainThread(state).actor,
+      ...getThreads(state).map(t => t.actor),
+    ],
   });
 }
 
@@ -967,13 +977,21 @@ export function hasBreakpointPositions(
   return !!getBreakpointPositionsForSource(state, sourceId);
 }
 
+export function getBreakpointPositionsForLine(
+  state: OuterState,
+  sourceId: string,
+  line: number
+): ?Array<BreakpointPosition> {
+  const positions = getBreakpointPositionsForSource(state, sourceId);
+  return positions && positions[line];
+}
+
 export function hasBreakpointPositionsForLine(
   state: OuterState,
   sourceId: string,
   line: number
 ): boolean {
-  const positions = getBreakpointPositionsForSource(state, sourceId);
-  return !!(positions && positions[line]);
+  return !!getBreakpointPositionsForLine(state, sourceId, line);
 }
 
 export function getBreakpointPositionsForLocation(

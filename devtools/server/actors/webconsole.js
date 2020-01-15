@@ -14,11 +14,10 @@ const { DebuggerServer } = require("devtools/server/debugger-server");
 const { ActorPool } = require("devtools/server/actors/common");
 const { ThreadActor } = require("devtools/server/actors/thread");
 const { ObjectActor } = require("devtools/server/actors/object");
-const {
-  LongStringActor,
-} = require("devtools/server/actors/object/long-string");
+const { LongStringActor } = require("devtools/server/actors/string");
 const {
   createValueGrip,
+  isArray,
   stringIsLong,
 } = require("devtools/server/actors/object/utils");
 const DevToolsUtils = require("devtools/shared/DevToolsUtils");
@@ -189,7 +188,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     this.conn.addActorPool(this._actorPool);
 
     this._prefs = {};
-    this.dbg = this.parentActor.makeDebugger();
+    this.dbg = this.parentActor.dbg;
 
     this._gripDepth = 0;
     this._evalCounter = 0;
@@ -406,10 +405,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
 
   typeName: "console",
 
-  get globalDebugObject() {
-    return this.parentActor.threadActor.globalDebugObject;
-  },
-
   grip: function() {
     return { actor: this.actorID };
   },
@@ -469,7 +464,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     this._webConsoleCommandsCache = null;
     this._lastConsoleInputEvaluation = null;
     this._evalWindow = null;
-    this.dbg.disable();
     this.dbg = null;
     this.conn = null;
   },
@@ -556,6 +550,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     const actor = new ObjectActor(
       object,
       {
+        thread: this.parentActor.threadActor,
         getGripDepth: () => this._gripDepth,
         incrementGripDepth: () => this._gripDepth++,
         decrementGripDepth: () => this._gripDepth--,
@@ -566,7 +561,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
             Error("sources not yet implemented")
           ),
         createEnvironmentActor: env => this.createEnvironmentActor(env),
-        getGlobalDebugObject: () => this.globalDebugObject,
       },
       this.conn
     );
@@ -585,9 +579,9 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
    *         A LongStringActor object that wraps the given string.
    */
   longStringGrip: function(string, pool) {
-    const actor = new LongStringActor(string);
+    const actor = new LongStringActor(this.conn, string);
     pool.addActor(actor);
-    return actor.grip();
+    return actor.form();
   },
 
   /**
@@ -663,7 +657,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
    * @return object
    *        The response object which holds the startedListeners array.
    */
-  /* eslint-disable complexity */
+  // eslint-disable-next-line complexity
   startListeners: async function(listeners) {
     const startedListeners = [];
     const window = !this.parentActor.isRootActor ? this.window : null;
@@ -785,9 +779,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
                 this
               );
             }
-            this.consoleProgressListener.startMonitor(
-              this.consoleProgressListener.MONITOR_FILE_ACTIVITY
-            );
+            this.consoleProgressListener.startMonitor();
             startedListeners.push(event);
           }
           break;
@@ -836,7 +828,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
       traits: this.traits,
     };
   },
-  /* eslint-enable complexity */
 
   /**
    * Handler for the "stopListeners" request.
@@ -895,9 +886,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
           break;
         case "FileActivity":
           if (this.consoleProgressListener) {
-            this.consoleProgressListener.stopMonitor(
-              this.consoleProgressListener.MONITOR_FILE_ACTIVITY
-            );
+            this.consoleProgressListener.stopMonitor();
             this.consoleProgressListener = null;
           }
           stoppedListeners.push(event);
@@ -1147,7 +1136,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
    * @return object
    *         The evaluation response packet.
    */
-  /* eslint-disable complexity */
+  // eslint-disable-next-line complexity
   evaluateJS: function(request) {
     const input = request.text;
     const timestamp = Date.now();
@@ -1157,6 +1146,7 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
       url: request.url,
       selectedNodeActor: request.selectedNodeActor,
       selectedObjectActor: request.selectedObjectActor,
+      eager: request.eager,
     };
     const { mapped } = request;
 
@@ -1295,7 +1285,14 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     let resultGrip;
     if (!awaitResult) {
       try {
-        resultGrip = this.createValueGrip(result);
+        const objectActor = this.parentActor.threadActor.getThreadLifetimeObject(
+          result
+        );
+        if (objectActor) {
+          resultGrip = this.parentActor.threadActor.createValueGrip(result);
+        } else {
+          resultGrip = this.createValueGrip(result);
+        }
       } catch (e) {
         errorMessage = e;
       }
@@ -1328,7 +1325,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
       notes: errorNotes,
     };
   },
-  /* eslint-enable complexity */
 
   /**
    * The Autocomplete request handler.
@@ -1351,11 +1347,11 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     cursor,
     frameActorId,
     selectedNodeActor,
-    authorizedEvaluations
+    authorizedEvaluations,
+    expressionVars = []
   ) {
     let dbgObject = null;
     let environment = null;
-    let hadDebuggee = false;
     let matches = [];
     let matchProp;
     let isElementAccess;
@@ -1388,8 +1384,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
           );
         }
       } else {
-        // This is the general case (non-paused debugger)
-        hadDebuggee = this.dbg.hasDebuggee(this.evalWindow);
         dbgObject = this.dbg.addDebuggee(this.evalWindow);
       }
 
@@ -1401,11 +1395,8 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
         webconsoleActor: this,
         selectedNodeActor,
         authorizedEvaluations,
+        expressionVars,
       });
-
-      if (!hadDebuggee && dbgObject) {
-        this.dbg.removeDebuggee(this.evalWindow);
-      }
 
       if (result === null) {
         return {
@@ -1691,8 +1682,9 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
         lineNumber: s.line,
         columnNumber: s.column,
         functionName: s.functionDisplayName,
+        asyncCause: s.asyncCause ? s.asyncCause : undefined,
       });
-      s = s.parent;
+      s = s.parent || s.asyncParent;
     }
     return stack;
   },
@@ -1912,6 +1904,39 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
   },
 
   /**
+   * Send a message to all the netmonitor message managers, and resolve when
+   * all of them replied with the expected responseName message.
+   *
+   * @param {String} messageName
+   *        Name of the message to send via the netmonitor message managers.
+   * @param {String} responseName
+   *        Name of the message that should be received when the message has
+   *        been processed by the netmonitor instance.
+   * @param {Object} args
+   *        argument object passed with the initial message.
+   */
+  async _sendMessageToNetmonitors(messageName, responseName, args) {
+    if (!this.netmonitors) {
+      return;
+    }
+    await Promise.all(
+      this.netmonitors.map(({ messageManager }) => {
+        const onResponseReceived = new Promise(resolve => {
+          messageManager.addMessageListener(
+            responseName,
+            function onResponse() {
+              messageManager.removeMessageListener(responseName, onResponse);
+              resolve();
+            }
+          );
+        });
+        messageManager.sendAsyncMessage(messageName, args);
+        return onResponseReceived;
+      })
+    );
+  },
+
+  /**
    * Block a request based on certain filtering options.
    *
    * Currently, an exact URL match is the only supported filter type.
@@ -1922,13 +1947,11 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
    *   An object containing a `url` key with a URL to block.
    */
   async blockRequest(filter) {
-    if (this.netmonitors) {
-      for (const { messageManager } of this.netmonitors) {
-        messageManager.sendAsyncMessage("debug:block-request", {
-          filter,
-        });
-      }
-    }
+    await this._sendMessageToNetmonitors(
+      "debug:block-request",
+      "debug:block-request:response",
+      { filter }
+    );
 
     return {};
   },
@@ -1944,13 +1967,29 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
    *   An object containing a `url` key with a URL to unblock.
    */
   async unblockRequest(filter) {
-    if (this.netmonitors) {
-      for (const { messageManager } of this.netmonitors) {
-        messageManager.sendAsyncMessage("debug:unblock-request", {
-          filter,
-        });
-      }
-    }
+    await this._sendMessageToNetmonitors(
+      "debug:unblock-request",
+      "debug:unblock-request:response",
+      { filter }
+    );
+
+    return {};
+  },
+
+  /**
+   * Sets the list of blocked request URLs as provided by the netmonitor frontend
+   *
+   * This match will be a (String).includes match, not an exact URL match
+   *
+   * @param object filter
+   *   An object containing a `url` key with a URL to unblock.
+   */
+  async setBlockedUrls(urls) {
+    await this._sendMessageToNetmonitors(
+      "debug:set-blocked-urls",
+      "debug:set-blocked-urls:response",
+      { urls }
+    );
 
     return {};
   },
@@ -1987,7 +2026,6 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
     const result = WebConsoleUtils.cloneObject(message);
 
     result.workerType = WebConsoleUtils.getWorkerType(result) || "none";
-
     result.sourceId = this.getActorIdForInternalSourceId(result.sourceId);
 
     delete result.wrappedJSObject;
@@ -2013,10 +2051,92 @@ const WebConsoleActor = ActorClassWithSpec(webconsoleSpec, {
       return this.createValueGrip(string);
     });
 
+    if (result.level === "table") {
+      const tableItems = this._getConsoleTableMessageItems(result);
+      if (tableItems) {
+        result.arguments[0].ownProperties = tableItems;
+        result.arguments[0].preview = null;
+      }
+
+      // Only return the 2 first params.
+      result.arguments = result.arguments.slice(0, 2);
+    }
+
     result.category = message.category || "webdev";
     result.innerWindowID = message.innerID;
 
     return result;
+  },
+
+  /**
+   * Return the properties needed to display the appropriate table for a given
+   * console.table call.
+   * This function does a little more than creating an ObjectActor for the first
+   * parameter of the message. When layout out the console table in the output, we want
+   * to be able to look into sub-properties so the table can have a different layout (
+   * for arrays of arrays, objects with objects properties, arrays of objects, …).
+   * So here we need to retrieve the properties of the first parameter, and also all the
+   * sub-properties we might need.
+   *
+   * @param {Object} result: The console.table message.
+   * @returns {Object} An object containing the properties of the first argument of the
+   *                   console.table call.
+   */
+  _getConsoleTableMessageItems: function(result) {
+    if (
+      !result ||
+      !Array.isArray(result.arguments) ||
+      result.arguments.length == 0
+    ) {
+      return null;
+    }
+
+    const [tableItemGrip] = result.arguments;
+    const dataType = tableItemGrip.class;
+    const needEntries = ["Map", "WeakMap", "Set", "WeakSet"].includes(dataType);
+    const ignoreNonIndexedProperties = isArray(tableItemGrip);
+
+    const tableItemActor = this.getActorByID(tableItemGrip.actor);
+    if (!tableItemActor) {
+      return null;
+    }
+
+    // Retrieve the properties (or entries for Set/Map) of the console table first arg.
+    const iterator = needEntries
+      ? tableItemActor.enumEntries()
+      : tableItemActor.enumProperties({
+          ignoreNonIndexedProperties,
+        });
+    const { ownProperties } = iterator.all();
+
+    // The iterator returns a descriptor for each property, wherein the value could be
+    // in one of those sub-property.
+    const descriptorKeys = ["safeGetterValues", "getterValue", "value"];
+
+    Object.values(ownProperties).forEach(desc => {
+      if (typeof desc !== "undefined") {
+        descriptorKeys.forEach(key => {
+          if (desc && desc.hasOwnProperty(key)) {
+            const grip = desc[key];
+
+            // We need to load sub-properties as well to render the table in a nice way.
+            const actor = grip && this.getActorByID(grip.actor);
+            if (actor) {
+              const res = actor
+                .enumProperties({
+                  ignoreNonIndexedProperties: isArray(grip),
+                })
+                .all();
+              if (res && res.ownProperties) {
+                desc[key].ownProperties = res.ownProperties;
+              }
+            }
+          }
+        });
+      }
+    });
+
+    return ownProperties;
   },
 
   /**

@@ -15,6 +15,7 @@
 #include "nsContentUtils.h"
 #include "nsCycleCollector.h"
 #include "jsfriendapi.h"
+#include "js/Array.h"  // JS::IsArrayObject
 #include "js/CharacterEncoding.h"
 #include "js/ContextOptions.h"
 #include "js/SavedFrameAPI.h"
@@ -24,6 +25,7 @@
 #include "mozilla/LoadContext.h"
 #include "mozilla/Preferences.h"
 #include "nsJSEnvironment.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/ResultExtensions.h"
 #include "mozilla/URLPreloader.h"
@@ -38,7 +40,6 @@
 #include "nsICycleCollectorListener.h"
 #include "nsIException.h"
 #include "nsIScriptError.h"
-#include "nsISimpleEnumerator.h"
 #include "nsPIDOMWindow.h"
 #include "nsGlobalWindow.h"
 #include "nsScriptError.h"
@@ -341,38 +342,27 @@ nsXPCComponents_Classes::NewEnumerate(nsIXPConnectWrappedNative* wrapper,
     return NS_ERROR_UNEXPECTED;
   }
 
-  nsCOMPtr<nsISimpleEnumerator> e;
-  if (NS_FAILED(compMgr->EnumerateContractIDs(getter_AddRefs(e))) || !e) {
+  nsTArray<nsCString> contractIDs;
+  if (NS_FAILED(compMgr->GetContractIDs(contractIDs))) {
     return NS_ERROR_UNEXPECTED;
   }
 
-  bool hasMore;
-  nsCOMPtr<nsISupports> isup;
-  while (NS_SUCCEEDED(e->HasMoreElements(&hasMore)) && hasMore &&
-         NS_SUCCEEDED(e->GetNext(getter_AddRefs(isup))) && isup) {
-    nsCOMPtr<nsISupportsCString> holder(do_QueryInterface(isup));
-    if (!holder) {
-      continue;
+  for (const auto& name : contractIDs) {
+    RootedString idstr(cx, JS_NewStringCopyN(cx, name.get(), name.Length()));
+    if (!idstr) {
+      *_retval = false;
+      return NS_OK;
     }
 
-    nsAutoCString name;
-    if (NS_SUCCEEDED(holder->GetData(name))) {
-      RootedString idstr(cx, JS_NewStringCopyN(cx, name.get(), name.Length()));
-      if (!idstr) {
-        *_retval = false;
-        return NS_OK;
-      }
+    RootedId id(cx);
+    if (!JS_StringToId(cx, idstr, &id)) {
+      *_retval = false;
+      return NS_OK;
+    }
 
-      RootedId id(cx);
-      if (!JS_StringToId(cx, idstr, &id)) {
-        *_retval = false;
-        return NS_OK;
-      }
-
-      if (!properties.append(id)) {
-        *_retval = false;
-        return NS_OK;
-      }
+    if (!properties.append(id)) {
+      *_retval = false;
+      return NS_OK;
     }
   }
 
@@ -880,8 +870,9 @@ struct MOZ_STACK_CLASS ExceptionArgParser {
       return true;
     }
 
-    return NS_SUCCEEDED(xpc->WrapJS(
-        cx, &v.toObject(), NS_GET_IID(nsIStackFrame), getter_AddRefs(eStack)));
+    RootedObject stackObj(cx, &v.toObject());
+    return NS_SUCCEEDED(xpc->WrapJS(cx, stackObj, NS_GET_IID(nsIStackFrame),
+                                    getter_AddRefs(eStack)));
   }
 
   bool parseData(HandleValue v) {
@@ -891,8 +882,9 @@ struct MOZ_STACK_CLASS ExceptionArgParser {
       return true;
     }
 
-    return NS_SUCCEEDED(xpc->WrapJS(cx, &v.toObject(), NS_GET_IID(nsISupports),
-                                    getter_AddRefs(eData)));
+    RootedObject obj(cx, &v.toObject());
+    return NS_SUCCEEDED(
+        xpc->WrapJS(cx, obj, NS_GET_IID(nsISupports), getter_AddRefs(eData)));
   }
 
   bool parseOptionsObject(HandleObject obj) {
@@ -1458,8 +1450,9 @@ nsXPCComponents_Utils::ReportError(HandleValue error, HandleValue stack,
 NS_IMETHODIMP
 nsXPCComponents_Utils::EvalInSandbox(
     const nsAString& source, HandleValue sandboxVal, HandleValue version,
-    const nsACString& filenameArg, int32_t lineNumber, JSContext* cx,
-    uint8_t optionalArgc, MutableHandleValue retval) {
+    const nsACString& filenameArg, int32_t lineNumber,
+    bool enforceFilenameRestrictions, JSContext* cx, uint8_t optionalArgc,
+    MutableHandleValue retval) {
   RootedObject sandbox(cx);
   if (!JS_ValueToObject(cx, sandboxVal, &sandbox) || !sandbox) {
     return NS_ERROR_INVALID_ARG;
@@ -1482,8 +1475,11 @@ nsXPCComponents_Utils::EvalInSandbox(
       lineNo = frame->GetLineNumber(cx);
     }
   }
+  enforceFilenameRestrictions =
+      (optionalArgc >= 4) ? enforceFilenameRestrictions : true;
 
-  return xpc::EvalInSandbox(cx, sandbox, source, filename, lineNo, retval);
+  return xpc::EvalInSandbox(cx, sandbox, source, filename, lineNo,
+                            enforceFilenameRestrictions, retval);
 }
 
 NS_IMETHODIMP
@@ -1587,7 +1583,7 @@ nsXPCComponents_Utils::ImportGlobalProperties(HandleValue aPropertyList,
 
   RootedObject propertyList(cx, &aPropertyList.toObject());
   bool isArray;
-  if (NS_WARN_IF(!JS_IsArrayObject(cx, propertyList, &isArray))) {
+  if (NS_WARN_IF(!JS::IsArrayObject(cx, propertyList, &isArray))) {
     return NS_ERROR_FAILURE;
   }
   if (NS_WARN_IF(!isArray)) {
@@ -1744,6 +1740,46 @@ nsXPCComponents_Utils::GetJSTestingFunctions(JSContext* cx,
     return NS_ERROR_XPC_JAVASCRIPT_ERROR;
   }
   retval.setObject(*obj);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsXPCComponents_Utils::GetFunctionSourceLocation(HandleValue funcValue,
+                                                 JSContext* cx,
+                                                 MutableHandleValue retval) {
+  NS_ENSURE_TRUE(funcValue.isObject(), NS_ERROR_INVALID_ARG);
+
+  nsAutoString filename;
+  uint32_t lineNumber;
+  {
+    RootedObject funcObj(cx, UncheckedUnwrap(&funcValue.toObject()));
+    JSAutoRealm ar(cx, funcObj);
+
+    Rooted<JSFunction*> func(cx, JS_GetObjectFunction(funcObj));
+    NS_ENSURE_TRUE(func, NS_ERROR_INVALID_ARG);
+
+    RootedScript script(cx, JS_GetFunctionScript(cx, func));
+    NS_ENSURE_TRUE(func, NS_ERROR_FAILURE);
+
+    AppendUTF8toUTF16(nsDependentCString(JS_GetScriptFilename(script)),
+                      filename);
+    lineNumber = JS_GetScriptBaseLineNumber(cx, script) + 1;
+  }
+
+  RootedObject res(cx, JS_NewPlainObject(cx));
+  NS_ENSURE_TRUE(res, NS_ERROR_OUT_OF_MEMORY);
+
+  RootedValue filenameVal(cx);
+  if (!xpc::NonVoidStringToJsval(cx, filename, &filenameVal) ||
+      !JS_DefineProperty(cx, res, "filename", filenameVal, JSPROP_ENUMERATE)) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
+
+  if (!JS_DefineProperty(cx, res, "lineNumber", lineNumber, JSPROP_ENUMERATE)) {
+    return NS_ERROR_OUT_OF_MEMORY;
+  }
+
+  retval.setObject(*res);
   return NS_OK;
 }
 
@@ -2036,9 +2072,10 @@ nsXPCComponents_Utils::Dispatch(HandleValue runnableArg, HandleValue scope,
     return NS_ERROR_INVALID_ARG;
   }
 
+  RootedObject runnableObj(cx, &runnable.toObject());
   nsCOMPtr<nsIRunnable> run;
   nsresult rv = nsXPConnect::XPConnect()->WrapJS(
-      cx, &runnable.toObject(), NS_GET_IID(nsIRunnable), getter_AddRefs(run));
+      cx, runnableObj, NS_GET_IID(nsIRunnable), getter_AddRefs(run));
   NS_ENSURE_SUCCESS(rv, rv);
   MOZ_ASSERT(run);
 
@@ -2107,7 +2144,7 @@ nsXPCComponents_Utils::BlockScriptForGlobal(HandleValue globalArg,
   RootedObject global(cx, UncheckedUnwrap(&globalArg.toObject(),
                                           /* stopAtWindowProxy = */ false));
   NS_ENSURE_TRUE(JS_IsGlobalObject(global), NS_ERROR_INVALID_ARG);
-  if (nsContentUtils::IsSystemPrincipal(xpc::GetObjectPrincipal(global))) {
+  if (xpc::GetObjectPrincipal(global)->IsSystemPrincipal()) {
     JS_ReportErrorASCII(cx, "Script may not be disabled for system globals");
     return NS_ERROR_FAILURE;
   }
@@ -2122,7 +2159,7 @@ nsXPCComponents_Utils::UnblockScriptForGlobal(HandleValue globalArg,
   RootedObject global(cx, UncheckedUnwrap(&globalArg.toObject(),
                                           /* stopAtWindowProxy = */ false));
   NS_ENSURE_TRUE(JS_IsGlobalObject(global), NS_ERROR_INVALID_ARG);
-  if (nsContentUtils::IsSystemPrincipal(xpc::GetObjectPrincipal(global))) {
+  if (xpc::GetObjectPrincipal(global)->IsSystemPrincipal()) {
     JS_ReportErrorASCII(cx, "Script may not be disabled for system globals");
     return NS_ERROR_FAILURE;
   }

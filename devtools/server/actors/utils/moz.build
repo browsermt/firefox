@@ -14,10 +14,12 @@ DevToolsModules(
     'event-breakpoints.js',
     'event-loop.js',
     'inactive-property-helper.js',
+    'logEvent.js',
     'make-debugger.js',
     'shapes-utils.js',
     'stack.js',
     'TabSources.js',
     'track-change-emitter.js',
     'walker-search.js',
+    'watchpoint-map.js',
 )

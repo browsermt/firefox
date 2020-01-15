@@ -6,17 +6,22 @@
 
 #include "ToastNotificationHandler.h"
 
+#include "WidgetUtils.h"
+#include "WinTaskbar.h"
+#include "WinUtils.h"
+#include "imgIContainer.h"
 #include "imgIRequest.h"
-#include "mozilla/gfx/2D.h"
 #include "mozilla/WindowsVersion.h"
+#include "mozilla/gfx/2D.h"
 #include "nsDirectoryServiceDefs.h"
 #include "nsIStringBundle.h"
 #include "nsIURI.h"
 #include "nsIUUIDGenerator.h"
+#include "nsIWidget.h"
+#include "nsIWindowMediator.h"
 #include "nsNetUtil.h"
+#include "nsPIDOMWindow.h"
 #include "nsProxyRelease.h"
-#include "WinTaskbar.h"
-#include "WinUtils.h"
 
 #include "ToastNotification.h"
 
@@ -141,12 +146,21 @@ ToastNotificationHandler::~ToastNotificationHandler() {
     NS_ASSERTION(NS_SUCCEEDED(rv), "Cannot remove temporary image file");
   }
 
+  UnregisterHandler();
+}
+
+void ToastNotificationHandler::UnregisterHandler() {
   if (mNotification && mNotifier) {
     mNotification->remove_Dismissed(mDismissedToken);
     mNotification->remove_Activated(mActivatedToken);
     mNotification->remove_Failed(mFailedToken);
     mNotifier->Hide(mNotification.Get());
   }
+
+  mNotification = nullptr;
+  mNotifier = nullptr;
+
+  SendFinished();
 }
 
 ComPtr<IXmlDocument> ToastNotificationHandler::InitializeXmlForTemplate(
@@ -405,6 +419,14 @@ bool ToastNotificationHandler::CreateWindowsNotificationFromXml(
   return true;
 }
 
+void ToastNotificationHandler::SendFinished() {
+  if (!mSentFinished && mAlertListener) {
+    mAlertListener->Observe(nullptr, "alertfinished", mCookie.get());
+  }
+
+  mSentFinished = true;
+}
+
 HRESULT
 ToastNotificationHandler::OnActivate(IToastNotification* notification,
                                      IInspectable* inspectable) {
@@ -432,6 +454,23 @@ ToastNotificationHandler::OnActivate(IToastNotification* notification,
     } else if (argString.EqualsLiteral("snooze")) {
       mAlertListener->Observe(nullptr, "alertdisablecallback", mCookie.get());
     } else if (mClickable) {
+      // When clicking toast, focus moves to another process, but we want to set
+      // focus on Firefox process.
+      nsCOMPtr<nsIWindowMediator> winMediator(
+          do_GetService(NS_WINDOWMEDIATOR_CONTRACTID));
+      if (winMediator) {
+        nsCOMPtr<mozIDOMWindowProxy> navWin;
+        winMediator->GetMostRecentWindow(u"navigator:browser",
+                                         getter_AddRefs(navWin));
+        if (navWin) {
+          nsCOMPtr<nsIWidget> widget =
+              WidgetUtils::DOMWindowToWidget(nsPIDOMWindowOuter::From(navWin));
+          if (widget) {
+            SetForegroundWindow(
+                static_cast<HWND>(widget->GetNativeData(NS_NATIVE_WINDOW)));
+          }
+        }
+      }
       mAlertListener->Observe(nullptr, "alertclickcallback", mCookie.get());
     }
   }
@@ -442,9 +481,7 @@ ToastNotificationHandler::OnActivate(IToastNotification* notification,
 HRESULT
 ToastNotificationHandler::OnDismiss(IToastNotification* notification,
                                     IToastDismissedEventArgs* aArgs) {
-  if (mAlertListener) {
-    mAlertListener->Observe(nullptr, "alertfinished", mCookie.get());
-  }
+  SendFinished();
   mBackend->RemoveHandler(mName, this);
   return S_OK;
 }
@@ -452,9 +489,7 @@ ToastNotificationHandler::OnDismiss(IToastNotification* notification,
 HRESULT
 ToastNotificationHandler::OnFail(IToastNotification* notification,
                                  IToastFailedEventArgs* aArgs) {
-  if (mAlertListener) {
-    mAlertListener->Observe(nullptr, "alertfinished", mCookie.get());
-  }
+  SendFinished();
   mBackend->RemoveHandler(mName, this);
   return S_OK;
 }
@@ -466,6 +501,7 @@ nsresult ToastNotificationHandler::TryShowAlert() {
   }
   return NS_OK;
 }
+
 NS_IMETHODIMP
 ToastNotificationHandler::OnImageMissing(nsISupports*) {
   return TryShowAlert();

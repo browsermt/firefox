@@ -53,7 +53,7 @@
       this._scrollButtonWidth = 0;
       this._lastNumPinned = 0;
       this._pinnedTabsLayoutCache = null;
-      this._animateElement = this.arrowScrollbox._scrollButtonDown;
+      this._animateElement = this.arrowScrollbox;
       this._tabClipWidth = Services.prefs.getIntPref(
         "browser.tabs.tabClipWidth"
       );
@@ -470,11 +470,15 @@
         }
         // PageThumb is async with e10s but that's fine
         // since we can update the image during the dnd.
-        PageThumbs.captureToCanvas(browser, canvas, captureListener);
+        PageThumbs.captureToCanvas(browser, canvas)
+          .then(captureListener)
+          .catch(e => Cu.reportError(e));
       } else {
         // For the non e10s case we can just use PageThumbs
         // sync, so let's use the canvas for setDragImage.
-        PageThumbs.captureToCanvas(browser, canvas);
+        PageThumbs.captureToCanvas(browser, canvas).catch(e =>
+          Cu.reportError(e)
+        );
         dragImageOffset = dragImageOffset * scale;
       }
       dt.setDragImage(toDrag, dragImageOffset, dragImageOffset);
@@ -518,12 +522,11 @@
       // return to avoid drawing the drop indicator
       var pixelsToScroll = 0;
       if (this.getAttribute("overflow") == "true") {
-        var targetAnonid = event.originalTarget.getAttribute("anonid");
-        switch (targetAnonid) {
-          case "scrollbutton-up":
+        switch (event.originalTarget) {
+          case arrowScrollbox._scrollButtonUp:
             pixelsToScroll = arrowScrollbox.scrollIncrement * -1;
             break;
-          case "scrollbutton-down":
+          case arrowScrollbox._scrollButtonDown:
             pixelsToScroll = arrowScrollbox.scrollIncrement;
             break;
         }
@@ -609,14 +612,11 @@
       }
 
       ind.hidden = false;
-
       newMargin += ind.clientWidth / 2;
       if (RTL_UI) {
         newMargin *= -1;
       }
-
       ind.style.transform = "translate(" + Math.round(newMargin) + "px)";
-      ind.style.marginInlineStart = -ind.clientWidth + "px";
     }
 
     on_drop(event) {
@@ -956,7 +956,7 @@
 
     _initializeArrowScrollbox() {
       let arrowScrollbox = this.arrowScrollbox;
-      arrowScrollbox.addEventListener(
+      arrowScrollbox.shadowRoot.addEventListener(
         "underflow",
         event => {
           // Ignore underflow events:
@@ -986,7 +986,7 @@
         true
       );
 
-      arrowScrollbox.addEventListener("overflow", event => {
+      arrowScrollbox.shadowRoot.addEventListener("overflow", event => {
         // Ignore overflow events:
         // - from nested scrollable elements
         // - for vertical orientation
@@ -1002,7 +1002,7 @@
         this._handleTabSelect(true);
       });
 
-      // Override scrollbox.xml method, since our scrollbox's children are
+      // Override arrowscrollbox.js method, since our scrollbox's children are
       // inherited from the scrollbox binding parent (this).
       arrowScrollbox._getScrollableElements = () => {
         return this.allTabs.filter(arrowScrollbox._canScrollToElement);

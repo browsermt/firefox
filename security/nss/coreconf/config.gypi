@@ -96,9 +96,10 @@
     'cc_is_gcc%': '<(cc_is_gcc)',
     'cc_use_gnu_ld%': '<(cc_use_gnu_ld)',
     # Some defaults
+    'disable_arm_hw_aes%': 0,
     'disable_tests%': 0,
     'disable_chachapoly%': 0,
-    'disable_dbm%': 0,
+    'disable_dbm%': 1,
     'disable_libpkix%': 1,
     'disable_werror%': 0,
     'mozilla_client%': 0,
@@ -123,6 +124,7 @@
     'only_dev_random%': 1,
     'disable_fips%': 1,
     'mozpkix_only%': 0,
+    'coverage%': 0,
   },
   'target_defaults': {
     # Settings specific to targets should go here.
@@ -354,6 +356,9 @@
               'LINUX2_1',
               'LINUX',
               'linux',
+              '_DEFAULT_SOURCE', # for <endian.h> functions, strdup, realpath, and getentropy
+              '_BSD_SOURCE', # for the above in glibc <= 2.19
+              '_POSIX_SOURCE', # for <signal.h>
             ],
           }],
           [ 'OS=="dragonfly" or OS=="freebsd"', {
@@ -390,8 +395,11 @@
               '-ffunction-sections',
               '-fdata-sections',
             ],
+            'cflags_c': [
+              '-std=c99',
+            ],
             'cflags_cc': [
-              '-std=c++0x',
+              '-std=c++11',
             ],
             'ldflags': [
               '-z', 'noexecstack',

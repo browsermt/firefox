@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+requestLongerTimeout(10);
+
 /**
  * Test the JS Allocations feature. This is done as a browser test to ensure that
  * we realistically try out how the JS allocations are running. This ensures that
@@ -20,9 +22,9 @@ add_task(async function test_profile_feature_jsallocations() {
 
   const url = BASE_URL + "do_work_500ms.html";
   await BrowserTestUtils.withNewTab(url, async contentBrowser => {
-    const contentPid = await ContentTask.spawn(
+    const contentPid = await SpecialPowers.spawn(
       contentBrowser,
-      null,
+      [],
       () => Services.appinfo.processID
     );
 
@@ -31,9 +33,10 @@ add_task(async function test_profile_feature_jsallocations() {
 
     // Check that we can get some allocations when the feature is turned on.
     {
-      const { parentThread, contentThread } = await stopProfilerAndGetThreads(
-        contentPid
-      );
+      const {
+        parentThread,
+        contentThread,
+      } = await stopProfilerNowAndGetThreads(contentPid);
       Assert.greater(
         getPayloadsOfType(parentThread, "JS allocation").length,
         0,
@@ -48,22 +51,18 @@ add_task(async function test_profile_feature_jsallocations() {
       );
     }
 
-    // Flush out any straggling allocation markers that may have not been collected
-    // yet by starting and stopping the profiler once.
     startProfiler({ features: ["threads", "js"] });
-    await stopProfilerAndGetThreads(contentPid);
-
     // Now reload the tab with a clean run.
     gBrowser.reload();
     await wait(500);
-    startProfiler({ features: ["threads", "js"] });
 
     // Check that no allocations were recorded, and allocation tracking was correctly
     // turned off.
     {
-      const { parentThread, contentThread } = await stopProfilerAndGetThreads(
-        contentPid
-      );
+      const {
+        parentThread,
+        contentThread,
+      } = await stopProfilerNowAndGetThreads(contentPid);
       Assert.equal(
         getPayloadsOfType(parentThread, "JS allocation").length,
         0,

@@ -17,7 +17,7 @@ if sys.version_info < (3,):
         Error as ConfigParserError,
         RawConfigParser,
     )
-    input = raw_input
+    input = raw_input  # noqa
 else:
     from configparser import (
         Error as ConfigParserError,
@@ -34,6 +34,7 @@ from mozboot.gentoo import GentooBootstrapper
 from mozboot.osx import OSXBootstrapper
 from mozboot.openbsd import OpenBSDBootstrapper
 from mozboot.archlinux import ArchlinuxBootstrapper
+from mozboot.solus import SolusBootstrapper
 from mozboot.windows import WindowsBootstrapper
 from mozboot.mozillabuild import MozillaBuildBootstrapper
 from mozboot.util import (
@@ -72,6 +73,14 @@ APPLICATIONS = dict(
     mobile_android=APPLICATIONS_LIST[3],
 )
 
+VCS_CHOICE = '''
+Firefox can be cloned using either Git or Mercurial.
+
+Please choose the VCS you want to use:
+1. Mercurial
+2. Git
+Your choice: '''
+
 STATE_DIR_INFO = '''
 The Firefox build system and related tools store shared, persistent state
 in a common directory on the filesystem. On this machine, that directory
@@ -83,7 +92,7 @@ If you would like to use a different directory, hit CTRL+c and set the
 MOZBUILD_STATE_PATH environment variable to the directory you'd like to
 use and re-run the bootstrapper.
 
-Would you like to create this directory? (Yn):'''
+Would you like to create this directory?'''
 
 STYLO_NODEJS_DIRECTORY_MESSAGE = '''
 Stylo and NodeJS packages require a directory to store shared, persistent
@@ -95,9 +104,9 @@ Please restart bootstrap and create that directory when prompted.
 '''
 
 STYLE_NODEJS_REQUIRES_CLONE = '''
-Installing Stylo and NodeJS packages requires a checkout of mozilla-central.
-Once you have such a checkout, please re-run `./mach bootstrap` from the
-checkout directory.
+Installing Stylo and NodeJS packages requires a checkout of mozilla-central
+(or mozilla-unified). Once you have such a checkout, please re-run
+`./mach bootstrap` from the checkout directory.
 '''
 
 FINISHED = '''
@@ -113,10 +122,6 @@ Or, if you prefer Git, by following the instruction here to clone from the
 Mercurial repository:
 
     https://github.com/glandium/git-cinnabar/wiki/Mozilla:-A-git-workflow-for-Gecko-development
-
-Or, if you really prefer vanilla flavor Git:
-
-    git clone https://github.com/mozilla/gecko-dev.git
 '''
 
 CONFIGURE_MERCURIAL = '''
@@ -127,7 +132,8 @@ Would you like to run a configuration wizard to ensure Mercurial is
 optimally configured?'''
 
 CONFIGURE_GIT = '''
-Mozilla recommends using git-cinnabar to work with mozilla-central.
+Mozilla recommends using git-cinnabar to work with mozilla-central (or
+mozilla-unified).
 
 Would you like to run a few configuration steps to ensure Git is
 optimally configured?'''
@@ -246,7 +252,18 @@ class Bootstrapper(object):
                 'no_system_changes': no_system_changes}
 
         if sys.platform.startswith('linux'):
+            # TODO: don't call `linux_distribution` at all since it's deprecated
             distro, version, dist_id = platform.linux_distribution()
+
+            # Read the standard `os-release` configuration
+            if distro == '' and os.path.exists('/etc/os-release'):
+                d = {}
+                for line in open('/etc/os-release'):
+                    k, v = line.rstrip().split("=")
+                    d[k] = v.strip('"')
+                distro = d.get("NAME")
+                version = d.get("VERSION_ID")
+                dist_id = d.get("ID")
 
             if distro in ('CentOS', 'CentOS Linux', 'Fedora'):
                 cls = CentOSFedoraBootstrapper
@@ -256,12 +273,14 @@ class Bootstrapper(object):
                 args['distro'] = distro
             elif distro in ('Gentoo Base System', 'Funtoo Linux - baselayout '):
                 cls = GentooBootstrapper
+            elif distro in ('Solus'):
+                cls = SolusBootstrapper
             elif os.path.exists('/etc/arch-release'):
                 # Even on archlinux, platform.linux_distribution() returns ['','','']
                 cls = ArchlinuxBootstrapper
             else:
                 raise NotImplementedError('Bootstrap support for this Linux '
-                                          'distro not yet available.')
+                                          'distro not yet available: ' + distro)
 
             args['version'] = version
             args['dist_id'] = dist_id
@@ -379,6 +398,8 @@ class Bootstrapper(object):
             self.instance.ensure_clang_static_analysis_package(state_dir, checkout_root)
             self.instance.ensure_nasm_packages(state_dir, checkout_root)
             self.instance.ensure_sccache_packages(state_dir, checkout_root)
+            self.instance.ensure_lucetc_packages(state_dir, checkout_root)
+            self.instance.ensure_wasi_sysroot_packages(state_dir, checkout_root)
 
     def check_telemetry_opt_in(self, state_dir):
         # We can't prompt the user.
@@ -448,9 +469,22 @@ class Bootstrapper(object):
                                      hg=self.instance.which('hg'))
         (checkout_type, checkout_root) = r
 
+        # If we didn't specify a VCS, and we aren't in an exiting clone,
+        # offer a choice
+        if not self.vcs:
+            if checkout_type:
+                vcs = checkout_type
+            elif self.instance.no_interactive:
+                vcs = "hg"
+            else:
+                prompt_choice = self.instance.prompt_int(prompt=VCS_CHOICE, low=1, high=2)
+                vcs = ["hg", "git"][prompt_choice - 1]
+        else:
+            vcs = self.vcs
+
         # Possibly configure Mercurial, but not if the current checkout or repo
         # type is Git.
-        if hg_installed and state_dir_available and (checkout_type == 'hg' or self.vcs == 'hg'):
+        if hg_installed and state_dir_available and (checkout_type == 'hg' or vcs == 'hg'):
             configure_hg = False
             if not self.instance.no_interactive:
                 configure_hg = self.instance.prompt_yesno(prompt=CONFIGURE_MERCURIAL)
@@ -461,7 +495,7 @@ class Bootstrapper(object):
                 configure_mercurial(self.instance.which('hg'), state_dir)
 
         # Offer to configure Git, if the current checkout or repo type is Git.
-        elif self.instance.which('git') and (checkout_type == 'git' or self.vcs == 'git'):
+        elif self.instance.which('git') and (checkout_type == 'git' or vcs == 'git'):
             should_configure_git = False
             if not self.instance.no_interactive:
                 should_configure_git = self.instance.prompt_yesno(prompt=CONFIGURE_GIT)
@@ -478,12 +512,12 @@ class Bootstrapper(object):
 
         if checkout_type:
             have_clone = True
-        elif hg_installed and not self.instance.no_interactive and self.vcs == 'hg':
+        elif hg_installed and not self.instance.no_interactive and vcs == 'hg':
             dest = self.input_clone_dest()
             if dest:
                 have_clone = hg_clone_firefox(self.instance.which('hg'), dest)
                 checkout_root = dest
-        elif self.instance.which('git') and self.vcs == 'git':
+        elif self.instance.which('git') and vcs == 'git':
             dest = self.input_clone_dest(False)
             if dest:
                 git = self.instance.which('git')
@@ -601,7 +635,7 @@ def hg_clone_firefox(hg, dest):
     # Strictly speaking, this could overwrite a config based on a template
     # the user has installed. Let's pretend this problem doesn't exist
     # unless someone complains about it.
-    with open(os.path.join(dest, '.hg', 'hgrc'), 'ab') as fh:
+    with open(os.path.join(dest, '.hg', 'hgrc'), 'a') as fh:
         fh.write('[paths]\n')
         fh.write('default = https://hg.mozilla.org/mozilla-unified\n')
         fh.write('\n')
@@ -635,7 +669,7 @@ def current_firefox_checkout(check_output, env, hg=None):
     Returns one of None, ``git``, or ``hg``.
     """
     HG_ROOT_REVISIONS = set([
-        # From mozilla-central.
+        # From mozilla-unified.
         '8ba995b74e18334ab3707f27e9eb8f4e37ba3d29',
     ])
 
@@ -658,7 +692,7 @@ def current_firefox_checkout(check_output, env, hg=None):
                 pass
 
         # Just check for known-good files in the checkout, to prevent attempted
-        # foot-shootings.  Determining a canonical git checkout of mozilla-central
+        # foot-shootings.  Determining a canonical git checkout of mozilla-unified
         # is...complicated
         elif os.path.exists(git_dir):
             moz_configure = os.path.join(path, 'moz.configure')

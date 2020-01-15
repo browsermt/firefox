@@ -1,26 +1,20 @@
 const { ContentTaskUtils } = ChromeUtils.import(
   "resource://testing-common/ContentTaskUtils.jsm"
 );
-const { ContentTask } = ChromeUtils.import(
-  "resource://testing-common/ContentTask.jsm"
-);
-
 function waitForFullScreenState(browser, state) {
+  info("inside waitforfullscreenstate");
   return new Promise(resolve => {
     let eventReceived = false;
-    window.messageManager.addMessageListener(
-      "DOMFullscreen:Painted",
-      function listener() {
-        if (!eventReceived) {
-          return;
-        }
-        window.messageManager.removeMessageListener(
-          "DOMFullscreen:Painted",
-          listener
-        );
-        resolve();
+
+    let observe = (subject, topic, data) => {
+      if (!eventReceived) {
+        return;
       }
-    );
+      Services.obs.removeObserver(observe, "fullscreen-painted");
+      resolve();
+    };
+    Services.obs.addObserver(observe, "fullscreen-painted");
+
     window.addEventListener(
       `MozDOMFullscreen:${state ? "Entered" : "Exited"}`,
       () => {
@@ -42,7 +36,7 @@ async function changeFullscreen(browser, fullScreenState) {
     SimpleTest.waitForFocus(resolve, browser.ownerGlobal)
   );
   let fullScreenChange = waitForFullScreenState(browser, fullScreenState);
-  ContentTask.spawn(browser, fullScreenState, async state => {
+  SpecialPowers.spawn(browser, [fullScreenState], async state => {
     // Wait for document focus before requesting full-screen
     await ContentTaskUtils.waitForCondition(
       () => docShell.isActive && content.document.hasFocus(),

@@ -78,7 +78,7 @@ this.LoginTestUtils = {
     let { LoginManagerParent } = ChromeUtils.import(
       "resource://gre/modules/LoginManagerParent.jsm"
     );
-    LoginManagerParent._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
   },
 
   /**
@@ -147,6 +147,9 @@ this.LoginTestUtils.testData = {
     loginInfo.QueryInterface(Ci.nsILoginMetaInfo);
     if (modifications) {
       for (let [name, value] of Object.entries(modifications)) {
+        if (name == "httpRealm" && value !== null) {
+          throw new Error("httpRealm not supported for form logins");
+        }
         loginInfo[name] = value;
       }
     }
@@ -171,6 +174,11 @@ this.LoginTestUtils.testData = {
     loginInfo.QueryInterface(Ci.nsILoginMetaInfo);
     if (modifications) {
       for (let [name, value] of Object.entries(modifications)) {
+        if (name == "formActionOrigin" && value !== null) {
+          throw new Error(
+            "formActionOrigin not supported for HTTP auth. logins"
+          );
+        }
         loginInfo[name] = value;
       }
     }
@@ -207,7 +215,7 @@ this.LoginTestUtils.testData = {
         "form_field_password"
       ),
 
-      // Subdomains are treated as completely different sites.
+      // Subdomains can be treated as completely different sites depending on the UI invoked.
       new LoginInfo(
         "https://example.com",
         "https://example.com",
@@ -529,4 +537,25 @@ this.LoginTestUtils.loginField = {
 this.LoginTestUtils.generation = {
   LENGTH: 15,
   REGEX: /^[a-km-np-zA-HJ-NP-Z2-9]{15}$/,
+};
+
+this.LoginTestUtils.telemetry = {
+  async waitForEventCount(count, process = "content", category = "pwmgr") {
+    let events = await TestUtils.waitForCondition(() => {
+      let events = Services.telemetry.snapshotEvents(
+        Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
+        false
+      )[process];
+
+      if (!events) {
+        return null;
+      }
+
+      events = events.filter(e => e[1] == category);
+      dump(`Waiting for ${count} events, got ${events.length}\n`);
+      return events.length == count ? events : null;
+    }, "waiting for telemetry event count of: " + count);
+    Assert.equal(events.length, count, "waiting for telemetry event count");
+    return events;
+  },
 };

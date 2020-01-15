@@ -63,6 +63,27 @@ impl ZBufferIdGenerator {
     }
 }
 
+/// A shader kind identifier that can be used by a generic-shader to select the behavior at runtime.
+///
+/// Not all brush kinds need to be present in this enum, only those we want to support in the generic
+/// brush shader.
+/// Do not use the 24 lowest bits. This will be packed with other information in the vertex attributes.
+/// The constants must match the corresponding defines in brush_multi.glsl.
+#[repr(i32)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum BrushShaderKind {
+    None            = 0,
+    Solid           = 1,
+    Image           = 2,
+    Text            = 3,
+    LinearGradient  = 4,
+    RadialGradient  = 5,
+    Blend           = 6,
+    MixBlend        = 7,
+    Yuv             = 8,
+    Opacity         = 9,
+}
+
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -169,7 +190,6 @@ pub struct ClipMaskInstance {
     pub local_pos: LayoutPoint,
     pub tile_rect: LayoutRect,
     pub sub_rect: DeviceRect,
-    pub snap_offsets: SnapOffsets,
     pub task_origin: DevicePoint,
     pub screen_origin: DevicePoint,
     pub device_pixel_scale: f32,
@@ -213,6 +233,35 @@ impl ResolveInstanceData {
     }
 }
 
+/// Vertex format for picture cache composite shader.
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct CompositeInstance {
+    rect: DeviceRect,
+    clip_rect: DeviceRect,
+    color: PremultipliedColorF,
+    layer: f32,
+    z_id: f32,
+}
+
+impl CompositeInstance {
+    pub fn new(
+        rect: DeviceRect,
+        clip_rect: DeviceRect,
+        color: PremultipliedColorF,
+        layer: f32,
+        z_id: ZBufferId,
+    ) -> Self {
+        CompositeInstance {
+            rect,
+            clip_rect,
+            color,
+            layer,
+            z_id: z_id.0 as f32,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 #[cfg_attr(feature = "capture", derive(Serialize))]
 #[cfg_attr(feature = "replay", derive(Deserialize))]
@@ -250,7 +299,6 @@ impl PrimitiveHeaders {
         self.headers_float.push(PrimitiveHeaderF {
             local_rect: prim_header.local_rect,
             local_clip_rect: prim_header.local_clip_rect,
-            snap_offsets: prim_header.snap_offsets,
         });
 
         self.headers_int.push(PrimitiveHeaderI {
@@ -271,7 +319,6 @@ impl PrimitiveHeaders {
 pub struct PrimitiveHeader {
     pub local_rect: LayoutRect,
     pub local_clip_rect: LayoutRect,
-    pub snap_offsets: SnapOffsets,
     pub specific_prim_address: GpuCacheAddress,
     pub transform_id: TransformPaletteId,
 }
@@ -284,7 +331,6 @@ pub struct PrimitiveHeader {
 pub struct PrimitiveHeaderF {
     pub local_rect: LayoutRect,
     pub local_clip_rect: LayoutRect,
-    pub snap_offsets: SnapOffsets,
 }
 
 // i32 parts of a primitive header
@@ -317,13 +363,13 @@ impl GlyphInstance {
     // TODO(gw): Some of these fields can be moved to the primitive
     //           header since they are constant, and some can be
     //           compressed to a smaller size.
-    pub fn build(&self, data0: i32, data1: i32, data2: i32) -> PrimitiveInstanceData {
+    pub fn build(&self, data0: i32, data1: i32, resource_address: i32) -> PrimitiveInstanceData {
         PrimitiveInstanceData {
             data: [
                 self.prim_header_index.0 as i32,
                 data0,
                 data1,
-                data2,
+                resource_address | ((BrushShaderKind::Text as i32) << 24),
             ],
         }
     }
@@ -370,10 +416,7 @@ bitflags! {
     }
 }
 
-// TODO(gw): Some of these fields can be moved to the primitive
-//           header since they are constant, and some can be
-//           compressed to a smaller size.
-#[repr(C)]
+/// Convenience structure to encode into PrimitiveInstanceData.
 pub struct BrushInstance {
     pub prim_header_index: PrimitiveHeaderIndex,
     pub render_task_address: RenderTaskAddress,
@@ -381,7 +424,8 @@ pub struct BrushInstance {
     pub segment_index: i32,
     pub edge_flags: EdgeAaSegmentMask,
     pub brush_flags: BrushFlags,
-    pub user_data: i32,
+    pub resource_address: i32,
+    pub brush_kind: BrushShaderKind,
 }
 
 impl From<BrushInstance> for PrimitiveInstanceData {
@@ -389,12 +433,13 @@ impl From<BrushInstance> for PrimitiveInstanceData {
         PrimitiveInstanceData {
             data: [
                 instance.prim_header_index.0,
-                ((instance.render_task_address.0 as i32) << 16) |
-                instance.clip_task_address.0 as i32,
-                instance.segment_index |
-                ((instance.edge_flags.bits() as i32) << 16) |
-                ((instance.brush_flags.bits() as i32) << 24),
-                instance.user_data,
+                ((instance.render_task_address.0 as i32) << 16)
+                | instance.clip_task_address.0 as i32,
+                instance.segment_index
+                | ((instance.edge_flags.bits() as i32) << 16)
+                | ((instance.brush_flags.bits() as i32) << 24),
+                instance.resource_address
+                | ((instance.brush_kind as i32) << 24),
             ]
         }
     }
@@ -591,33 +636,6 @@ pub enum UvRectKind {
         bottom_left: DeviceHomogeneousVector,
         bottom_right: DeviceHomogeneousVector,
     },
-}
-
-/// Represents offsets in device pixels that a primitive
-/// was snapped to.
-#[cfg_attr(feature = "capture", derive(Serialize))]
-#[cfg_attr(feature = "replay", derive(Deserialize))]
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub struct SnapOffsets {
-    /// How far the top left corner was snapped
-    pub top_left: DeviceVector2D,
-    /// How far the bottom right corner was snapped
-    pub bottom_right: DeviceVector2D,
-}
-
-impl SnapOffsets {
-    pub fn empty() -> Self {
-        SnapOffsets {
-            top_left: DeviceVector2D::zero(),
-            bottom_right: DeviceVector2D::zero(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        let zero = DeviceVector2D::zero();
-        self.top_left == zero && self.bottom_right == zero
-    }
 }
 
 #[derive(Debug, Copy, Clone)]

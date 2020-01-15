@@ -314,7 +314,9 @@ var StarUI = {
     }
 
     let canvas = PageThumbs.createCanvas(window);
-    PageThumbs.captureToCanvas(gBrowser.selectedBrowser, canvas);
+    PageThumbs.captureToCanvas(gBrowser.selectedBrowser, canvas).catch(e =>
+      Cu.reportError(e)
+    );
     document.mozSetImageElement("editBookmarkPanelImageCanvas", canvas);
   },
 
@@ -381,7 +383,7 @@ var StarUI = {
     } else if (index == -1) {
       lastUsedFolderGuids.unshift(selectedFolderGuid);
     }
-    if (lastUsedFolderGuids.length > 5) {
+    while (lastUsedFolderGuids.length > PlacesUIUtils.maxRecentFolders) {
       lastUsedFolderGuids.pop();
     }
 
@@ -606,7 +608,7 @@ var PlacesCommandHook = {
     if (!organizer || organizer.closed) {
       // No currently open places window, so open one with the specified mode.
       openDialog(
-        "chrome://browser/content/places/places.xul",
+        "chrome://browser/content/places/places.xhtml",
         "",
         "chrome,toolbar=yes,dialog=no,resizable",
         item

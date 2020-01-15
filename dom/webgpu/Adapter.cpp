@@ -3,28 +3,44 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+#include "mozilla/dom/WebGPUBinding.h"
 #include "Adapter.h"
 
+#include "Device.h"
 #include "Instance.h"
-#include "mozilla/dom/WebGPUBinding.h"
+#include "ipc/WebGPUChild.h"
+#include "mozilla/dom/Promise.h"
 
 namespace mozilla {
 namespace webgpu {
 
+GPU_IMPL_CYCLE_COLLECTION(Adapter, mBridge, mParent)
+GPU_IMPL_JS_WRAP(Adapter)
+
+Adapter::Adapter(Instance* const aParent, RawId aId)
+    : ChildOf(aParent), mBridge(aParent->GetBridge()), mId(aId) {}
 Adapter::~Adapter() = default;
 
-void Adapter::Extensions(dom::WebGPUExtensions& out) const {
-  MOZ_CRASH("todo");
+WebGPUChild* Adapter::GetBridge() const { return mBridge; }
+
+already_AddRefed<dom::Promise> Adapter::RequestDevice(
+    const dom::GPUDeviceDescriptor& aDesc, ErrorResult& aRv) {
+  RefPtr<dom::Promise> promise = dom::Promise::Create(GetParentObject(), aRv);
+  if (NS_WARN_IF(aRv.Failed())) {
+    return nullptr;
+  }
+
+  Maybe<RawId> id = mBridge->AdapterRequestDevice(mId, aDesc);
+  if (id.isSome()) {
+    RefPtr<Device> device = new Device(this, id.value());
+    promise->MaybeResolve(device);
+  } else {
+    promise->MaybeRejectWithDOMException(NS_ERROR_DOM_NOT_SUPPORTED_ERR,
+                                         "Unable to instanciate a Device");
+  }
+
+  return promise.forget();
 }
-
-void Adapter::Features(dom::WebGPUFeatures& out) const { MOZ_CRASH("todo"); }
-
-already_AddRefed<Device> Adapter::CreateDevice(
-    const dom::WebGPUDeviceDescriptor& desc) const {
-  MOZ_CRASH("todo");
-}
-
-WEBGPU_IMPL_GOOP_0(Adapter)
 
 }  // namespace webgpu
 }  // namespace mozilla

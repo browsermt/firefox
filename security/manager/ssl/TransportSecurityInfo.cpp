@@ -11,12 +11,10 @@
 #include "ipc/IPCMessageUtils.h"
 #include "mozilla/Casting.h"
 #include "nsComponentManagerUtils.h"
-#include "nsIArray.h"
 #include "nsICertOverrideService.h"
 #include "nsIObjectInputStream.h"
 #include "nsIObjectOutputStream.h"
 #include "nsIWebProgressListener.h"
-#include "nsIX509CertValidity.h"
 #include "nsNSSCertHelper.h"
 #include "nsNSSCertificate.h"
 #include "nsNSSComponent.h"
@@ -48,6 +46,7 @@ TransportSecurityInfo::TransportSecurityInfo()
           nsITransportSecurityInfo::CERTIFICATE_TRANSPARENCY_NOT_APPLICABLE),
       mKeaGroup(),
       mSignatureSchemeName(),
+      mIsDelegatedCredential(false),
       mIsDomainMismatch(false),
       mIsNotValidAtThisTime(false),
       mIsUntrusted(false),
@@ -192,7 +191,7 @@ TransportSecurityInfo::Write(nsIObjectOutputStream* aStream) {
   // Re-purpose mErrorMessageCached to represent serialization version
   // If string doesn't match exact version it will be treated as older
   // serialization.
-  rv = aStream->WriteWStringZ(NS_ConvertUTF8toUTF16("1").get());
+  rv = aStream->WriteWStringZ(NS_ConvertUTF8toUTF16("3").get());
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -233,15 +232,26 @@ TransportSecurityInfo::Write(nsIObjectOutputStream* aStream) {
   rv = aStream->WriteStringZ(mSignatureSchemeName.get());
   NS_ENSURE_SUCCESS(rv, rv);
 
-  rv = NS_WriteOptionalCompoundObject(aStream, mSucceededCertChain,
-                                      NS_GET_IID(nsIX509CertList), true);
-  if (NS_FAILED(rv)) {
-    return rv;
+  rv = aStream->Write16(mSucceededCertChain.Length());
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  for (const auto& cert : mSucceededCertChain) {
+    nsCOMPtr<nsISerializable> serializableCert = do_QueryInterface(cert);
+    rv = aStream->WriteCompoundObject(serializableCert, NS_GET_IID(nsIX509Cert),
+                                      true);
+    NS_ENSURE_SUCCESS(rv, rv);
   }
   // END moved from nsISSLStatus
+  rv = aStream->Write16(mFailedCertChain.Length());
+  NS_ENSURE_SUCCESS(rv, rv);
+  for (const auto& cert : mFailedCertChain) {
+    nsCOMPtr<nsISerializable> serializableCert = do_QueryInterface(cert);
+    rv = aStream->WriteCompoundObject(serializableCert, NS_GET_IID(nsIX509Cert),
+                                      true);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
 
-  rv = NS_WriteOptionalCompoundObject(aStream, mFailedCertChain,
-                                      NS_GET_IID(nsIX509CertList), true);
+  rv = aStream->WriteBoolean(mIsDelegatedCredential);
   if (NS_FAILED(rv)) {
     return rv;
   }
@@ -254,7 +264,7 @@ TransportSecurityInfo::Write(nsIObjectOutputStream* aStream) {
     MOZ_DIAGNOSTIC_ASSERT(condition, message);            \
   }
 
-// This is for backward compatability to be able to read nsISSLStatus
+// This is for backward compatibility to be able to read nsISSLStatus
 // serialized object.
 nsresult TransportSecurityInfo::ReadSSLStatus(nsIObjectInputStream* aStream) {
   bool nsISSLStatusPresent;
@@ -362,20 +372,16 @@ nsresult TransportSecurityInfo::ReadSSLStatus(nsIObjectInputStream* aStream) {
 
   // Added in version 3 (see bug 1406856).
   if (streamFormatVersion >= 3) {
-    nsCOMPtr<nsISupports> succeededCertChainSupports;
-    rv = NS_ReadOptionalObject(aStream, true,
-                               getter_AddRefs(succeededCertChainSupports));
+    rv = ReadCertList(aStream, mSucceededCertChain);
     CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
                             "Deserialization should not fail");
     if (NS_FAILED(rv)) {
       return rv;
     }
-    mSucceededCertChain = do_QueryInterface(succeededCertChainSupports);
 
     // Read only to consume bytes from the stream.
-    nsCOMPtr<nsISupports> failedCertChainSupports;
-    rv = NS_ReadOptionalObject(aStream, true,
-                               getter_AddRefs(failedCertChainSupports));
+    nsTArray<RefPtr<nsIX509Cert>> failedCertChain;
+    rv = ReadCertList(aStream, failedCertChain);
     CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
                             "Deserialization should not fail");
     if (NS_FAILED(rv)) {
@@ -383,6 +389,68 @@ nsresult TransportSecurityInfo::ReadSSLStatus(nsIObjectInputStream* aStream) {
     }
   }
   return rv;
+}
+
+// This is for backward compatability to be able to read nsIX509CertList
+// serialized object.
+nsresult TransportSecurityInfo::ReadCertList(
+    nsIObjectInputStream* aStream, nsTArray<RefPtr<nsIX509Cert>>& aCertList) {
+  bool nsIX509CertListPresent;
+
+  nsresult rv = aStream->ReadBoolean(&nsIX509CertListPresent);
+  CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv), "Deserialization should not fail");
+  NS_ENSURE_SUCCESS(rv, rv);
+  if (!nsIX509CertListPresent) {
+    return NS_OK;
+  }
+  // nsIX509CertList present.  Prepare to read elements.
+  // Throw away cid, validate iid
+  nsCID cid;
+  nsIID iid;
+  rv = aStream->ReadID(&cid);
+  CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv), "Deserialization should not fail");
+  NS_ENSURE_SUCCESS(rv, rv);
+  rv = aStream->ReadID(&iid);
+  CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv), "Deserialization should not fail");
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  static const nsIID nsIX509CertListIID = {
+      0xae74cda5,
+      0xcd2f,
+      0x473f,
+      {0x96, 0xf5, 0xf0, 0xb7, 0xff, 0xf6, 0x2c, 0x68}};
+
+  if (!iid.Equals(nsIX509CertListIID)) {
+    CHILD_DIAGNOSTIC_ASSERT(false, "Deserialization should not fail");
+    return NS_ERROR_UNEXPECTED;
+  }
+
+  uint32_t certListSize;
+  rv = aStream->Read32(&certListSize);
+  CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv), "Deserialization should not fail");
+  NS_ENSURE_SUCCESS(rv, rv);
+
+  return ReadCertificatesFromStream(aStream, certListSize, aCertList);
+}
+
+nsresult TransportSecurityInfo::ReadCertificatesFromStream(
+    nsIObjectInputStream* aStream, uint32_t aSize,
+    nsTArray<RefPtr<nsIX509Cert>>& aCertList) {
+  nsresult rv;
+  for (uint32_t i = 0; i < aSize; ++i) {
+    nsCOMPtr<nsISupports> support;
+    rv = aStream->ReadObject(true, getter_AddRefs(support));
+    CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
+                            "Deserialization should not fail");
+    NS_ENSURE_SUCCESS(rv, rv);
+    nsCOMPtr<nsIX509Cert> cert = do_QueryInterface(support);
+    if (!cert) {
+      return NS_ERROR_UNEXPECTED;
+    }
+    RefPtr<nsIX509Cert> castedCert(cert.get());
+    aCertList.AppendElement(castedCert);
+  }
+  return NS_OK;
 }
 
 // NB: Any updates (except disk-only fields) must be kept in sync with
@@ -446,7 +514,8 @@ TransportSecurityInfo::Read(nsIObjectInputStream* aStream) {
   }
 
   // moved from nsISSLStatus
-  if (!serVersion.EqualsASCII("1")) {
+  if (!serVersion.EqualsASCII("1") && !serVersion.EqualsASCII("2") &&
+      !serVersion.EqualsASCII("3")) {
     // nsISSLStatus may be present
     rv = ReadSSLStatus(aStream);
     CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
@@ -522,26 +591,50 @@ TransportSecurityInfo::Read(nsIObjectInputStream* aStream) {
                             "Deserialization should not fail");
     NS_ENSURE_SUCCESS(rv, rv);
 
-    nsCOMPtr<nsISupports> succeededCertChainSupports;
-    rv = NS_ReadOptionalObject(aStream, true,
-                               getter_AddRefs(succeededCertChainSupports));
+    if (!serVersion.EqualsASCII("3")) {
+      // The old data structure of certList(nsIX509CertList) presents
+      rv = ReadCertList(aStream, mSucceededCertChain);
+      CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
+                              "Deserialization should not fail");
+      NS_ENSURE_SUCCESS(rv, rv);
+    } else {
+      uint16_t certCount;
+      rv = aStream->Read16(&certCount);
+      CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
+                              "Deserialization should not fail");
+      NS_ENSURE_SUCCESS(rv, rv);
+
+      rv = ReadCertificatesFromStream(aStream, certCount, mSucceededCertChain);
+      NS_ENSURE_SUCCESS(rv, rv);
+    }
+  }
+  // END moved from nsISSLStatus
+  if (!serVersion.EqualsASCII("3")) {
+    // The old data structure of certList(nsIX509CertList) presents
+    rv = ReadCertList(aStream, mFailedCertChain);
+    CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
+                            "Deserialization should not fail");
+    NS_ENSURE_SUCCESS(rv, rv);
+  } else {
+    uint16_t certCount;
+    rv = aStream->Read16(&certCount);
+    CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
+                            "Deserialization should not fail");
+    NS_ENSURE_SUCCESS(rv, rv);
+
+    rv = ReadCertificatesFromStream(aStream, certCount, mFailedCertChain);
+    NS_ENSURE_SUCCESS(rv, rv);
+  }
+
+  // mIsDelegatedCredential added in bug 1562773
+  if (serVersion.EqualsASCII("2") || serVersion.EqualsASCII("3")) {
+    rv = aStream->ReadBoolean(&mIsDelegatedCredential);
     CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv),
                             "Deserialization should not fail");
     if (NS_FAILED(rv)) {
       return rv;
     }
-    mSucceededCertChain = do_QueryInterface(succeededCertChainSupports);
   }
-  // END moved from nsISSLStatus
-
-  nsCOMPtr<nsISupports> failedCertChainSupports;
-  rv = NS_ReadOptionalObject(aStream, true,
-                             getter_AddRefs(failedCertChainSupports));
-  CHILD_DIAGNOSTIC_ASSERT(NS_SUCCEEDED(rv), "Deserialization should not fail");
-  if (NS_FAILED(rv)) {
-    return rv;
-  }
-  mFailedCertChain = do_QueryInterface(failedCertChainSupports);
 
   return NS_OK;
 }
@@ -570,6 +663,7 @@ void TransportSecurityInfo::SerializeToIPC(IPC::Message* aMsg) {
   WriteParam(aMsg, mSignatureSchemeName);
   WriteParam(aMsg, mSucceededCertChain);
   WriteParam(aMsg, mFailedCertChain);
+  WriteParam(aMsg, mIsDelegatedCredential);
 }
 
 bool TransportSecurityInfo::DeserializeFromIPC(const IPC::Message* aMsg,
@@ -594,7 +688,8 @@ bool TransportSecurityInfo::DeserializeFromIPC(const IPC::Message* aMsg,
       !ReadParam(aMsg, aIter, &mKeaGroup) ||
       !ReadParam(aMsg, aIter, &mSignatureSchemeName) ||
       !ReadParam(aMsg, aIter, &mSucceededCertChain) ||
-      !ReadParam(aMsg, aIter, &mFailedCertChain)) {
+      !ReadParam(aMsg, aIter, &mFailedCertChain) ||
+      !ReadParam(aMsg, aIter, &mIsDelegatedCredential)) {
     return false;
   }
 
@@ -750,20 +845,24 @@ void TransportSecurityInfo::SetStatusErrorBits(nsNSSCertificate* cert,
 }
 
 NS_IMETHODIMP
-TransportSecurityInfo::GetFailedCertChain(nsIX509CertList** _result) {
-  MOZ_ASSERT(_result);
-
-  *_result = mFailedCertChain;
-  NS_IF_ADDREF(*_result);
-
+TransportSecurityInfo::GetFailedCertChain(
+    nsTArray<RefPtr<nsIX509Cert>>& aFailedCertChain) {
+  MOZ_ASSERT(aFailedCertChain.IsEmpty());
+  if (!aFailedCertChain.IsEmpty()) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  aFailedCertChain.AppendElements(mFailedCertChain);
   return NS_OK;
 }
 
 nsresult TransportSecurityInfo::SetFailedCertChain(
-    UniqueCERTCertList certList) {
-  // nsNSSCertList takes ownership of certList
-  mFailedCertChain = new nsNSSCertList(std::move(certList));
-
+    UniqueCERTCertList aCertList) {
+  mFailedCertChain.Clear();
+  for (CERTCertListNode* node = CERT_LIST_HEAD(aCertList);
+       !CERT_LIST_END(node, aCertList); node = CERT_LIST_NEXT(node)) {
+    RefPtr<nsIX509Cert> cert = nsNSSCertificate::Create(node->cert);
+    mFailedCertChain.AppendElement(cert);
+  }
   return NS_OK;
 }
 
@@ -786,19 +885,27 @@ void TransportSecurityInfo::SetServerCert(nsNSSCertificate* aServerCert,
 }
 
 NS_IMETHODIMP
-TransportSecurityInfo::GetSucceededCertChain(nsIX509CertList** _result) {
-  NS_ENSURE_ARG_POINTER(_result);
-
-  nsCOMPtr<nsIX509CertList> tmpList = mSucceededCertChain;
-  tmpList.forget(_result);
-
+TransportSecurityInfo::GetSucceededCertChain(
+    nsTArray<RefPtr<nsIX509Cert>>& aSucceededCertChain) {
+  MOZ_ASSERT(aSucceededCertChain.IsEmpty());
+  if (!aSucceededCertChain.IsEmpty()) {
+    return NS_ERROR_INVALID_ARG;
+  }
+  aSucceededCertChain.AppendElements(mSucceededCertChain);
   return NS_OK;
 }
 
 nsresult TransportSecurityInfo::SetSucceededCertChain(
     UniqueCERTCertList aCertList) {
-  // nsNSSCertList takes ownership of certList
-  mSucceededCertChain = new nsNSSCertList(std::move(aCertList));
+  // This function effectively takes ownership of aCertList by consuming its
+  // elements and then releasing the original aCertList when it goes out of
+  // scope.
+  mSucceededCertChain.Clear();
+  for (CERTCertListNode* node = CERT_LIST_HEAD(aCertList);
+       !CERT_LIST_END(node, aCertList); node = CERT_LIST_NEXT(node)) {
+    RefPtr<nsIX509Cert> cert = nsNSSCertificate::Create(node->cert);
+    mSucceededCertChain.AppendElement(cert);
+  }
 
   return NS_OK;
 }
@@ -964,6 +1071,16 @@ TransportSecurityInfo::GetIsExtendedValidation(bool* aIsEV) {
   }
 
   return NS_ERROR_NOT_AVAILABLE;
+}
+
+NS_IMETHODIMP
+TransportSecurityInfo::GetIsDelegatedCredential(bool* aIsDelegCred) {
+  NS_ENSURE_ARG_POINTER(aIsDelegCred);
+  if (!mHaveCipherSuiteAndProtocol) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  *aIsDelegCred = mIsDelegatedCredential;
+  return NS_OK;
 }
 
 }  // namespace psm

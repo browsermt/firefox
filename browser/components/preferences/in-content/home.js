@@ -323,7 +323,9 @@ var gHomePane = {
         if (startupPref.value === gMainPane.STARTUP_PREF_BLANK) {
           Services.prefs.clearUserPref(startupPref.id);
         }
-        HomePage.clear();
+        if (HomePage.getDefault() != HomePage.getOriginalDefault()) {
+          HomePage.clear();
+        }
         this._renderCustomSettings({ shouldShow: true });
         break;
     }
@@ -394,7 +396,7 @@ var gHomePane = {
   setHomePageToBookmark() {
     const rv = { urls: null, names: null };
     gSubDialog.open(
-      "chrome://browser/content/preferences/selectBookmark.xul",
+      "chrome://browser/content/preferences/selectBookmark.xhtml",
       "resizable=yes, modal=yes",
       rv,
       this._setHomePageToBookmarkClosed.bind(this, rv)

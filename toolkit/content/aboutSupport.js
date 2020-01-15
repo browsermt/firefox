@@ -78,7 +78,7 @@ var snapshotFormatters = {
     if (data.updateChannel) {
       $("updatechannel-box").textContent = data.updateChannel;
     }
-    if (AppConstants.MOZ_UPDATER) {
+    if (AppConstants.MOZ_UPDATER && AppConstants.platform != "android") {
       $("update-dir-box").textContent = Services.dirsvc.get(
         "UpdRootD",
         Ci.nsIFile
@@ -642,7 +642,7 @@ var snapshotFormatters = {
         trs.push(buildRow(key, value));
       }
 
-      if (trs.length == 0) {
+      if (!trs.length) {
         $("graphics-" + id + "-tbody").style.display = "none";
         return;
       }
@@ -686,7 +686,7 @@ var snapshotFormatters = {
           }
 
           let contents;
-          if (entry.message.length > 0 && entry.message[0] == "#") {
+          if (entry.message.length && entry.message[0] == "#") {
             // This is a failure ID. See nsIGfxInfo.idl.
             let m = /#BLOCKLIST_FEATURE_FAILURE_BUG_(\d+)/.exec(entry.message);
             if (m) {
@@ -865,6 +865,12 @@ var snapshotFormatters = {
     }
 
     function insertEnumerateDatabase() {
+      if (
+        !Services.prefs.getBoolPref("media.mediacapabilities.from-database")
+      ) {
+        $("media-capabilities-tbody").style.display = "none";
+        return;
+      }
       let button = $("enumerate-database-button");
       if (button) {
         button.addEventListener("click", function(event) {
@@ -889,6 +895,9 @@ var snapshotFormatters = {
                 }
                 $("enumerate-database-result").textContent +=
                   logs.join("\n") + "\n";
+              })
+              .catch(err => {
+                $("enumerate-database-result").textContent += `${name}:\n`;
               });
           }
 
@@ -922,6 +931,14 @@ var snapshotFormatters = {
 
   javaScript(data) {
     $("javascript-incremental-gc").textContent = data.incrementalGCEnabled;
+  },
+
+  remoteAgent(data) {
+    if (!AppConstants.ENABLE_REMOTE_AGENT) {
+      return;
+    }
+    $("remote-debugging-accepting-connections").textContent = data.listening;
+    $("remote-debugging-url").textContent = data.url;
   },
 
   accessibility(data) {
@@ -1324,7 +1341,7 @@ Serializer.prototype = {
         colHeadings[i] = this._nodeText(col).trim();
       }
     }
-    let hasColHeadings = Object.keys(colHeadings).length > 0;
+    let hasColHeadings = !!Object.keys(colHeadings).length;
     if (!hasColHeadings) {
       tableHeadingElem = null;
     }
@@ -1486,11 +1503,11 @@ function setupEventListeners() {
     button = $("show-update-history-button");
     if (button) {
       button.addEventListener("click", function(event) {
-        let uri = "chrome://mozapps/content/update/history.xul";
-        let features =
-          "chrome,centerscreen,resizable=no,titlebar,toolbar=no," +
-          "dialog=yes,modal";
-        Services.ww.openWindow(window, uri, "Update:History", features, null);
+        window.docShell.rootTreeItem.domWindow.openDialog(
+          "chrome://mozapps/content/update/history.xhtml",
+          "Update:History",
+          "centerscreen,resizable=no,titlebar,modal"
+        );
       });
     }
   }

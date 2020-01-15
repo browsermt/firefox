@@ -68,6 +68,10 @@ function getValue(item: Node): RdpGrip | ObjectInspectorItemContentsValue {
   return undefined;
 }
 
+function getFront(item: Node): Object {
+  return item && item.contents && item.contents.front;
+}
+
 function getActor(item: Node, roots) {
   const isRoot = isNodeRoot(item, roots);
   const value = getValue(item);
@@ -337,7 +341,10 @@ function makeNodesForPromiseProperties(item: Node): Array<Node> {
       createNode({
         parent: item,
         name: "<value>",
-        contents: { value: value },
+        contents: {
+          value: value.getGrip ? value.getGrip() : value,
+          front: value.getGrip ? value : null,
+        },
         type: NODE_TYPES.PROMISE_VALUE,
       })
     );
@@ -352,17 +359,29 @@ function makeNodesForProxyProperties(
 ): Array<Node> {
   const { proxyHandler, proxyTarget } = loadedProps;
 
+  const isProxyHandlerFront = proxyHandler && proxyHandler.getGrip;
+  const proxyHandlerGrip = isProxyHandlerFront
+    ? proxyHandler.getGrip()
+    : proxyHandler;
+  const proxyHandlerFront = isProxyHandlerFront ? proxyHandler : null;
+
+  const isProxyTargetFront = proxyTarget && proxyTarget.getGrip;
+  const proxyTargetGrip = isProxyTargetFront
+    ? proxyTarget.getGrip()
+    : proxyTarget;
+  const proxyTargetFront = isProxyTargetFront ? proxyTarget : null;
+
   return [
     createNode({
       parent: item,
       name: "<target>",
-      contents: { value: proxyTarget },
+      contents: { value: proxyTargetGrip, front: proxyTargetFront },
       type: NODE_TYPES.PROXY_TARGET,
     }),
     createNode({
       parent: item,
       name: "<handler>",
-      contents: { value: proxyHandler },
+      contents: { value: proxyHandlerGrip, front: proxyHandlerFront },
       type: NODE_TYPES.PROXY_HANDLER,
     }),
   ];
@@ -380,7 +399,7 @@ function makeNodesForEntries(item: Node): Node {
         return createNode({
           parent: item,
           name: index,
-          path: `${entriesPath}/${index}`,
+          path: createPath(entriesPath, index),
           contents: { value: GripMapEntryRep.createGripMapEntry(key, value) },
         });
       });
@@ -389,7 +408,7 @@ function makeNodesForEntries(item: Node): Node {
         return createNode({
           parent: item,
           name: index,
-          path: `${entriesPath}/${index}`,
+          path: createPath(entriesPath, index),
           contents: { value },
         });
       });
@@ -416,18 +435,25 @@ function makeNodesForMapEntry(item: Node): Array<Node> {
   }
 
   const { key, value } = nodeValue.preview;
+  const isKeyFront = key && key.getGrip;
+  const keyGrip = isKeyFront ? key.getGrip() : key;
+  const keyFront = isKeyFront ? key : null;
+
+  const isValueFront = value && value.getGrip;
+  const valueGrip = isValueFront ? value.getGrip() : value;
+  const valueFront = isValueFront ? value : null;
 
   return [
     createNode({
       parent: item,
       name: "<key>",
-      contents: { value: key },
+      contents: { value: keyGrip, front: keyFront },
       type: NODE_TYPES.MAP_ENTRY_KEY,
     }),
     createNode({
       parent: item,
       name: "<value>",
-      contents: { value },
+      contents: { value: valueGrip, front: valueFront },
       type: NODE_TYPES.MAP_ENTRY_VALUE,
     }),
   ];
@@ -518,13 +544,10 @@ function makeDefaultPropsBucket(
       type: NODE_TYPES.DEFAULT_PROPERTIES,
     });
 
-    const defaultNodes = defaultProperties.map((name, index) =>
-      createNode({
-        parent: defaultPropertiesNode,
-        name: maybeEscapePropertyName(name),
-        path: `${index}/${name}`,
-        contents: ownProperties[name],
-      })
+    const defaultNodes = makeNodesForOwnProps(
+      defaultProperties,
+      defaultPropertiesNode,
+      ownProperties
     );
     nodes.push(setNodeChildren(defaultPropertiesNode, defaultNodes));
   }
@@ -536,13 +559,32 @@ function makeNodesForOwnProps(
   parent: Node,
   ownProperties: Object
 ): Array<Node> {
-  return propertiesNames.map(name =>
-    createNode({
+  return propertiesNames.map(name => {
+    const property = ownProperties[name];
+
+    let propertyValue = property;
+    if (property && property.hasOwnProperty("getterValue")) {
+      propertyValue = property.getterValue;
+    } else if (property && property.hasOwnProperty("value")) {
+      propertyValue = property.value;
+    }
+
+    // propertyValue can be a front (LongString or Object) or a primitive grip.
+    const isFront = propertyValue && propertyValue.getGrip;
+    const front = isFront ? propertyValue : null;
+    const grip = isFront ? front.getGrip() : propertyValue;
+
+    return createNode({
       parent,
       name: maybeEscapePropertyName(name),
-      contents: ownProperties[name],
-    })
-  );
+      propertyName: name,
+      contents: {
+        ...(property || {}),
+        value: grip,
+        front,
+      },
+    });
+  });
 }
 
 function makeNodesForProperties(
@@ -557,7 +599,6 @@ function makeNodesForProperties(
   } = objProps;
 
   const parentValue = getValue(parent);
-
   const allProperties = { ...ownProperties, ...safeGetterValues };
 
   // Ignore properties that are neither non-concrete nor getters/setters.
@@ -574,21 +615,30 @@ function makeNodesForProperties(
     }
   );
 
-  let nodes = [];
-  if (parentValue && parentValue.class == "Window") {
-    nodes = makeDefaultPropsBucket(propertiesNames, parent, allProperties);
-  } else {
-    nodes = makeNodesForOwnProps(propertiesNames, parent, allProperties);
-  }
+  const isParentNodeWindow = parentValue && parentValue.class == "Window";
+  const nodes = isParentNodeWindow
+    ? makeDefaultPropsBucket(propertiesNames, parent, allProperties)
+    : makeNodesForOwnProps(propertiesNames, parent, allProperties);
 
   if (Array.isArray(ownSymbols)) {
     ownSymbols.forEach((ownSymbol, index) => {
+      const descriptorValue =
+        ownSymbol && ownSymbol.descriptor && ownSymbol.descriptor.value;
+      const isFront = descriptorValue && descriptorValue.getGrip;
+      const symbolGrip = isFront ? descriptorValue.getGrip() : descriptorValue;
+      const symbolFront = isFront ? ownSymbol.descriptor.value : null;
+
       nodes.push(
         createNode({
           parent,
           name: ownSymbol.name,
           path: `symbol-${index}`,
-          contents: ownSymbol.descriptor || null,
+          contents: symbolGrip
+            ? {
+                value: symbolGrip,
+                front: symbolFront,
+              }
+            : null,
         })
       );
     }, this);
@@ -603,14 +653,40 @@ function makeNodesForProperties(
   }
 
   // Add accessor nodes if needed
+  const defaultPropertiesNode = isParentNodeWindow
+    ? nodes.find(node => nodeIsDefaultProperties(node))
+    : null;
+
   for (const name of propertiesNames) {
     const property = allProperties[name];
+    const isDefaultProperty =
+      isParentNodeWindow &&
+      defaultPropertiesNode &&
+      isDefaultWindowProperty(name);
+    const parentNode = isDefaultProperty ? defaultPropertiesNode : parent;
+    const parentContentsArray =
+      isDefaultProperty && defaultPropertiesNode
+        ? defaultPropertiesNode.contents
+        : nodes;
+
     if (property.get && property.get.type !== "undefined") {
-      nodes.push(createGetterNode({ parent, property, name }));
+      parentContentsArray.push(
+        createGetterNode({
+          parent: parentNode,
+          property,
+          name,
+        })
+      );
     }
 
     if (property.set && property.set.type !== "undefined") {
-      nodes.push(createSetterNode({ parent, property, name }));
+      parentContentsArray.push(
+        createSetterNode({
+          parent: parentNode,
+          property,
+          name,
+        })
+      );
     }
   }
 
@@ -645,7 +721,10 @@ function makeNodeForPrototype(objProps: GripProperties, parent: Node): ?Node {
     return createNode({
       parent,
       name: "<prototype>",
-      contents: { value: prototype },
+      contents: {
+        value: prototype.getGrip ? prototype.getGrip() : prototype,
+        front: prototype.getGrip ? prototype : null,
+      },
       type: NODE_TYPES.PROTOTYPE,
     });
   }
@@ -660,10 +739,12 @@ function createNode(options: {
   path?: string,
   type?: Symbol,
   meta?: Object,
+  propertyName?: string,
 }): ?Node {
   const {
     parent,
     name,
+    propertyName,
     path,
     contents,
     type = NODE_TYPES.GRIP,
@@ -676,16 +757,14 @@ function createNode(options: {
 
   // The path is important to uniquely identify the item in the entire
   // tree. This helps debugging & optimizes React's rendering of large
-  // lists. The path will be separated by property name, wrapped in a Symbol
-  // to avoid name clashing,
-  // i.e. `{ foo: { bar: { baz: 5 }}}` will have a path of Symbol(`foo/bar/baz`)
-  // for the inner object.
+  // lists. The path will be separated by property name.
+
   return {
     parent,
     name,
-    path: parent
-      ? Symbol(`${getSymbolDescriptor(parent.path)}/${path || name}`)
-      : Symbol(path || name),
+    // `name` can be escaped; propertyName contains the original property name.
+    propertyName,
+    path: createPath(parent && parent.path, path || name),
     contents,
     type,
     meta,
@@ -693,25 +772,29 @@ function createNode(options: {
 }
 
 function createGetterNode({ parent, property, name }) {
+  const isFront = property.get && property.get.getGrip;
+  const grip = isFront ? property.get.getGrip() : property.get;
+  const front = isFront ? property.get : null;
+
   return createNode({
     parent,
     name: `<get ${name}()>`,
-    contents: { value: property.get },
+    contents: { value: grip, front },
     type: NODE_TYPES.GET,
   });
 }
 
 function createSetterNode({ parent, property, name }) {
+  const isFront = property.set && property.set.getGrip;
+  const grip = isFront ? property.set.getGrip() : property.set;
+  const front = isFront ? property.set : null;
+
   return createNode({
     parent,
     name: `<set ${name}()>`,
-    contents: { value: property.set },
+    contents: { value: grip, front },
     type: NODE_TYPES.SET,
   });
-}
-
-function getSymbolDescriptor(symbol: Symbol | string): string {
-  return symbol.toString().replace(/^(Symbol\()(.*)(\))$/, "$2");
 }
 
 function setNodeChildren(node: Node, children: Array<Node>): Node {
@@ -724,9 +807,20 @@ function getEvaluatedItem(item: Node, evaluations: Evaluations): Node {
     return item;
   }
 
+  const evaluation = evaluations.get(item.path);
+  const isFront =
+    evaluation && evaluation.getterValue && evaluation.getterValue.getGrip;
+
+  const contents = isFront
+    ? {
+        getterValue: evaluation.getterValue.getGrip(),
+        front: evaluation.getterValue,
+      }
+    : evaluations.get(item.path);
+
   return {
     ...item,
-    contents: evaluations.get(item.path),
+    contents,
   };
 }
 
@@ -824,6 +918,17 @@ function getChildren(options: {
   return addToCache(makeNodesForProperties(loadedProps, item));
 }
 
+// Builds an expression that resolves to the value of the item in question
+// e.g. `b` in { a: { b: 2 } } resolves to `a.b`
+function getPathExpression(item) {
+  if (item && item.parent) {
+    const parent = nodeIsBucket(item.parent) ? item.parent.parent : item.parent;
+    return `${getPathExpression(parent)}.${item.name}`;
+  }
+
+  return item.name;
+}
+
 function getParent(item: Node): Node | null {
   return item.parent;
 }
@@ -904,6 +1009,15 @@ function getParentGripValue(item: Node | null): any {
   return getValue(parentGripNode);
 }
 
+function getParentFront(item: Node | null): any {
+  const parentGripNode = getParentGripNode(item);
+  if (!parentGripNode) {
+    return null;
+  }
+
+  return getFront(parentGripNode);
+}
+
 function getNonPrototypeParentGripValue(item: Node | null): Node | null {
   const parentGripNode = getParentGripNode(item);
   if (!parentGripNode) {
@@ -917,6 +1031,10 @@ function getNonPrototypeParentGripValue(item: Node | null): Node | null {
   return getValue(parentGripNode);
 }
 
+function createPath(parentPath, path) {
+  return parentPath ? `${parentPath}◦${path}` : path;
+}
+
 module.exports = {
   createNode,
   createGetterNode,
@@ -926,7 +1044,10 @@ module.exports = {
   getChildrenWithEvaluations,
   getClosestGripNode,
   getClosestNonBucketNode,
+  getFront,
+  getPathExpression,
   getParent,
+  getParentFront,
   getParentGripValue,
   getNonPrototypeParentGripValue,
   getNumericalPropertiesCount,

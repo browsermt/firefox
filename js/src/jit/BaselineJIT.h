@@ -110,6 +110,9 @@ class RetAddrEntry {
     // A callVM for the over-recursion check on function entry.
     StackCheck,
 
+    // A callVM for an interrupt check.
+    InterruptCheck,
+
     // DebugTrapHandler (for debugger breakpoints/stepping).
     DebugTrap,
 
@@ -442,6 +445,10 @@ struct alignas(uintptr_t) BaselineBailoutInfo {
   // Number of baseline frames to push on the stack.
   uint32_t numFrames = 0;
 
+  // Size of the innermost BaselineFrame. This is equivalent to
+  // BaselineFrame::debugFrameSize_ in debug builds.
+  uint32_t frameSizeOfInnerMostFrame = 0;
+
   // If Ion bailed out on a global script before it could perform the global
   // declaration conflicts check. In such cases the baseline script is
   // resumed at the first pc instead of the prologue, so an extra flag is
@@ -496,10 +503,6 @@ class BaselineInterpreter {
   // construction and environment initialization.
   uint32_t bailoutPrologueOffset_ = 0;
 
-  // Offset of the GeneratorThrowOrReturn callVM. See also
-  // emitGeneratorThrowOrReturnCallVM.
-  uint32_t generatorThrowOrReturnCallOffset_ = 0;
-
   // The offsets for the toggledJump instructions for profiler instrumentation.
   uint32_t profilerEnterToggleOffset_ = 0;
   uint32_t profilerExitToggleOffset_ = 0;
@@ -539,9 +542,7 @@ class BaselineInterpreter {
 
   void init(JitCode* code, uint32_t interpretOpOffset,
             uint32_t interpretOpNoDebugTrapOffset,
-            uint32_t bailoutPrologueOffset,
-            uint32_t generatorThrowOrReturnCallOffset,
-            uint32_t profilerEnterToggleOffset,
+            uint32_t bailoutPrologueOffset, uint32_t profilerEnterToggleOffset,
             uint32_t profilerExitToggleOffset, uint32_t debugTrapHandlerOffset,
             CodeOffsetVector&& debugInstrumentationOffsets,
             CodeOffsetVector&& debugTrapOffsets,
@@ -571,9 +572,6 @@ class BaselineInterpreter {
   }
   TrampolinePtr interpretOpNoDebugTrapAddr() const {
     return TrampolinePtr(codeAtOffset(interpretOpNoDebugTrapOffset_));
-  }
-  TrampolinePtr generatorThrowOrReturnCallAddr() const {
-    return TrampolinePtr(codeAtOffset(generatorThrowOrReturnCallOffset_));
   }
 
   void toggleProfilerInstrumentation(bool enable);

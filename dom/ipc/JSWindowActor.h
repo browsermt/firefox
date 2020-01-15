@@ -12,9 +12,12 @@
 #include "mozilla/Attributes.h"
 #include "mozilla/ErrorResult.h"
 #include "mozilla/dom/PromiseNativeHandler.h"
+#include "nsCycleCollectionParticipant.h"
 #include "nsRefPtrHashtable.h"
+#include "nsWrapperCache.h"
 
 class nsIGlobalObject;
+class nsQueryActor;
 
 namespace mozilla {
 namespace dom {
@@ -44,17 +47,16 @@ class JSWindowActor : public nsISupports, public nsWrapperCache {
   const nsString& Name() const { return mName; }
 
   void SendAsyncMessage(JSContext* aCx, const nsAString& aMessageName,
-                        JS::Handle<JS::Value> aObj,
-                        JS::Handle<JS::Value> aTransfers, ErrorResult& aRv);
+                        JS::Handle<JS::Value> aObj, ErrorResult& aRv);
 
   already_AddRefed<Promise> SendQuery(JSContext* aCx,
                                       const nsAString& aMessageName,
                                       JS::Handle<JS::Value> aObj,
-                                      JS::Handle<JS::Value> aTransfers,
                                       ErrorResult& aRv);
 
   void ReceiveRawMessage(const JSWindowActorMessageMeta& aMetadata,
-                         ipc::StructuredCloneData&& aData);
+                         ipc::StructuredCloneData&& aData,
+                         ipc::StructuredCloneData&& aStack);
 
   virtual nsIGlobalObject* GetParentObject() const = 0;
 
@@ -66,7 +68,13 @@ class JSWindowActor : public nsISupports, public nsWrapperCache {
   // |ReceiveMessage| method on the other side asynchronously.
   virtual void SendRawMessage(const JSWindowActorMessageMeta& aMetadata,
                               ipc::StructuredCloneData&& aData,
+                              ipc::StructuredCloneData&& aStack,
                               ErrorResult& aRv) = 0;
+
+  // Check if a message is so large that IPC will probably crash if we try to
+  // send it. If it is too large, record telemetry about the message.
+  static bool AllowMessage(const JSWindowActorMessageMeta& aMetadata,
+                           size_t aDataLength);
 
   virtual ~JSWindowActor() = default;
 
@@ -79,6 +87,10 @@ class JSWindowActor : public nsISupports, public nsWrapperCache {
   void InvokeCallback(CallbackFunction willDestroy);
 
  private:
+  friend class ::nsQueryActor;  // for QueryInterfaceActor
+
+  nsresult QueryInterfaceActor(const nsIID& aIID, void** aPtr);
+
   void ReceiveMessageOrQuery(JSContext* aCx,
                              const JSWindowActorMessageMeta& aMetadata,
                              JS::Handle<JS::Value> aData, ErrorResult& aRv);
@@ -95,7 +107,7 @@ class JSWindowActor : public nsISupports, public nsWrapperCache {
     NS_DECL_CYCLE_COLLECTION_CLASS(QueryHandler)
 
     QueryHandler(JSWindowActor* aActor,
-                 const JSWindowActorMessageMeta& aMetadata);
+                 const JSWindowActorMessageMeta& aMetadata, Promise* aPromise);
 
     void RejectedCallback(JSContext* aCx,
                           JS::Handle<JS::Value> aValue) override;
@@ -110,10 +122,12 @@ class JSWindowActor : public nsISupports, public nsWrapperCache {
                    ipc::StructuredCloneData&& aData);
 
     RefPtr<JSWindowActor> mActor;
+    RefPtr<Promise> mPromise;
     nsString mMessageName;
     uint64_t mQueryId;
   };
 
+  nsCOMPtr<nsISupports> mWrappedJS;
   nsString mName;
   nsRefPtrHashtable<nsUint64HashKey, Promise> mPendingQueries;
   uint64_t mNextQueryId;

@@ -103,6 +103,7 @@ class HitTestingTreeNode {
 
   void SetHitTestData(const EventRegions& aRegions,
                       const LayerIntRegion& aVisibleRegion,
+                      const LayerIntRect& aRemoteDocumentRect,
                       const CSSTransformMatrix& aTransform,
                       const Maybe<ParentLayerIntRegion>& aClipRegion,
                       const EventRegionsOverride& aOverride,
@@ -124,8 +125,12 @@ class HitTestingTreeNode {
 
   /* Fixed pos info */
 
-  void SetFixedPosData(ScrollableLayerGuid::ViewID aFixedPosTarget);
+  void SetFixedPosData(ScrollableLayerGuid::ViewID aFixedPosTarget,
+                       SideBits aFixedPosSides,
+                       const Maybe<uint64_t>& aFixedPositionAnimationId);
   ScrollableLayerGuid::ViewID GetFixedPosTarget() const;
+  SideBits GetFixedPosSides() const;
+  Maybe<uint64_t> GetFixedPositionAnimationId() const;
 
   /* Convert |aPoint| into the LayerPixel space for the layer corresponding to
    * this node. |aTransform| is the complete (content + async) transform for
@@ -144,6 +149,11 @@ class HitTestingTreeNode {
    * across a BrowserParent/BrowserChild interface.*/
   LayerToScreenMatrix4x4 GetTransformToGecko() const;
   const LayerIntRegion& GetVisibleRegion() const;
+
+  /* Returns the screen coordinate rectangle of remote iframe corresponding to
+   * this node. The rectangle is the result of clipped by ancestor async
+   * scrolling. */
+  ScreenRect GetRemoteDocumentScreenRect() const;
 
   bool IsAsyncZoomContainer() const;
 
@@ -176,7 +186,12 @@ class HitTestingTreeNode {
   // This is set for scrollbar Container and Thumb layers.
   ScrollbarData mScrollbarData;
 
+  // This is only set if WebRender is enabled. It holds the animation id that
+  // we use to adjust fixed position content for the toolbar.
+  Maybe<uint64_t> mFixedPositionAnimationId;
+
   ScrollableLayerGuid::ViewID mFixedPosTarget;
+  SideBits mFixedPosSides;
 
   /* Let {L,M} be the {layer, scrollable metrics} pair that this node
    * corresponds to in the layer tree. mEventRegions contains the event regions
@@ -188,6 +203,10 @@ class HitTestingTreeNode {
   EventRegions mEventRegions;
 
   LayerIntRegion mVisibleRegion;
+
+  /* The rectangle of remote iframe on the corresponding layer coordinate.
+   * It's empty if this node is not for remote iframe. */
+  LayerIntRect mRemoteDocumentRect;
 
   /* This is the transform from layer L. This does NOT include any async
    * transforms. */
@@ -224,14 +243,17 @@ class HitTestingTreeNode {
  * Clear() being called, it unlocks the underlying node at which point it can
  * be recycled or freed.
  */
-class MOZ_RAII HitTestingTreeNodeAutoLock final {
+class HitTestingTreeNodeAutoLock final {
  public:
   HitTestingTreeNodeAutoLock();
-  HitTestingTreeNodeAutoLock(const HitTestingTreeNodeAutoLock&) = delete;
-  HitTestingTreeNodeAutoLock& operator=(const HitTestingTreeNodeAutoLock&) =
-      delete;
-  HitTestingTreeNodeAutoLock(HitTestingTreeNodeAutoLock&&) = delete;
   ~HitTestingTreeNodeAutoLock();
+  // Make it move-only. Note that the default implementations of the move
+  // constructor and assignment operator are correct: they'll call the
+  // move constructor of mNode, which will null out mNode on the moved-from
+  // object, and Clear() will early-exit when the moved-from object's
+  // destructor is called.
+  HitTestingTreeNodeAutoLock(HitTestingTreeNodeAutoLock&&) = default;
+  HitTestingTreeNodeAutoLock& operator=(HitTestingTreeNodeAutoLock&&) = default;
 
   void Initialize(const RecursiveMutexAutoLock& aProofOfTreeLock,
                   already_AddRefed<HitTestingTreeNode> aNode,

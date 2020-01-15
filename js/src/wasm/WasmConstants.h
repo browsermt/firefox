@@ -42,7 +42,17 @@ enum class SectionId {
   GcFeatureOptIn = 42  // Arbitrary, but fits in 7 bits
 };
 
+// WebAssembly type encodings are all single-byte negative SLEB128s, hence:
+//  forall tc:TypeCode. ((tc & SLEB128SignMask) == SLEB128SignBit
+static const uint8_t SLEB128SignMask = 0xc0;
+static const uint8_t SLEB128SignBit = 0x40;
+
 enum class TypeCode {
+
+  // If more "simple primitive" (non-reference, non-constructor,
+  // non-special-purpose) types are added here then you MUST update
+  // LowestPrimitiveTypeCode, below.
+
   I32 = 0x7f,  // SLEB128(-0x01)
   I64 = 0x7e,  // SLEB128(-0x02)
   F32 = 0x7d,  // SLEB128(-0x03)
@@ -63,7 +73,7 @@ enum class TypeCode {
   // Type constructor for structure types - unofficial
   Struct = 0x50,  // SLEB128(-0x30)
 
-  // Special code representing the block signature ()->()
+  // The 'empty' case of blocktype.
   BlockVoid = 0x40,  // SLEB128(-0x40)
 
   // Type designator for null - unofficial, will not appear in the binary format
@@ -71,6 +81,12 @@ enum class TypeCode {
 
   Limit = 0x80
 };
+
+// This is the lowest-valued TypeCode that is a primitive type, used in
+// UnpackTypeCodeTypeAbstracted().  If primitive typecodes are added below any
+// reference typecode then the logic in that function MUST change.
+
+static constexpr TypeCode LowestPrimitiveTypeCode = TypeCode::F64;
 
 enum class FuncTypeIdDescKind { None, Immediate, Global };
 
@@ -139,13 +155,13 @@ enum class MemoryMasks { AllowUnshared = 0x1, AllowShared = 0x3 };
 enum class DataSegmentKind {
   Active = 0x00,
   Passive = 0x01,
-  ActiveWithIndex = 0x02
+  ActiveWithMemoryIndex = 0x02
 };
 
 enum class ElemSegmentKind : uint32_t {
   Active = 0x0,
   Passive = 0x1,
-  ActiveWithIndex = 0x2,
+  ActiveWithTableIndex = 0x2,
   Declared = 0x3,
 };
 
@@ -174,7 +190,8 @@ enum class Op {
 
   // Parametric operators
   Drop = 0x1a,
-  Select = 0x1b,
+  SelectNumeric = 0x1b,
+  SelectTyped = 0x1c,
 
   // Variable access
   GetLocal = 0x20,
@@ -561,8 +578,7 @@ enum class FieldFlags { Mutable = 0x01, AllowedMask = 0x01 };
 
 static const unsigned MaxTypes = 1000000;
 static const unsigned MaxFuncs = 1000000;
-static const unsigned MaxTables =
-    100000;  // TODO: get this into the shared limits spec
+static const unsigned MaxTables = 100000;
 static const unsigned MaxImports = 100000;
 static const unsigned MaxExports = 100000;
 static const unsigned MaxGlobals = 1000000;
@@ -571,6 +587,9 @@ static const unsigned MaxElemSegments = 10000000;
 static const unsigned MaxTableLength = 10000000;
 static const unsigned MaxLocals = 50000;
 static const unsigned MaxParams = 1000;
+// The actual maximum results may be `1` if multi-value is not enabled. Check
+// `env->funcMaxResults()` to get the correct value for a module.
+static const unsigned MaxResults = 1000;
 static const unsigned MaxStructFields = 1000;
 static const unsigned MaxMemoryMaximumPages = 65536;
 static const unsigned MaxStringBytes = 100000;
@@ -583,6 +602,11 @@ static const unsigned MaxTableInitialLength = 10000000;
 static const unsigned MaxBrTableElems = 1000000;
 static const unsigned MaxMemoryInitialPages = 16384;
 static const unsigned MaxCodeSectionBytes = MaxModuleBytes;
+
+// FIXME: Temporary limit to function result counts.  Replace with MaxResults:
+// bug 1585909.
+
+static const unsigned MaxFuncResults = 1;
 
 // A magic value of the FramePointer to indicate after a return to the entry
 // stub that an exception has been caught and that we should throw.

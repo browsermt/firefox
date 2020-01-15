@@ -2,6 +2,10 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+:root {
+  --min-container-width: 300px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -190,4 +194,10 @@ iframe {
 #markup-box > iframe {
   height: 100%;
   width: 100%;
+}
+
+/* Extension Sidebar */
+.inspector-tabpanel.extension-sidebar {
+  height: 100%;
+  overflow-y: auto;
 }

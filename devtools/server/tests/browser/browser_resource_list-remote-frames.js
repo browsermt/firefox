@@ -2,15 +2,17 @@
  * http://creativecommons.org/publicdomain/zero/1.0/ */
 
 /**
- * Test that we can get a stack to a promise's allocation point in the chrome
- * process.
+ * Test Root actor and browsing context `listRemoteFrames` methods.
  */
 
 "use strict";
 
+const TEST_URL = MAIN_DOMAIN + "doc_iframe.html";
+const IFRAME_URL =
+  "http://example.com/browser/devtools/server/tests/browser/doc_iframe_content.html";
+
 add_task(async function() {
-  await pushPref("fission.autostart", true);
-  const tabTarget = await addTabTarget(MAIN_DOMAIN + "doc_iframe.html");
+  const tabTarget = await addTabTarget(TEST_URL);
   await testLocalListFrames(tabTarget);
   await testBrowserListFrames(tabTarget);
 });
@@ -18,26 +20,25 @@ add_task(async function() {
 async function testLocalListFrames(tabTarget) {
   // at this point, tabTarget is the tab with two iframes, one nested inside
   // the other.
+  // we should move this to descriptorFront.listRemoteFrames once we have
+  // tabDescriptors
   const { frames } = await tabTarget.listRemoteFrames();
-  is(frames.length, 2, "Got two frames");
 
-  // Since we do not have access to remote frames yet this will return null.
-  // This test should be updated when we have access to remote frames.
-  for (const frame of frames) {
+  if (Services.prefs.getBoolPref("fission.autostart")) {
+    // With fission, one frame is running out of process
+    is(frames.length, 1, "Got one remote frame with fission");
+
+    info("Check that we can connect to the remote target");
+    const frame = frames[0];
     const frameTarget = await frame.getTarget();
-    is(frameTarget, null, "We cannot get remote iframe fronts yet");
-  }
+    ok(frameTarget && frameTarget.actor, "Valid frame target retrieved");
 
-  // However we can confirm that the newly created iframe is there.
-  const browser = gBrowser.selectedBrowser;
-  const oopID = await ContentTask.spawn(browser, {}, async () => {
-    const oop = content.document.querySelector("iframe");
-    return oop.frameLoader.browsingContext.id;
-  });
-  ok(
-    frames.find(f => f.id === oopID),
-    "tabTarget.listRemoteFrames returns the oop frame descriptor"
-  );
+    is(frameTarget.url, IFRAME_URL, "The target is for the remote frame");
+  } else {
+    // Only remote frames are returned by listRemoteFrames, without fission
+    // all frames are in the same process
+    is(frames.length, 0, "Got no frame from the tab target");
+  }
 }
 async function testBrowserListFrames(tabTarget) {
   // Now, we can test against the entire browser. getMainProcess will return
@@ -56,25 +57,24 @@ async function getFrames(target) {
   // since it is requesting information from a content process. From the parent
   // we can access information like the URL.
   const descriptor = frames.find(f => f.url && f.url.includes("doc_iframe"));
+  ok(descriptor, "we have a descriptor with the url 'doc_iframe'");
 
   const front = await descriptor.getTarget();
   ok(front.hasActor("console"), "Got the console actor");
   ok(front.hasActor("thread"), "Got the thread actor");
   // Ensure sending at least one request to an actor...
   const consoleFront = await front.getFront("console");
-  const { result } = await consoleFront.evaluateJS("var a = 42; a");
+  const { result } = await consoleFront.evaluateJSAsync("var a = 42; a");
   is(result, 42, "console.eval worked");
 
-  // Although we can get metadata about the child frames,
-  // since we do not have access to remote frames yet, this will return null.
-  // This test should be updated when we have access to remote frames.
+  info("Check that we can connect to the remote frames");
   const childFrames = frames.filter(d => d.parentID === descriptor.id);
   for (const frame of childFrames) {
     const frameTarget = await frame.getTarget();
-    is(frameTarget, null, "We cannot get remote iframe fronts yet");
+    ok(frameTarget && frameTarget.actor, "Valid frame target retrieved");
   }
 
-  getFirstFrameAgain(front, descriptor, target);
+  await getFirstFrameAgain(front, descriptor, target);
 }
 
 // Assert that calling descriptor.getTarget returns the same actor.
@@ -88,7 +88,9 @@ async function getFirstFrameAgain(firstTargetFront, descriptor, target) {
   );
 
   const { frames } = await target.listRemoteFrames();
-  const secondDescriptor = frames.find(f => f.id === descriptor.id);
+  const secondDescriptor = frames.find(f => {
+    return f.id === descriptor.id;
+  });
   const secondTargetFront = await secondDescriptor.getTarget();
   is(
     secondTargetFront,

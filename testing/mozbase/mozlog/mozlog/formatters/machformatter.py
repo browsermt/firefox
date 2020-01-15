@@ -19,7 +19,7 @@ color_dict = {
     'log_process_output': 'blue',
     'log_test_status_pass': 'green',
     'log_test_status_unexpected_fail': 'red',
-    'log_test_status_known_intermittent': 'orange',
+    'log_test_status_known_intermittent': 'yellow',
     'time': 'cyan',
     'action': 'yellow',
     'pid': 'cyan',
@@ -229,10 +229,9 @@ class MachFormatter(base.BaseFormatter):
             else:
                 for test_id, results in intermittent_logs.items():
                     test = self._get_file_name(test_id)
-                    assert len(results) == 1
-                    data = results[0]
-                    assert "subtest" not in data
-                    rv.append(self._format_status(test, data).rstrip())
+                    for data in results:
+                        assert "subtest" not in data
+                        rv.append(self._format_status(test, data).rstrip())
 
         # Format status
         testfailed = any(count[key]["unexpected"] for key in ('test', 'subtest', 'assert'))
@@ -252,10 +251,9 @@ class MachFormatter(base.BaseFormatter):
             else:
                 for test_id, results in logs.items():
                     test = self._get_file_name(test_id)
-                    assert len(results) == 1
-                    data = results[0]
-                    assert "subtest" not in data
-                    rv.append(self._format_status(test, data).rstrip())
+                    for data in results:
+                        assert "subtest" not in data
+                        rv.append(self._format_status(test, data).rstrip())
 
             # Format harness errors
             if harness_errors:

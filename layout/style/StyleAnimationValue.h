@@ -85,11 +85,18 @@ struct AnimationValue {
   const mozilla::StyleTranslate& GetTranslateProperty() const;
   const mozilla::StyleRotate& GetRotateProperty() const;
 
+  // Motion path properties.
+  const mozilla::StyleOffsetPath& GetOffsetPathProperty() const;
+  const mozilla::LengthPercentage& GetOffsetDistanceProperty() const;
+  const mozilla::StyleOffsetRotate& GetOffsetRotateProperty() const;
+  const mozilla::StylePositionOrAuto& GetOffsetAnchorProperty() const;
+
   // Return the scale for mServo, which is calculated with reference to aFrame.
   mozilla::gfx::Size GetScaleValue(const nsIFrame* aFrame) const;
 
   // Uncompute this AnimationValue and then serialize it.
   void SerializeSpecifiedValue(nsCSSPropertyID aProperty,
+                               const RawServoStyleSet* aRawSet,
                                nsAString& aString) const;
 
   // Check if |*this| and |aToValue| can be interpolated.

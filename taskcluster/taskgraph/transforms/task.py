@@ -38,7 +38,6 @@ from taskgraph.util.partners import get_partners_to_be_published
 from taskgraph.util.scriptworker import (
     BALROG_ACTIONS,
     get_release_config,
-    add_scope_prefix,
 )
 from taskgraph.util.signed_artifacts import get_signed_artifacts
 from taskgraph.util.workertypes import worker_type_implementation
@@ -777,6 +776,9 @@ def build_docker_worker_payload(config, task, task_def):
     Required('chain-of-trust'): bool,
     Optional('taskcluster-proxy'): bool,
 
+    # the exit status code(s) that indicates the task should be retried
+    Optional('retry-exit-status'): [int],
+
     # Wether any artifacts are assigned to this worker
     Optional('skip-artifacts'): bool,
 })
@@ -798,6 +800,9 @@ def build_generic_worker_payload(config, task, task_def):
                 3221225786,  # sigint (any interrupt)
             ]
         }
+    if 'retry-exit-status' in worker:
+        task_def['payload'].setdefault(
+            'onExitStatus', {}).setdefault('retry', []).extend(worker['retry-exit-status'])
 
     env = worker.get('env', {})
 
@@ -1060,6 +1065,10 @@ def build_beetmover_maven_payload(config, task, task_def):
     Optional('complete-mar-bouncer-product-pattern'): basestring,
     Optional('update-line'): object,
     Optional('suffixes'): [basestring],
+    Optional('background-rate'): optionally_keyed_by(
+        'release-type', 'beta-number', Any(int, None)),
+    Optional('force-fallback-mapping-update'): optionally_keyed_by(
+        'release-type', 'beta-number', bool),
 
 
     # list of artifact URLs for the artifacts that should be beetmoved
@@ -1077,6 +1086,9 @@ def build_beetmover_maven_payload(config, task, task_def):
 def build_balrog_payload(config, task, task_def):
     worker = task['worker']
     release_config = get_release_config(config)
+    beta_number = None
+    if 'b' in release_config['version']:
+        beta_number = release_config['version'].split('b')[-1]
 
     if worker['balrog-action'] == 'submit-locale':
         task_def['payload'] = {
@@ -1085,13 +1097,15 @@ def build_balrog_payload(config, task, task_def):
         }
     else:
         for prop in ('archive-domain', 'channel-names', 'download-domain',
-                     'publish-rules', 'rules-to-update'):
+                     'publish-rules', 'rules-to-update', 'background-rate',
+                     'force-fallback-mapping-update'):
             if prop in worker:
                 resolve_keyed_by(
                     worker, prop, task['description'],
                     **{
                         'release-type': config.params['release_type'],
                         'release-level': config.params.release_level(),
+                        'beta-number': beta_number,
                     }
                 )
         task_def['payload'] = {
@@ -1120,6 +1134,11 @@ def build_balrog_payload(config, task, task_def):
                 'publish_rules': worker['publish-rules'],
                 'release_eta': worker.get('release-eta', config.params.get('release_eta')) or '',
             })
+            if worker.get('force-fallback-mapping-update'):
+                task_def['payload']['force_fallback_mapping_update'] = \
+                    worker['force-fallback-mapping-update']
+            if worker.get('background-rate'):
+                task_def['payload']['background_rate'] = worker['background-rate']
 
 
 @payload_builder('bouncer-aliases', schema={
@@ -1215,6 +1234,24 @@ def build_ship_it_shipped_payload(config, task, task_def):
     }
 
 
+@payload_builder('shipit-maybe-release', schema={
+    Required('phase'): basestring,
+})
+def build_ship_it_maybe_release_payload(config, task, task_def):
+    # expect branch name, including path
+    branch = config.params['head_repository'][len('https://hg.mozilla.org/'):]
+    # 'version' is e.g. '71.0b13' (app_version doesn't have beta number)
+    version = config.params['version']
+
+    task_def['payload'] = {
+        'product': task['shipping-product'],
+        'branch': branch,
+        'phase': task['worker']['phase'],
+        'version': version,
+        'cron_revision': config.params['head_rev'],
+    }
+
+
 @payload_builder('push-addons', schema={
     Required('channel'): Any('listed', 'unlisted'),
     Required('upstream-artifacts'): [{
@@ -1238,15 +1275,29 @@ def build_push_addons_payload(config, task, task_def):
     Optional('bump-files'): [basestring],
     Optional('repo-param-prefix'): basestring,
     Optional('dontbuild'): bool,
+    Optional('ignore-closed-tree'): bool,
     Required('force-dry-run', default=True): bool,
-    Required('push', default=False): bool
+    Required('push', default=False): bool,
+    Optional('source-repo'): basestring,
+    Optional('l10n-bump-info'): {
+        Required('name'): basestring,
+        Required('path'): basestring,
+        Required('version-path'): basestring,
+        Optional('revision-url'): basestring,
+        Optional('ignore-config'): object,
+        Required('platform-configs'): [{
+            Required('platforms'): [basestring],
+            Required('path'): basestring,
+            Optional('format'): basestring,
+        }],
+    },
 })
 def build_treescript_payload(config, task, task_def):
     worker = task['worker']
     release_config = get_release_config(config)
 
-    task_def['payload'] = {}
-    task_def.setdefault('scopes', [])
+    task_def['payload'] = {'actions': []}
+    actions = task_def['payload']['actions']
     if worker['tags']:
         tag_names = []
         product = task['shipping-product'].upper()
@@ -1265,7 +1316,7 @@ def build_treescript_payload(config, task, task_def):
             'revision': config.params['{}head_rev'.format(worker.get('repo-param-prefix', ''))],
         }
         task_def['payload']['tag_info'] = tag_info
-        task_def['scopes'].append(add_scope_prefix(config, 'treescript:action:tagging'))
+        actions.append('tag')
 
     if worker['bump']:
         if not worker['bump-files']:
@@ -1275,16 +1326,29 @@ def build_treescript_payload(config, task, task_def):
         bump_info['next_version'] = release_config['next_version']
         bump_info['files'] = worker['bump-files']
         task_def['payload']['version_bump_info'] = bump_info
-        task_def['scopes'].append(add_scope_prefix(config, 'treescript:action:version_bump'))
+        actions.append('version_bump')
+
+    if worker.get('l10n-bump-info'):
+        l10n_bump_info = {}
+        for k, v in worker['l10n-bump-info'].items():
+            l10n_bump_info[k.replace('-', '_')] = worker['l10n-bump-info'][k]
+        task_def['payload']['l10n_bump_info'] = [l10n_bump_info]
+        actions.append('l10n_bump')
 
     if worker['push']:
-        task_def['scopes'].append(add_scope_prefix(config, 'treescript:action:push'))
+        actions.append('push')
 
     if worker.get('force-dry-run'):
         task_def['payload']['dry_run'] = True
 
     if worker.get('dontbuild'):
         task_def['payload']['dontbuild'] = True
+
+    if worker.get('ignore-closed-tree') is not None:
+        task_def['payload']['ignore_closed_tree'] = worker['ignore-closed-tree']
+
+    if worker.get('source-repo'):
+        task_def['payload']['source_repo'] = worker['source-repo']
 
 
 @payload_builder('invalid', schema={
@@ -1744,15 +1808,45 @@ def add_index_routes(config, tasks):
 
 
 @transforms.add
+def try_task_config_env(config, tasks):
+    """Set environment variables in the task."""
+    env = config.params['try_task_config'].get('env')
+    # Find all implementations that have an 'env' key.
+    implementations = {name for name, builder in payload_builders.items()
+                       if 'env' in builder.schema.schema}
+    for task in tasks:
+        if env and task['worker']['implementation'] in implementations:
+            task['worker']['env'].update(env)
+        yield task
+
+
+@transforms.add
+def try_task_config_chemspill_prio(config, tasks):
+    """Increase the priority from lowest and very-low -> low, but leave others unchanged."""
+    chemspill_prio = config.params['try_task_config'].get('chemspill-prio')
+    for task in tasks:
+        if chemspill_prio and task['priority'] in ('lowest', 'very-low'):
+            task['priority'] = 'low'
+        yield task
+
+
+@transforms.add
 def build_task(config, tasks):
     for task in tasks:
         level = str(config.params['level'])
 
-        provisioner_id, worker_type = get_worker_type(
-            config.graph_config,
-            task['worker-type'],
-            level,
-        )
+        if task['worker-type'] in config.params['try_task_config'].get('worker-overrides', {}):
+            worker_pool = (
+                config.params['try_task_config']['worker-overrides'][task['worker-type']]
+            )
+            provisioner_id, worker_type = worker_pool.split('/', 1)
+        else:
+            provisioner_id, worker_type = get_worker_type(
+                config.graph_config,
+                task['worker-type'],
+                level=level,
+                release_level=config.params.release_level(),
+            )
         task['worker-type'] = '/'.join([provisioner_id, worker_type])
         project = config.params['project']
 

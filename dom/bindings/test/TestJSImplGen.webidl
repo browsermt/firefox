@@ -15,19 +15,21 @@ enum MyTestEnum {
   "b"
 };
 
-// We don't support multiple constructors (bug 869268) or named constructors
-// for JS-implemented WebIDL.
-[Constructor(DOMString str, unsigned long num, boolean? boolArg,
-             TestInterface? iface, long arg1,
-             DictForConstructor dict, any any1,
-             object obj1,
-             object? obj2, sequence<Dict> seq, optional any any2,
-             optional object obj3,
-             optional object? obj4,
-             Uint8Array typedArr,
-             ArrayBuffer arrayBuf),
- JSImplementation="@mozilla.org/test-js-impl-interface;1"]
+[Exposed=Window, JSImplementation="@mozilla.org/test-js-impl-interface;1"]
 interface TestJSImplInterface {
+  // We don't support multiple constructors (bug 869268) or named constructors
+  // for JS-implemented WebIDL.
+  [Throws]
+  constructor(DOMString str, unsigned long num, boolean? boolArg,
+              TestInterface? iface, long arg1,
+              DictForConstructor dict, any any1,
+              object obj1,
+              object? obj2, sequence<Dict> seq, optional any any2,
+              optional object obj3,
+              optional object? obj4,
+              Uint8Array typedArr,
+              ArrayBuffer arrayBuf);
+
   // Integer types
   // XXXbz add tests for throwing versions of all the integer stuff
   readonly attribute byte readonlyByte;
@@ -184,21 +186,6 @@ interface TestJSImplInterface {
   [NewObject]
   sequence<TestNonWrapperCacheInterface?>? receiveNullableNonWrapperCacheInterfaceNullableSequence();
 
-  // Non-castable interface types
-  IndirectlyImplementedInterface receiveOther();
-  IndirectlyImplementedInterface? receiveNullableOther();
-  IndirectlyImplementedInterface receiveWeakOther();
-  IndirectlyImplementedInterface? receiveWeakNullableOther();
-
-  void passOther(IndirectlyImplementedInterface arg);
-  void passNullableOther(IndirectlyImplementedInterface? arg);
-  attribute IndirectlyImplementedInterface nonNullOther;
-  attribute IndirectlyImplementedInterface? nullableOther;
-  // Optional arguments
-  void passOptionalOther(optional IndirectlyImplementedInterface? arg);
-  void passOptionalNonNullOther(optional IndirectlyImplementedInterface arg);
-  void passOptionalOtherWithDefault(optional IndirectlyImplementedInterface? arg = null);
-
   // External interface types
   TestExternalInterface receiveExternal();
   TestExternalInterface? receiveNullableExternal();
@@ -226,10 +213,6 @@ interface TestJSImplInterface {
   void passOptionalCallbackInterface(optional TestCallbackInterface? arg);
   void passOptionalNonNullCallbackInterface(optional TestCallbackInterface arg);
   void passOptionalCallbackInterfaceWithDefault(optional TestCallbackInterface? arg = null);
-
-  // Miscellaneous interface tests
-  IndirectlyImplementedInterface receiveConsequentialInterface();
-  void passConsequentialInterface(IndirectlyImplementedInterface arg);
 
   // Sequence types
   // [Cached] is not supported in JS-implemented WebIDL.
@@ -277,6 +260,7 @@ interface TestJSImplInterface {
 
   sequence<DOMString> receiveStringSequence();
   sequence<ByteString> receiveByteStringSequence();
+  sequence<UTF8String> receiveUTF8StringSequence();
   // Callback interface problem.  See bug 843261.
   //void passStringSequence(sequence<DOMString> arg);
   sequence<any> receiveAnySequence();
@@ -310,6 +294,7 @@ interface TestJSImplInterface {
   void passNullableExternalInterfaceRecord(record<DOMString, TestExternalInterface?> arg);
   void passStringRecord(record<DOMString, DOMString> arg);
   void passByteStringRecord(record<DOMString, ByteString> arg);
+  void passUTF8StringRecord(record<DOMString, UTF8String> arg);
   void passRecordOfRecords(record<DOMString, record<DOMString, long>> arg);
   record<DOMString, long> receiveRecord();
   record<DOMString, long>? receiveNullableRecord();
@@ -365,6 +350,18 @@ interface TestJSImplInterface {
   void passOptionalUnionByteString(optional (ByteString or long) arg);
   void passOptionalUnionByteStringWithDefaultValue(optional (ByteString or long) arg = "abc");
 
+  // UTF8String types
+  void passUTF8String(UTF8String arg);
+  void passNullableUTF8String(UTF8String? arg);
+  void passOptionalUTF8String(optional UTF8String arg);
+  void passOptionalUTF8StringWithDefaultValue(optional UTF8String arg = "abc");
+  void passOptionalNullableUTF8String(optional UTF8String? arg);
+  void passOptionalNullableUTF8StringWithDefaultValue(optional UTF8String? arg = null);
+  void passVariadicUTF8String(UTF8String... arg);
+  void passUnionUTF8String((UTF8String or long) arg);
+  void passOptionalUnionUTF8String(optional (UTF8String or long) arg);
+  void passOptionalUnionUTF8StringWithDefaultValue(optional (UTF8String or long) arg = "abc");
+
   // USVString types
   void passSVS(USVString arg);
   void passNullableSVS(USVString? arg);
@@ -374,6 +371,24 @@ interface TestJSImplInterface {
   void passOptionalNullableSVSWithDefaultValue(optional USVString? arg = null);
   void passVariadicSVS(USVString... arg);
   USVString receiveSVS();
+
+  // JSString types
+  void passJSString(JSString arg);
+  // void passNullableJSString(JSString? arg); // NOT SUPPORTED YET
+  // void passOptionalJSString(optional JSString arg); // NOT SUPPORTED YET
+  void passOptionalJSStringWithDefaultValue(optional JSString arg = "abc");
+  // void passOptionalNullableJSString(optional JSString? arg); // NOT SUPPORTED YET
+  // void passOptionalNullableJSStringWithDefaultValue(optional JSString? arg = null); // NOT SUPPORTED YET
+  // void passVariadicJSString(JSString... arg); // NOT SUPPORTED YET
+  // void passRecordOfJSString(record<DOMString, JSString> arg); // NOT SUPPORTED YET
+  // void passSequenceOfJSString(sequence<JSString> arg); // NOT SUPPORTED YET
+  // void passUnionJSString((JSString or long) arg); // NOT SUPPORTED YET
+  JSString receiveJSString();
+  // sequence<JSString> receiveJSStringSequence(); // NOT SUPPORTED YET
+  // (JSString or long) receiveJSStringUnion(); // NOT SUPPORTED YET
+  // record<DOMString, JSString> receiveJSStringRecord(); // NOT SUPPORTED YET
+  readonly attribute JSString readonlyJSStringAttr;
+  attribute JSString jsStringAttr;
 
   // Enumerated types
   void passEnum(MyTestEnum arg);
@@ -479,6 +494,7 @@ interface TestJSImplInterface {
   void passUnion28(optional (EventInit or sequence<DOMString>) arg = {});
   void passUnionWithCallback((EventHandler or long) arg);
   void passUnionWithByteString((ByteString or long) arg);
+  void passUnionWithUTF8String((UTF8String or long) arg);
   void passUnionWithRecord((record<DOMString, DOMString> or DOMString) arg);
   void passUnionWithRecordAndSequence((record<DOMString, DOMString> or sequence<DOMString>) arg);
   void passUnionWithSequenceAndRecord((sequence<DOMString> or record<DOMString, DOMString>) arg);
@@ -528,6 +544,9 @@ interface TestJSImplInterface {
   void passUnionWithDefaultValue20(optional (double or USVString) arg = "abc");
   void passUnionWithDefaultValue21(optional (double or USVString) arg = 1);
   void passUnionWithDefaultValue22(optional (double or USVString) arg = 1.5);
+  void passUnionWithDefaultValue23(optional (double or UTF8String) arg = "");
+  void passUnionWithDefaultValue24(optional (double or UTF8String) arg = 1);
+  void passUnionWithDefaultValue25(optional (double or UTF8String) arg = 1.5);
 
   void passNullableUnionWithDefaultValue1(optional (double or DOMString)? arg = "");
   void passNullableUnionWithDefaultValue2(optional (double or DOMString)? arg = 1);
@@ -553,6 +572,10 @@ interface TestJSImplInterface {
   void passNullableUnionWithDefaultValue22(optional (double or USVString)? arg = 1);
   void passNullableUnionWithDefaultValue23(optional (double or USVString)? arg = 1.5);
   void passNullableUnionWithDefaultValue24(optional (double or USVString)? arg = null);
+  void passNullableUnionWithDefaultValue25(optional (double or UTF8String)? arg = "");
+  void passNullableUnionWithDefaultValue26(optional (double or UTF8String)? arg = 1);
+  void passNullableUnionWithDefaultValue27(optional (double or UTF8String)? arg = 1.5);
+  void passNullableUnionWithDefaultValue28(optional (double or UTF8String)? arg = null);
 
   void passSequenceOfUnions(sequence<(CanvasPattern or CanvasGradient)> arg);
   void passSequenceOfUnions2(sequence<(object or long)> arg);
@@ -594,14 +617,14 @@ interface TestJSImplInterface {
   Promise<any> receiveAddrefedPromise();
 
   // binaryNames tests
+  [BinaryName="methodRenamedTo"]
   void methodRenamedFrom();
-  [BinaryName="otherMethodRenamedTo"]
-  void otherMethodRenamedFrom();
+  [BinaryName="methodRenamedTo"]
   void methodRenamedFrom(byte argument);
+  [BinaryName="attributeGetterRenamedTo"]
   readonly attribute byte attributeGetterRenamedFrom;
+  [BinaryName="attributeRenamedTo"]
   attribute byte attributeRenamedFrom;
-  [BinaryName="otherAttributeRenamedTo"]
-  attribute byte otherAttributeRenamedFrom;
 
   void passDictionary(optional Dict x = {});
   void passDictionary2(Dict x);
@@ -636,9 +659,13 @@ interface TestJSImplInterface {
   // EnforceRange/Clamp tests
   void dontEnforceRangeOrClamp(byte arg);
   void doEnforceRange([EnforceRange] byte arg);
+  void doEnforceRangeNullable([EnforceRange] byte? arg);
   void doClamp([Clamp] byte arg);
+  void doClampNullable([Clamp] byte? arg);
   attribute [EnforceRange] byte enforcedByte;
+  attribute [EnforceRange] byte? enforcedByteNullable;
   attribute [Clamp] byte clampedByte;
+  attribute [Clamp] byte? clampedByteNullable;
 
   // Typedefs
   const myLong myLongConstant = 5;
@@ -647,11 +674,11 @@ interface TestJSImplInterface {
   void exerciseTypedefInterfaces3(YetAnotherNameForTestJSImplInterface arg);
 
   // Deprecated methods and attributes
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   attribute byte deprecatedAttribute;
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   byte deprecatedMethod();
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   void deprecatedMethodWithContext(any arg);
 
   // Static methods and attributes
@@ -662,11 +689,11 @@ interface TestJSImplInterface {
   static void staticMethodWithContext(any arg);
 
   // Deprecated static methods and attributes
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   static attribute byte staticDeprecatedAttribute;
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   static byte staticDeprecatedMethod();
-  [Deprecated="EnablePrivilege"]
+  [Deprecated="Components"]
   static byte staticDeprecatedMethodWithContext();
   */
 
@@ -841,14 +868,17 @@ interface TestJSImplInterface {
   // If you add things here, add them to TestCodeGen as well
 };
 
+[Exposed=Window]
 interface TestCImplementedInterface : TestJSImplInterface {
 };
 
+[Exposed=Window]
 interface TestCImplementedInterface2 {
 };
 
 [NoInterfaceObject,
- JSImplementation="@mozilla.org/test-js-impl-interface;2"]
+ JSImplementation="@mozilla.org/test-js-impl-interface;2",
+ Exposed=Window]
 interface TestJSImplNoInterfaceObject {
   // [Cached] is not supported in JS-implemented WebIDL.
   //[Cached, Pure]

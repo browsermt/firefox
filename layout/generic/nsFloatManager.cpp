@@ -454,6 +454,9 @@ nsresult nsFloatManager::List(FILE* out) const {
 nscoord nsFloatManager::ClearFloats(nscoord aBCoord, StyleClear aBreakType,
                                     uint32_t aFlags) const {
   if (!(aFlags & DONT_CLEAR_PUSHED_FLOATS) && ClearContinues(aBreakType)) {
+    // FIXME bug 1574046. This makes no sense! we set aState.mBCoord from this
+    // result which will eventually make our parent's size nscoord_MAX!
+    // This is wallpapered over in nsBlockFrame::ComputeFinalSize for now...
     return nscoord_MAX;
   }
   if (!HasAnyFloats()) {
@@ -2202,12 +2205,8 @@ void nsFloatManager::ImageShapeInfo::CreateInterval(
     // constructed. We add 1 to aB to capture the end of the block axis pixel.
     origin.MoveBy(aIMin * aAppUnitsPerDevPixel,
                   (aB + 1) * -aAppUnitsPerDevPixel);
-  } else if (aWM.IsVerticalLR() && !aWM.IsLineInverted()) {
-    // sideways-lr.
-    // Checking IsLineInverted is the only reliable way to distinguish
-    // vertical-lr from sideways-lr. IsSideways and IsInlineReversed are both
-    // affected by bidi and text-direction, and so complicate detection.
-    // These writing modes proceed from the bottom left, and each interval
+  } else if (aWM.IsSidewaysLR()) {
+    // This writing mode proceeds from the bottom left, and each interval
     // moves in a negative inline direction and a positive block direction.
     // We add 1 to aIMax to capture the end of the inline axis pixel.
     origin.MoveBy((aIMax + 1) * -aAppUnitsPerDevPixel,
@@ -2443,10 +2442,10 @@ LogicalRect nsFloatManager::ShapeInfo::ComputeShapeBoxRect(
   switch (aShapeOutside.GetReferenceBox()) {
     case StyleGeometryBox::ContentBox:
       rect.Deflate(aWM, aFrame->GetLogicalUsedPadding(aWM));
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case StyleGeometryBox::PaddingBox:
       rect.Deflate(aWM, aFrame->GetLogicalUsedBorder(aWM));
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case StyleGeometryBox::BorderBox:
       rect.Deflate(aWM, aFrame->GetLogicalUsedMargin(aWM));
       break;

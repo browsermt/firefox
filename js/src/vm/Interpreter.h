@@ -45,6 +45,9 @@ extern JSObject* ValueToCallable(JSContext* cx, HandleValue v,
                                  int numToSkip = -1,
                                  MaybeConstruct construct = NO_CONSTRUCT);
 
+// Reasons why a call could be performed, for passing onto the debugger.
+enum class CallReason { Call, Getter, Setter };
+
 /*
  * Call or construct arguments that are stored in rooted memory.
  *
@@ -54,7 +57,8 @@ extern JSObject* ValueToCallable(JSContext* cx, HandleValue v,
  *       performed, use |Invoke|.
  */
 extern bool InternalCallOrConstruct(JSContext* cx, const CallArgs& args,
-                                    MaybeConstruct construct);
+                                    MaybeConstruct construct,
+                                    CallReason reason = CallReason::Call);
 
 /*
  * These helpers take care of the infinite-recursion check necessary for
@@ -76,7 +80,8 @@ extern bool CallSetter(JSContext* cx, HandleValue thisv, HandleValue setter,
 // |rval| is written to *only* after |fval| and |thisv| have been consumed, so
 // |rval| *may* alias either argument.
 extern bool Call(JSContext* cx, HandleValue fval, HandleValue thisv,
-                 const AnyInvokeArgs& args, MutableHandleValue rval);
+                 const AnyInvokeArgs& args, MutableHandleValue rval,
+                 CallReason reason = CallReason::Call);
 
 inline bool Call(JSContext* cx, HandleValue fval, HandleValue thisv,
                  MutableHandleValue rval) {
@@ -457,6 +462,18 @@ class MOZ_STACK_CLASS TryNoteIter {
   const JSTryNote* operator*() const { return tn_; }
 };
 
+class NoOpTryNoteFilter {
+ public:
+  explicit NoOpTryNoteFilter() = default;
+  bool operator()(const JSTryNote*) { return true; }
+};
+
+class TryNoteIterAll : public TryNoteIter<NoOpTryNoteFilter> {
+ public:
+  TryNoteIterAll(JSContext* cx, JSScript* script, jsbytecode* pc)
+      : TryNoteIter(cx, script, pc, NoOpTryNoteFilter()) {}
+};
+
 bool HandleClosingGeneratorReturn(JSContext* cx, AbstractFramePtr frame,
                                   bool ok);
 
@@ -477,9 +494,6 @@ JSObject* LambdaArrow(JSContext* cx, HandleFunction fun, HandleObject parent,
 
 bool SetObjectElement(JSContext* cx, HandleObject obj, HandleValue index,
                       HandleValue value, bool strict);
-bool SetObjectElement(JSContext* cx, HandleObject obj, HandleValue index,
-                      HandleValue value, bool strict, HandleScript script,
-                      jsbytecode* pc);
 
 bool SetObjectElementWithReceiver(JSContext* cx, HandleObject obj,
                                   HandleValue index, HandleValue value,
@@ -625,7 +639,7 @@ enum class CheckIsCallableKind : uint8_t { IteratorReturn };
 
 bool ThrowCheckIsCallable(JSContext* cx, CheckIsCallableKind kind);
 
-bool ThrowUninitializedThis(JSContext* cx, AbstractFramePtr frame);
+bool ThrowUninitializedThis(JSContext* cx);
 
 bool ThrowInitializedThis(JSContext* cx);
 

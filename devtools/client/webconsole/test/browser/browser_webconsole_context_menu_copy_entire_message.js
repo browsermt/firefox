@@ -43,7 +43,7 @@ add_task(async function() {
   const hud = await openNewTabAndConsole(TEST_URI);
 
   info("Call the log function defined in the test page");
-  await ContentTask.spawn(gBrowser.selectedBrowser, null, () => {
+  await SpecialPowers.spawn(gBrowser.selectedBrowser, [], () => {
     content.wrappedJSObject.logStuff();
   });
 
@@ -51,7 +51,10 @@ add_task(async function() {
   await testMessagesCopy(hud, true);
 
   // Disable timestamp and wait until timestamp are not displayed anymore.
-  await pushPref(PREF_MESSAGE_TIMESTAMP, false);
+  await toggleConsoleSetting(
+    hud,
+    ".webconsole-console-settings-menu-item-timestamps"
+  );
   await waitFor(
     () => hud.ui.outputNode.querySelector(".message .timestamp") === null
   );

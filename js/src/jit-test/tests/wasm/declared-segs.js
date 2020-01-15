@@ -14,7 +14,7 @@ wasmFullPass(`
 assertThrowsInstanceOf(() => {
 	wasmTextToBinary(`
 		(module
-			(elem declared ref.null)
+			(elem declared (ref.null))
 		)
 	`)
 }, SyntaxError);
@@ -32,9 +32,8 @@ function test(ins) {
 			)
 		`),
 		WebAssembly.RuntimeError,
-		'use of dropped element segment');
+		'index out of bounds');
 }
-test('(elem.drop 0)');
 test('(table.init 0 (i32.const 0) (i32.const 0) (i32.const 1))');
 
 // Declared segments don't cause initialization of a table

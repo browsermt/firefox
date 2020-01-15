@@ -26,8 +26,6 @@ class GLContext;
 
 namespace layers {
 class CompositorBridgeParent;
-class NativeLayerRoot;
-class NativeLayer;
 class SyncObjectHost;
 }  // namespace layers
 
@@ -47,10 +45,10 @@ class RenderTextureHost;
 /// on the render thread instead of the compositor thread.
 class RendererOGL {
   friend wr::WrExternalImage LockExternalImage(void* aObj,
-                                               wr::WrExternalImageId aId,
+                                               wr::ExternalImageId aId,
                                                uint8_t aChannelIndex,
                                                wr::ImageRendering);
-  friend void UnlockExternalImage(void* aObj, wr::WrExternalImageId aId,
+  friend void UnlockExternalImage(void* aObj, wr::ExternalImageId aId,
                                   uint8_t aChannelIndex);
 
  public:
@@ -60,13 +58,19 @@ class RendererOGL {
   void Update();
 
   /// This can be called on the render thread only.
-  bool UpdateAndRender(const Maybe<gfx::IntSize>& aReadbackSize,
-                       const Maybe<wr::ImageFormat>& aReadbackFormat,
-                       const Maybe<Range<uint8_t>>& aReadbackBuffer,
-                       bool aHadSlowFrame, RendererStats* aOutStats);
+  RenderedFrameId UpdateAndRender(const Maybe<gfx::IntSize>& aReadbackSize,
+                                  const Maybe<wr::ImageFormat>& aReadbackFormat,
+                                  const Maybe<Range<uint8_t>>& aReadbackBuffer,
+                                  bool aHadSlowFrame, RendererStats* aOutStats);
 
   /// This can be called on the render thread only.
   void WaitForGPU();
+
+  /// This can be called on the render thread only.
+  RenderedFrameId GetLastCompletedFrameId();
+
+  /// This can be called on the render thread only.
+  RenderedFrameId UpdateFrameId();
 
   /// This can be called on the render thread only.
   void SetProfilerEnabled(bool aEnabled);
@@ -97,7 +101,7 @@ class RendererOGL {
 
   RefPtr<WebRenderPipelineInfo> FlushPipelineInfo();
 
-  RenderTextureHost* GetRenderTexture(wr::WrExternalImageId aExternalImageId);
+  RenderTextureHost* GetRenderTexture(wr::ExternalImageId aExternalImageId);
 
   void AccumulateMemoryReport(MemoryReport* aReport);
 
@@ -108,8 +112,6 @@ class RendererOGL {
  protected:
   RefPtr<RenderThread> mThread;
   UniquePtr<RenderCompositor> mCompositor;
-  RefPtr<layers::NativeLayerRoot> mNativeLayerRoot;
-  RefPtr<layers::NativeLayer> mNativeLayerForEntireWindow;
   wr::Renderer* mRenderer;
   layers::CompositorBridgeParent* mBridge;
   wr::WindowId mWindowId;

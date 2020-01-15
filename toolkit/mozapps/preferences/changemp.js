@@ -122,6 +122,7 @@ function setPassword() {
         createAlert("pw-change-failed-title", "incorrect-pw");
       }
     } catch (e) {
+      Cu.reportError(e);
       createAlert("pw-change-failed-title", "failed-pw-change");
     }
   } else {
@@ -187,7 +188,7 @@ function setPasswordStrength() {
 function checkPasswords() {
   var pw1 = document.getElementById("pw1").value;
   var pw2 = document.getElementById("pw2").value;
-  var ok = document.documentElement.getButton("accept");
+  var ok = document.getElementById("changemp").getButton("accept");
 
   var oldpwbox = document.getElementById("oldpw");
   if (oldpwbox) {

@@ -15,9 +15,8 @@
 
 #include "builtin/BigInt.h"
 #include "builtin/MapObject.h"
-#include "builtin/Promise.h"
 #include "builtin/TestingFunctions.h"
-#include "gc/GCInternals.h"
+#include "gc/GC.h"
 #include "gc/PublicIterators.h"
 #include "gc/WeakMap.h"
 #include "js/CharacterEncoding.h"
@@ -25,10 +24,15 @@
 #include "js/Proxy.h"
 #include "js/Wrapper.h"
 #include "proxy/DeadObjectProxy.h"
+#include "util/Poison.h"
 #include "vm/ArgumentsObject.h"
 #include "vm/DateObject.h"
+#include "vm/ErrorObject.h"
+#include "vm/FrameIter.h"  // js::FrameIter
 #include "vm/JSContext.h"
 #include "vm/JSObject.h"
+#include "vm/Printer.h"
+#include "vm/PromiseObject.h"  // js::PromiseObject
 #include "vm/Realm.h"
 #include "vm/Time.h"
 #include "vm/WrapperObject.h"
@@ -341,6 +345,10 @@ JS_FRIEND_API bool js::IsFunctionObject(JSObject* obj) {
   return obj->is<JSFunction>();
 }
 
+JS_FRIEND_API bool js::IsSavedFrame(JSObject* obj) {
+  return obj->is<SavedFrame>();
+}
+
 JS_FRIEND_API bool js::UninlinedIsCrossCompartmentWrapper(const JSObject* obj) {
   return js::IsCrossCompartmentWrapper(obj);
 }
@@ -561,6 +569,17 @@ JS_FRIEND_API void JS_SetSetUseCounterCallback(
   cx->runtime()->setUseCounterCallback(cx->runtime(), callback);
 }
 
+JS_FRIEND_API void JS_ReportFirstCompileTime(JS::HandleScript script,
+                                             mozilla::TimeDuration& parse,
+                                             mozilla::TimeDuration& emit) {
+  auto ss = script->scriptSource();
+  if (!ss) {
+    return;
+  }
+  parse = ss->parseTime();
+  emit = ss->emitTime();
+}
+
 JS_FRIEND_API JSObject* JS_CloneObject(JSContext* cx, HandleObject obj,
                                        HandleObject protoArg) {
   // |obj| might be in a different compartment.
@@ -568,8 +587,6 @@ JS_FRIEND_API JSObject* JS_CloneObject(JSContext* cx, HandleObject obj,
   Rooted<TaggedProto> proto(cx, TaggedProto(protoArg.get()));
   return CloneObject(cx, obj, proto);
 }
-
-#if defined(DEBUG) || defined(JS_JITSPEW)
 
 // We don't want jsfriendapi.h to depend on GenericPrinter,
 // so these functions are declared directly in the cpp.
@@ -596,56 +613,76 @@ extern JS_FRIEND_API void DumpInterpreterFrame(
 }  // namespace js
 
 JS_FRIEND_API void js::DumpString(JSString* str, js::GenericPrinter& out) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   str->dump(out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpAtom(JSAtom* atom, js::GenericPrinter& out) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   atom->dump(out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpChars(const char16_t* s, size_t n,
                                  js::GenericPrinter& out) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   out.printf("char16_t * (%p) = ", (void*)s);
   JSString::dumpChars(s, n, out);
   out.putChar('\n');
+#endif
 }
 
 JS_FRIEND_API void js::DumpObject(JSObject* obj, js::GenericPrinter& out) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   if (!obj) {
     out.printf("NULL\n");
     return;
   }
   obj->dump(out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpString(JSString* str, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpString(str, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpAtom(JSAtom* atom, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpAtom(atom, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpChars(const char16_t* s, size_t n, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpChars(s, n, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpObject(JSObject* obj, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpObject(obj, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpId(jsid id, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpId(id, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpValue(const JS::Value& val, FILE* fp) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(fp);
   js::DumpValue(val, out);
+#endif
 }
 
 JS_FRIEND_API void js::DumpString(JSString* str) { DumpString(str, stderr); }
@@ -660,15 +697,25 @@ JS_FRIEND_API void js::DumpValue(const JS::Value& val) {
 JS_FRIEND_API void js::DumpId(jsid id) { DumpId(id, stderr); }
 JS_FRIEND_API void js::DumpInterpreterFrame(JSContext* cx,
                                             InterpreterFrame* start) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
   Fprinter out(stderr);
   DumpInterpreterFrame(cx, out, start);
-}
-JS_FRIEND_API bool js::DumpPC(JSContext* cx) { return DumpPC(cx, stdout); }
-JS_FRIEND_API bool js::DumpScript(JSContext* cx, JSScript* scriptArg) {
-  return DumpScript(cx, scriptArg, stdout);
-}
-
 #endif
+}
+JS_FRIEND_API bool js::DumpPC(JSContext* cx) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
+  return DumpPC(cx, stdout);
+#else
+  return true;
+#endif
+}
+JS_FRIEND_API bool js::DumpScript(JSContext* cx, JSScript* scriptArg) {
+#if defined(DEBUG) || defined(JS_JITSPEW)
+  return DumpScript(cx, scriptArg, stdout);
+#else
+  return true;
+#endif
+}
 
 static const char* FormatValue(JSContext* cx, HandleValue v,
                                UniqueChars& bytes) {
@@ -699,7 +746,7 @@ static const char* FormatValue(JSContext* cx, HandleValue v,
     }
   }
 
-  bytes = StringToNewUTF8CharsZ(cx, *str);
+  bytes = QuoteString(cx, str, '"');
   return bytes.get();
 }
 
@@ -733,7 +780,7 @@ static bool FormatFrame(JSContext* cx, const FrameIter& iter, Sprinter& sp,
 
   // print the frame number and function name
   if (funname) {
-    UniqueChars funbytes = StringToNewUTF8CharsZ(cx, *funname);
+    UniqueChars funbytes = QuoteString(cx, funname);
     if (!funbytes) {
       return false;
     }
@@ -835,7 +882,7 @@ static bool FormatFrame(JSContext* cx, const FrameIter& iter, Sprinter& sp,
         cx->clearPendingException();
       }
       if (thisValStr) {
-        UniqueChars thisValBytes = StringToNewUTF8CharsZ(cx, *thisValStr);
+        UniqueChars thisValBytes = QuoteString(cx, thisValStr);
         if (!thisValBytes) {
           return false;
         }
@@ -1022,8 +1069,8 @@ struct DumpHeapTracer final : public JS::CallbackTracer, public WeakMapTracer {
   bool onChild(const JS::GCCellPtr& thing) override;
 };
 
-static char MarkDescriptor(void* thing) {
-  gc::TenuredCell* cell = gc::TenuredCell::fromPointer(thing);
+static char MarkDescriptor(gc::Cell* thing) {
+  gc::TenuredCell* cell = &thing->asTenured();
   if (cell->isMarkedBlack()) {
     return 'B';
   }
@@ -1062,23 +1109,23 @@ static void DumpHeapVisitArena(JSRuntime* rt, void* data, gc::Arena* arena,
           unsigned(arena->getAllocKind()), unsigned(thingSize));
 }
 
-static void DumpHeapVisitCell(JSRuntime* rt, void* data, void* thing,
-                              JS::TraceKind traceKind, size_t thingSize) {
+static void DumpHeapVisitCell(JSRuntime* rt, void* data, JS::GCCellPtr cellptr,
+                              size_t thingSize) {
   DumpHeapTracer* dtrc = static_cast<DumpHeapTracer*>(data);
   char cellDesc[1024 * 32];
-  JS_GetTraceThingInfo(cellDesc, sizeof(cellDesc), dtrc, thing, traceKind,
-                       true);
+  JS_GetTraceThingInfo(cellDesc, sizeof(cellDesc), dtrc, cellptr.asCell(),
+                       cellptr.kind(), true);
 
-  fprintf(dtrc->output, "%p %c %s", thing, MarkDescriptor(thing), cellDesc);
+  fprintf(dtrc->output, "%p %c %s", cellptr.asCell(),
+          MarkDescriptor(cellptr.asCell()), cellDesc);
   if (dtrc->mallocSizeOf) {
-    auto size =
-        JS::ubi::Node(JS::GCCellPtr(thing, traceKind)).size(dtrc->mallocSizeOf);
+    auto size = JS::ubi::Node(cellptr).size(dtrc->mallocSizeOf);
     fprintf(dtrc->output, " SIZE:: %" PRIu64 "\n", size);
   } else {
     fprintf(dtrc->output, "\n");
   }
 
-  js::TraceChildren(dtrc, thing, traceKind);
+  js::TraceChildren(dtrc, cellptr.asCell(), cellptr.kind());
 }
 
 bool DumpHeapTracer::onChild(const JS::GCCellPtr& thing) {
@@ -1103,12 +1150,7 @@ void js::DumpHeap(JSContext* cx, FILE* fp,
   DumpHeapTracer dtrc(fp, cx, mallocSizeOf);
 
   fprintf(dtrc.output, "# Roots.\n");
-  {
-    JSRuntime* rt = cx->runtime();
-    js::gc::AutoTraceSession session(rt);
-    gcstats::AutoPhase ap(rt->gc.stats(), gcstats::PhaseKind::TRACE_HEAP);
-    rt->gc.traceRuntime(&dtrc, session);
-  }
+  TraceRuntimeWithoutEviction(&dtrc);
 
   fprintf(dtrc.output, "# Weak maps.\n");
   WeakMapBase::traceAllMappings(&dtrc);
@@ -1411,3 +1453,27 @@ JS_FRIEND_API bool js::RuntimeIsBeingDestroyed() {
   return runtime->isBeingDestroyed();
 }
 #endif
+
+// No-op implementations of public API that would depend on --with-intl-api
+
+#ifndef JS_HAS_INTL_API
+
+static bool IntlNotEnabled(JSContext* cx) {
+  JS_ReportErrorNumberASCII(cx, js::GetErrorMessage, nullptr,
+                            JSMSG_SUPPORT_NOT_ENABLED, "Intl");
+  return false;
+}
+
+bool js::AddMozDateTimeFormatConstructor(JSContext* cx, JS::HandleObject intl) {
+  return IntlNotEnabled(cx);
+}
+
+bool js::AddListFormatConstructor(JSContext* cx, JS::HandleObject intl) {
+  return IntlNotEnabled(cx);
+}
+
+bool js::AddLocaleConstructor(JSContext* cx, JS::HandleObject intl) {
+  return IntlNotEnabled(cx);
+}
+
+#endif  // !JS_HAS_INTL_API

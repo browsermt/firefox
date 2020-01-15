@@ -14,6 +14,13 @@ job-defaults:
         by-test-platform:
             linux64/debug: ['fission', 'serviceworker']
             default: ['fission']
+    fission-run-on-projects:
+        by-test-platform:
+            linux64-qr/debug: ['trunk']
+            linux64-qr/opt: ['mozilla-central']
+            windows10-64-qr/opt: ['mozilla-central']
+            default: []
+    fission-tier: 2
     mozharness:
         script: web_platform_tests.py
         config:
@@ -41,23 +48,26 @@ web-platform-tests:
     chunks:
         by-test-platform:
             android.*: 18
-            linux64-asan/opt: 18
+            linux64-asan/opt: 24
             linux64-ccov/debug: 24
+            linux64-ccov/opt: 24
             linux.*/debug: 18
             macosx*/opt: 8
             macosx.*/debug: 16
-            windows10.*/debug: 18
-            windows10-aarch64/opt: 12
+            windows.*/debug: 18
+            windows10-64-ccov/opt: 18
+            windows10-aarch64/opt: 16
             default: 12
     max-run-time:
         by-test-platform:
-            .*-ccov/debug: 10800
+            .*-ccov/.*: 10800
             linux64-qr/debug: 9000
             default: 7200
     e10s: true
     run-on-projects:
         by-test-platform:
             windows10-aarch64/opt: ['try', 'mozilla-central']
+            linux1804-32-shippable/opt: ['try', 'release']  # skip integration, Bug 1599197
             .*-qr/.*: ['release', 'try']  # skip on integration branches due to high load
             default: built-projects
     tier:
@@ -65,6 +75,7 @@ web-platform-tests:
             linux64-asan/opt: 2
             windows10-aarch64.*: 2
             .*-qr/.*: 2  # can't be tier-1 if it's not running on integration branches
+            linux64-ccov/opt: 3
             default: default
     mozharness:
         chunked: true
@@ -83,9 +94,9 @@ web-platform-tests-reftests:
             default: virtual
     chunks:
         by-test-platform:
-            .*-ccov/debug: 8
-            linux64(-qr|-asan)/.*: 6
-            linux64(-shippable|-devedition)?/opt: 3
+            .*-ccov/.*: 8
+            linux1804-64(-qr|-asan)/.*: 6
+            linux1804-64(-shippable|-devedition)?/opt: 3
             macosx10.*-64/debug: 6
             windows.*-(32|64)(-qr)?/debug: 5
             android.*: 6
@@ -97,7 +108,7 @@ web-platform-tests-reftests:
             default: built-projects
     tier:
         by-test-platform:
-            linux64-asan/opt: 2
+            linux1804-64-asan/opt: 2
             windows10-aarch64.*: 2
             default: default
     mozharness:
@@ -112,7 +123,7 @@ web-platform-tests-wdspec:
     treeherder-symbol: W(Wd)
     chunks:
         by-test-platform:
-            .*-ccov/debug: 4
+            .*-ccov/.*: 4
             default: 2
     mozharness:
         extra-options:
@@ -127,6 +138,7 @@ web-platform-tests-wdspec:
             android.*: 3
             linux64-asan/opt: 2
             .*-qr/.*: 2  # can't be tier-1 if it's not running on integration branches
+            linux64-ccov/opt: 3
             default: default
 
 web-platform-tests-wdspec-headless:
@@ -148,6 +160,29 @@ web-platform-tests-wdspec-headless:
                 default:
                     - --test-type=wdspec
                     - --headless
+
+web-platform-tests-crashtests:
+    description: "Web platform crashtests run"
+    suite:
+        name: web-platform-tests-crashtests
+    schedules-component: web-platform-tests-crashtests
+    treeherder-symbol: W(Wc)
+    chunks: 1
+    mozharness:
+        extra-options:
+            - --test-type=crashtest
+    run-on-projects:
+        by-test-platform:
+            windows10-aarch64/opt: ['try', 'mozilla-central']
+            .*-qr/.*: ['release', 'try']
+            default: built-projects
+    tier:
+        by-test-platform:
+            linux1804-64-asan/opt: 2
+            windows10-aarch64.*: 2
+            .*-qr/.*: 2  # can't be tier-1 if it's not running on integration branches
+            linux64-ccov/opt: 3
+            default: default
 
 test-verify-wpt:
     description: "Extra verification of web-platform tests modified on this push"

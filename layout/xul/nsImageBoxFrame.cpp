@@ -27,8 +27,6 @@
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "nsImageMap.h"
-#include "nsIURL.h"
-#include "nsILoadGroup.h"
 #include "nsContainerFrame.h"
 #include "nsCSSRendering.h"
 #include "nsNameSpaceManager.h"
@@ -36,7 +34,6 @@
 #include "nsTransform2D.h"
 #include "nsITheme.h"
 
-#include "nsIServiceManager.h"
 #include "nsIURI.h"
 #include "nsThreadUtils.h"
 #include "nsDisplayList.h"
@@ -54,6 +51,7 @@
 #include "Units.h"
 #include "mozilla/layers/RenderRootStateManager.h"
 #include "mozilla/layers/WebRenderLayerManager.h"
+#include "mozilla/dom/ImageTracker.h"
 
 #if defined(XP_WIN)
 // Undefine LoadImage to prevent naming conflict with Windows.
@@ -171,6 +169,10 @@ void nsImageBoxFrame::DestroyFrom(nsIFrame* aDestructRoot,
 
     mImageRequest->UnlockImage();
 
+    if (mUseSrcAttr) {
+      PresContext()->Document()->ImageTracker()->Remove(mImageRequest);
+    }
+
     // Release image loader first so that it's refcnt can go to zero
     mImageRequest->CancelAndForgetObserver(NS_ERROR_FAILURE);
   }
@@ -214,6 +216,7 @@ void nsImageBoxFrame::StopAnimation() {
 
 void nsImageBoxFrame::UpdateImage() {
   nsPresContext* presContext = PresContext();
+  Document* doc = presContext->Document();
 
   RefPtr<imgRequestProxy> oldImageRequest = mImageRequest;
 
@@ -221,6 +224,9 @@ void nsImageBoxFrame::UpdateImage() {
     nsLayoutUtils::DeregisterImageRequest(presContext, mImageRequest,
                                           &mRequestRegistered);
     mImageRequest->CancelAndForgetObserver(NS_ERROR_FAILURE);
+    if (mUseSrcAttr) {
+      doc->ImageTracker()->Remove(mImageRequest);
+    }
     mImageRequest = nullptr;
   }
 
@@ -229,47 +235,39 @@ void nsImageBoxFrame::UpdateImage() {
   mContent->AsElement()->GetAttr(kNameSpaceID_None, nsGkAtoms::src, src);
   mUseSrcAttr = !src.IsEmpty();
   if (mUseSrcAttr) {
-    Document* doc = mContent->GetComposedDoc();
-    if (doc) {
-      nsContentPolicyType contentPolicyType;
-      nsCOMPtr<nsIPrincipal> triggeringPrincipal;
-      uint64_t requestContextID = 0;
-      nsContentUtils::GetContentPolicyTypeForUIImageLoading(
-          mContent, getter_AddRefs(triggeringPrincipal), contentPolicyType,
-          &requestContextID);
+    nsContentPolicyType contentPolicyType;
+    nsCOMPtr<nsIPrincipal> triggeringPrincipal;
+    uint64_t requestContextID = 0;
+    nsContentUtils::GetContentPolicyTypeForUIImageLoading(
+        mContent, getter_AddRefs(triggeringPrincipal), contentPolicyType,
+        &requestContextID);
 
-      nsCOMPtr<nsIURI> uri;
-      nsContentUtils::NewURIWithDocumentCharset(getter_AddRefs(uri), src, doc,
-                                                mContent->GetBaseURI());
-      if (uri) {
-        nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo();
-        referrerInfo->InitWithNode(mContent);
+    nsCOMPtr<nsIURI> uri;
+    nsContentUtils::NewURIWithDocumentCharset(getter_AddRefs(uri), src, doc,
+                                              mContent->GetBaseURI());
+    if (uri) {
+      nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo();
+      referrerInfo->InitWithNode(mContent);
 
-        nsresult rv = nsContentUtils::LoadImage(
-            uri, mContent, doc, triggeringPrincipal, requestContextID,
-            referrerInfo, mListener, mLoadFlags, EmptyString(),
-            getter_AddRefs(mImageRequest), contentPolicyType);
+      nsresult rv = nsContentUtils::LoadImage(
+          uri, mContent, doc, triggeringPrincipal, requestContextID,
+          referrerInfo, mListener, mLoadFlags, EmptyString(),
+          getter_AddRefs(mImageRequest), contentPolicyType);
 
-        if (NS_SUCCEEDED(rv) && mImageRequest) {
-          nsLayoutUtils::RegisterImageRequestIfAnimated(
-              presContext, mImageRequest, &mRequestRegistered);
-        }
+      if (NS_SUCCEEDED(rv) && mImageRequest) {
+        nsLayoutUtils::RegisterImageRequestIfAnimated(
+            presContext, mImageRequest, &mRequestRegistered);
+
+        // Add to the ImageTracker so that we can find it when media
+        // feature values change (e.g. when the system theme changes)
+        // and invalidate the image.  This allows favicons to respond
+        // to these changes.
+        doc->ImageTracker()->Add(mImageRequest);
       }
     }
-  } else {
-    // Only get the list-style-image if we aren't being drawn
-    // by a native theme.
-    auto* display = StyleDisplay();
-    nsITheme* theme;
-    if (!(display->HasAppearance() && (theme = presContext->GetTheme()) &&
-          theme->ThemeSupportsWidget(nullptr, this, display->mAppearance))) {
-      // get the list-style-image
-      imgRequestProxy* styleRequest = StyleList()->GetListStyleImage();
-      if (styleRequest) {
-        styleRequest->SyncClone(mListener, mContent->GetComposedDoc(),
-                                getter_AddRefs(mImageRequest));
-      }
-    }
+  } else if (auto* styleRequest = GetRequestFromStyle()) {
+    styleRequest->SyncClone(mListener, mContent->GetComposedDoc(),
+                            getter_AddRefs(mImageRequest));
   }
 
   if (!mImageRequest) {
@@ -328,7 +326,8 @@ void nsImageBoxFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
   nsDisplayList list;
   list.AppendNewToTop<nsDisplayXULImage>(aBuilder, this);
 
-  CreateOwnLayerIfNeeded(aBuilder, &list);
+  CreateOwnLayerIfNeeded(aBuilder, &list,
+                         nsDisplayOwnLayer::OwnLayerForImageBoxFrame);
 
   aLists.Content()->AppendToTop(&list);
 }
@@ -418,7 +417,6 @@ ImgDrawResult nsImageBoxFrame::CreateWebRenderCommands(
   const int32_t appUnitsPerDevPixel = PresContext()->AppUnitsPerDevPixel();
   LayoutDeviceRect fillRect =
       LayoutDeviceRect::FromAppUnits(dest, appUnitsPerDevPixel);
-  fillRect.Round();
 
   Maybe<SVGImageContext> svgContext;
   gfx::IntSize decodeSize =
@@ -442,12 +440,9 @@ ImgDrawResult nsImageBoxFrame::CreateWebRenderCommands(
   if (key.isNothing()) {
     return result;
   }
-  wr::LayoutRect fill = wr::ToLayoutRect(fillRect);
 
-  LayoutDeviceSize gapSize(0, 0);
-  aBuilder.PushImage(fill, fill, !BackfaceIsHidden(),
-                     wr::ToLayoutSize(fillRect.Size()),
-                     wr::ToLayoutSize(gapSize), rendering, key.value());
+  wr::LayoutRect fill = wr::ToLayoutRect(fillRect);
+  aBuilder.PushImage(fill, fill, !BackfaceIsHidden(), rendering, key.value());
 
   return result;
 }
@@ -605,15 +600,19 @@ bool nsImageBoxFrame::CanOptimizeToImageLayer() {
   return true;
 }
 
-//
-// DidSetComputedStyle
-//
-// When the ComputedStyle changes, make sure that all of our image is up to
-// date.
-//
+imgRequestProxy* nsImageBoxFrame::GetRequestFromStyle() {
+  const nsStyleDisplay* disp = StyleDisplay();
+  if (disp->HasAppearance() && nsBox::gTheme &&
+      nsBox::gTheme->ThemeSupportsWidget(nullptr, this, disp->mAppearance)) {
+    return nullptr;
+  }
+
+  return StyleList()->GetListStyleImage();
+}
+
 /* virtual */
-void nsImageBoxFrame::DidSetComputedStyle(ComputedStyle* aOldComputedStyle) {
-  nsLeafBoxFrame::DidSetComputedStyle(aOldComputedStyle);
+void nsImageBoxFrame::DidSetComputedStyle(ComputedStyle* aOldStyle) {
+  nsLeafBoxFrame::DidSetComputedStyle(aOldStyle);
 
   // Fetch our subrect.
   const nsStyleList* myList = StyleList();
@@ -622,23 +621,20 @@ void nsImageBoxFrame::DidSetComputedStyle(ComputedStyle* aOldComputedStyle) {
   if (mUseSrcAttr || mSuppressStyleCheck)
     return;  // No more work required, since the image isn't specified by style.
 
-  // If we're using a native theme implementation, we shouldn't draw anything.
-  const nsStyleDisplay* disp = StyleDisplay();
-  nsITheme* theme;
-  if (disp->HasAppearance() && (theme = PresContext()->GetTheme()) &&
-      theme->ThemeSupportsWidget(nullptr, this, disp->mAppearance))
-    return;
-
-  // If list-style-image changes, we have a new image.
+  // If the image to use changes, we have a new image.
   nsCOMPtr<nsIURI> oldURI, newURI;
-  if (mImageRequest) mImageRequest->GetURI(getter_AddRefs(oldURI));
-  if (myList->GetListStyleImage())
-    myList->GetListStyleImage()->GetURI(getter_AddRefs(newURI));
+  if (mImageRequest) {
+    mImageRequest->GetURI(getter_AddRefs(oldURI));
+  }
+  if (auto* newImage = GetRequestFromStyle()) {
+    newImage->GetURI(getter_AddRefs(newURI));
+  }
   bool equal;
   if (newURI == oldURI ||  // handles null==null
       (newURI && oldURI && NS_SUCCEEDED(newURI->Equals(oldURI, &equal)) &&
-       equal))
+       equal)) {
     return;
+  }
 
   UpdateImage();
 }  // DidSetComputedStyle

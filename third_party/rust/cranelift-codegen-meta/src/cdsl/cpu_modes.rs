@@ -5,7 +5,7 @@ use crate::cdsl::encodings::Encoding;
 use crate::cdsl::types::{LaneType, ValueType};
 use crate::cdsl::xform::{TransformGroup, TransformGroupIndex};
 
-pub struct CpuMode {
+pub(crate) struct CpuMode {
     pub name: &'static str,
     default_legalize: Option<TransformGroupIndex>,
     monomorphic_legalize: Option<TransformGroupIndex>,
@@ -53,7 +53,7 @@ impl CpuMode {
             Some(typ) => self
                 .typed_legalize
                 .get(typ)
-                .map(|x| *x)
+                .copied()
                 .unwrap_or_else(|| self.get_default_legalize_code()),
             None => self
                 .monomorphic_legalize

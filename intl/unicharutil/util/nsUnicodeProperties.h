@@ -124,12 +124,17 @@ inline uint32_t GetTitlecaseForAll(
   return u_totitle(aCh);
 }
 
-inline bool IsEastAsianWidthFWH(uint32_t aCh) {
+inline uint32_t GetFoldedcase(uint32_t aCh) {
+  return u_foldCase(aCh, U_FOLD_CASE_DEFAULT);
+}
+
+inline bool IsEastAsianWidthFHWexcludingEmoji(uint32_t aCh) {
   switch (u_getIntPropertyValue(aCh, UCHAR_EAST_ASIAN_WIDTH)) {
     case U_EA_FULLWIDTH:
-    case U_EA_WIDE:
     case U_EA_HALFWIDTH:
       return true;
+    case U_EA_WIDE:
+      return u_hasBinaryProperty(aCh, UCHAR_EMOJI) ? false : true;
     case U_EA_AMBIGUOUS:
     case U_EA_NARROW:
     case U_EA_NEUTRAL:
@@ -223,6 +228,9 @@ class ClusterIterator {
 
 // Count the number of grapheme clusters in the given string
 uint32_t CountGraphemeClusters(const char16_t* aText, uint32_t aLength);
+
+// Remove diacritics from a character
+uint32_t GetNaked(uint32_t aCh);
 
 // A simple reverse iterator for a string of char16_t codepoints that
 // advances by Unicode grapheme clusters

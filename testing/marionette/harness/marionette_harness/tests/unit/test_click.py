@@ -11,7 +11,6 @@ from marionette_driver.marionette import Alert
 
 from marionette_harness import (
     MarionetteTestCase,
-    run_if_e10s,
     WindowManagerMixin,
 )
 
@@ -119,6 +118,19 @@ class TestLegacyClick(MarionetteTestCase):
         self.marionette.find_element(By.ID, "overflowLink").click()
         self.marionette.find_element(By.ID, "testDiv")
         self.assertEqual(self.marionette.title, "Marionette Test")
+
+    def test_click_mathml(self):
+        self.marionette.navigate(inline("""
+            <math><mtext id="target">click me</mtext></math>
+            <script>
+              window.clicks = 0;
+              let mtext = document.getElementById("target");
+              mtext.addEventListener("click", () => window.clicks++);
+            </script>
+        """))
+        mtext = self.marionette.find_element(By.ID, "target")
+        mtext.click()
+        self.assertEqual(1, self.marionette.execute_script("return window.clicks", sandbox=None))
 
     def test_scroll_into_view_near_end(self):
         self.marionette.navigate(fixed_overlay)
@@ -415,7 +427,6 @@ class TestClickNavigation(MarionetteTestCase):
         self.marionette.find_element(By.ID, "option").click()
         self.marionette.find_element(By.ID, "delay")
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_click_remoteness_change(self):
         self.marionette.navigate("about:robots")
         self.marionette.navigate(self.test_page)

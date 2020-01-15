@@ -20,7 +20,6 @@
 #include "mozilla/dom/MediaKeysBinding.h"
 #include "mozilla/dom/MediaKeyStatusMapBinding.h"  // For MediaKeyStatus
 #include "mozilla/dom/MediaKeySystemAccessBinding.h"
-#include "mozIGeckoMediaPluginService.h"
 #include "mozilla/DetailedPromise.h"
 #include "mozilla/WeakPtr.h"
 
@@ -149,7 +148,13 @@ class MediaKeys final : public nsIDocumentActivity,
                                    dom::MediaKeyStatus aMediaKeyStatus);
 
   template <typename T>
-  void ResolvePromiseWithResult(PromiseId aId, const T& aResult);
+  void ResolvePromiseWithResult(PromiseId aId, const T& aResult) {
+    RefPtr<DetailedPromise> promise(RetrievePromise(aId));
+    if (!promise) {
+      return;
+    }
+    promise->MaybeResolve(aResult);
+  }
 
  private:
   // Instantiate CDMProxy instance.

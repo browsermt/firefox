@@ -21,7 +21,6 @@
 #include "nsCOMPtr.h"
 #include "nsComponentManagerUtils.h"
 #include "nsComponentManagerUtils.h"
-#include "nsIEventTarget.h"
 #include "nsNetCID.h"
 #include "nsServiceManagerUtils.h"
 #include "sslexp.h"
@@ -438,6 +437,17 @@ nsresult TransportLayerDtls::SetVerificationDigest(const DtlsDigest& digest) {
   return NS_OK;
 }
 
+void TransportLayerDtls::SetMinMaxVersion(Version min_version,
+                                          Version max_version) {
+  if (min_version < Version::DTLS_1_0 || min_version > Version::DTLS_1_3 ||
+      max_version < Version::DTLS_1_0 || max_version > Version::DTLS_1_3 ||
+      min_version > max_version || max_version < min_version) {
+    return;
+  }
+  minVersion_ = min_version;
+  maxVersion_ = max_version;
+}
+
 // These are the named groups that we will allow.
 static const SSLNamedGroup NamedGroupPreferences[] = {
     ssl_grp_ec_curve25519, ssl_grp_ec_secp256r1, ssl_grp_ec_secp384r1,
@@ -523,10 +533,8 @@ bool TransportLayerDtls::Setup() {
     }
   }
 
-  // Require TLS 1.1 or 1.2. Perhaps some day in the future we will allow TLS
-  // 1.0 for stream modes.
-  SSLVersionRange version_range = {SSL_LIBRARY_VERSION_TLS_1_1,
-                                   SSL_LIBRARY_VERSION_TLS_1_2};
+  SSLVersionRange version_range = {static_cast<PRUint16>(minVersion_),
+                                   static_cast<PRUint16>(maxVersion_)};
 
   rv = SSL_VersionRangeSet(ssl_fd.get(), &version_range);
   if (rv != SECSuccess) {
@@ -897,7 +905,7 @@ void TransportLayerDtls::Handshake() {
         MOZ_MTLOG(ML_ERROR, LAYER_INFO << "Malformed DTLS message; ignoring");
         // If this were TLS (and not DTLS), this would be fatal, but
         // here we're required to ignore bad messages, so fall through
-        MOZ_FALLTHROUGH;
+        [[fallthrough]];
       case PR_WOULD_BLOCK_ERROR:
         MOZ_MTLOG(ML_NOTICE, LAYER_INFO << "Handshake would have blocked");
         PRIntervalTime timeout;
@@ -1463,26 +1471,6 @@ void TransportLayerDtls::RecordTlsTelemetry() {
               LAYER_INFO << "RecordTlsTelemetry failed to get channel info");
     return;
   }
-
-  auto protocol_label =
-      mozilla::Telemetry::LABELS_WEBRTC_DTLS_PROTOCOL_VERSION::Unknown;
-
-  switch (info.protocolVersion) {
-    case SSL_LIBRARY_VERSION_TLS_1_1:
-      protocol_label =
-          Telemetry::LABELS_WEBRTC_DTLS_PROTOCOL_VERSION::Dtls_version_1_0;
-      break;
-    case SSL_LIBRARY_VERSION_TLS_1_2:
-      protocol_label =
-          Telemetry::LABELS_WEBRTC_DTLS_PROTOCOL_VERSION::Dtls_version_1_2;
-      break;
-    case SSL_LIBRARY_VERSION_TLS_1_3:
-      protocol_label =
-          Telemetry::LABELS_WEBRTC_DTLS_PROTOCOL_VERSION::Dtls_version_1_3;
-      break;
-  }
-
-  Telemetry::AccumulateCategorical(protocol_label);
 
   uint16_t telemetry_cipher = 0;
 

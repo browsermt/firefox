@@ -38,8 +38,8 @@ static void IterateRealmsArenasCellsUnbarriered(
       Arena* arena = aiter.get();
       (*arenaCallback)(cx->runtime(), data, arena, traceKind, thingSize);
       for (ArenaCellIter iter(arena); !iter.done(); iter.next()) {
-        (*cellCallback)(cx->runtime(), data, iter.getCell(), traceKind,
-                        thingSize);
+        (*cellCallback)(cx->runtime(), data,
+                        JS::GCCellPtr(iter.getCell(), traceKind), thingSize);
       }
     }
   }
@@ -86,19 +86,18 @@ static void TraverseInnerLazyScriptsForLazyScript(
     JSContext* cx, void* data, LazyScript* enclosingLazyScript,
     IterateLazyScriptCallback lazyScriptCallback,
     const JS::AutoRequireNoGC& nogc) {
-  for (JSFunction* fun : enclosingLazyScript->innerFunctions()) {
-    // LazyScript::CreateForXDR temporarily initializes innerFunctions with
-    // its own function, but it should be overwritten with correct
-    // inner functions before getting inserted into parent's innerFunctions.
-    MOZ_ASSERT(fun != enclosingLazyScript->functionNonDelazifying());
+  for (JS::GCCellPtr gcThing : enclosingLazyScript->gcthings()) {
+    if (!gcThing.is<JSObject>()) {
+      continue;
+    }
+
+    JSFunction* fun = &gcThing.as<JSObject>().as<JSFunction>();
 
     if (!fun->isInterpretedLazy()) {
       return;
     }
 
     LazyScript* lazyScript = fun->lazyScript();
-    MOZ_ASSERT(lazyScript->hasEnclosingScope() ||
-               lazyScript->hasEnclosingLazyScript());
     MOZ_ASSERT_IF(lazyScript->hasEnclosingLazyScript(),
                   lazyScript->enclosingLazyScript() == enclosingLazyScript);
 
@@ -145,13 +144,12 @@ template <typename T, typename Callback>
 static void IterateScriptsImpl(JSContext* cx, Realm* realm, void* data,
                                Callback scriptCallback) {
   MOZ_ASSERT(!cx->suppressGC);
-  AutoEmptyNursery empty(cx);
-  AutoPrepareForTracing prep(cx);
+  AutoEmptyNurseryAndPrepareForTracing prep(cx);
   JS::AutoSuppressGCAnalysis nogc;
 
   if (realm) {
     Zone* zone = realm->zone();
-    for (auto iter = zone->cellIter<T>(empty); !iter.done(); iter.next()) {
+    for (auto iter = zone->cellIter<T>(prep); !iter.done(); iter.next()) {
       T* script = iter;
       if (script->realm() != realm) {
         continue;
@@ -160,7 +158,7 @@ static void IterateScriptsImpl(JSContext* cx, Realm* realm, void* data,
     }
   } else {
     for (ZonesIter zone(cx->runtime(), SkipAtoms); !zone.done(); zone.next()) {
-      for (auto iter = zone->cellIter<T>(empty); !iter.done(); iter.next()) {
+      for (auto iter = zone->cellIter<T>(prep); !iter.done(); iter.next()) {
         T* script = iter;
         DoScriptCallback(cx, data, script, scriptCallback, nogc);
       }

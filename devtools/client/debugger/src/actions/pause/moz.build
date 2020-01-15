@@ -12,6 +12,7 @@ CompiledModules(
     'commands.js',
     'continueToHere.js',
     'expandScopes.js',
+    'fetchFrames.js',
     'fetchScopes.js',
     'index.js',
     'inlinePreview.js',
@@ -19,7 +20,9 @@ CompiledModules(
     'mapScopes.js',
     'paused.js',
     'pauseOnExceptions.js',
+    'previewPausedLocation.js',
     'resumed.js',
     'selectFrame.js',
+    'setFramePositions.js',
     'skipPausing.js',
 )

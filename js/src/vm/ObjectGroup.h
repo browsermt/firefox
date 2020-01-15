@@ -90,14 +90,13 @@ class ObjectGroup : public gc::TenuredCell {
 
  private:
   /* Class shared by objects in this group. */
-  const JSClass* clasp_;  // set by constructor
+  const JSClass* const clasp_;  // set by constructor
 
   /* Prototype shared by objects in this group. */
   GCPtr<TaggedProto> proto_;  // set by constructor
 
   /* Realm shared by objects in this group. */
-  JS::Realm* realm_;
-  ;  // set by constructor
+  JS::Realm* realm_;  // set by constructor
 
   /* Flags for this group. */
   ObjectGroupFlags flags_;  // set by constructor
@@ -325,7 +324,7 @@ class ObjectGroup : public gc::TenuredCell {
     // Identifier for this property, JSID_VOID for the aggregate integer
     // index property, or JSID_EMPTY for properties holding constraints
     // listening to changes in the group's state.
-    GCPtrId id;
+    const GCPtrId id;
 
     // Possible own types for this property.
     HeapTypeSet types;
@@ -476,11 +475,6 @@ class ObjectGroup : public gc::TenuredCell {
                                         const JSClass* clasp,
                                         JS::HandleObject obj);
 
-#ifdef DEBUG
-  static bool hasDefaultNewGroup(JSObject* proto, const JSClass* clasp,
-                                 ObjectGroup* group);
-#endif
-
   // Static accessors for ObjectGroupRealm ArrayObjectTable and
   // PlainObjectTable.
 
@@ -545,7 +539,8 @@ class ObjectGroupRealm {
   struct PlainObjectKey;
   struct PlainObjectEntry;
   struct PlainObjectTableSweepPolicy {
-    static bool needsSweep(PlainObjectKey* key, PlainObjectEntry* entry);
+    static bool traceWeak(JSTracer* trc, PlainObjectKey* key,
+                          PlainObjectEntry* entry);
   };
   using PlainObjectTable =
       JS::GCHashMap<PlainObjectKey, PlainObjectEntry, PlainObjectKey,
@@ -620,9 +615,6 @@ class ObjectGroupRealm {
   static ObjectGroupRealm& get(const ObjectGroup* group);
   static ObjectGroupRealm& getForNewObject(JSContext* cx);
 
-  void replaceAllocationSiteGroup(JSScript* script, jsbytecode* pc,
-                                  JSProtoKey kind, ObjectGroup* group);
-
   void removeDefaultNewGroup(const JSClass* clasp, TaggedProto proto,
                              JSObject* associated);
   void replaceDefaultNewGroup(const JSClass* clasp, TaggedProto proto,
@@ -642,7 +634,7 @@ class ObjectGroupRealm {
 
   void clearTables();
 
-  void sweep();
+  void traceWeak(JSTracer* trc);
 
   void purge() { defaultNewGroupCache.purge(); }
 

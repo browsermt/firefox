@@ -22,7 +22,7 @@
         ".popup-notification-description > b:last-of-type":
           "text=secondname,popupid",
         ".popup-notification-description > span:last-of-type":
-          "secondendlabel,popupid",
+          "text=secondendlabel,popupid",
         ".popup-notification-closebutton":
           "oncommand=closebuttoncommand,hidden=closebuttonhidden",
         ".popup-notification-learnmore-link":
@@ -57,6 +57,8 @@
         this.checkbox.hidden = false;
       } else {
         this.checkbox.hidden = true;
+        // Reset checked state to avoid wrong using of previous value.
+        this.checkbox.checked = false;
       }
 
       this.hidden = false;
@@ -84,7 +86,7 @@
             </vbox>
             <toolbarbutton class="messageCloseButton close-icon popup-notification-closebutton tabbable" tooltiptext="&closeNotification.tooltip;"></toolbarbutton>
           </hbox>
-          <label class="popup-notification-learnmore-link" is="text-link">&learnMore;</label>
+          <label class="popup-notification-learnmore-link" is="text-link">&learnMoreNoEllipsis;</label>
           <checkbox class="popup-notification-checkbox" oncommand="PopupNotifications._onCheckboxCommand(event)"></checkbox>
           <description class="popup-notification-warning"></description>
         </vbox>

@@ -8,7 +8,7 @@ const {
   updateGeometryEditorEnabled,
   updateLayout,
   updateOffsetParent,
-} = require("./actions/box-model");
+} = require("devtools/client/inspector/boxmodel/actions/box-model");
 
 loader.lazyRequireGetter(
   this,
@@ -78,7 +78,6 @@ BoxModel.prototype = {
     this._tooltip = null;
     this.document = null;
     this.inspector = null;
-    this.walker = null;
   },
 
   get highlighters() {
@@ -140,14 +139,14 @@ BoxModel.prototype = {
    * Starts listening to reflows in the current tab.
    */
   trackReflows() {
-    this.inspector.reflowTracker.trackReflows(this, this.updateBoxModel);
+    this.inspector.on("reflow-in-selected-target", this.updateBoxModel);
   },
 
   /**
    * Stops listening to reflows in the current tab.
    */
   untrackReflows() {
-    this.inspector.reflowTracker.untrackReflows(this, this.updateBoxModel);
+    this.inspector.off("reflow-in-selected-target", this.updateBoxModel);
   },
 
   /**
@@ -172,10 +171,9 @@ BoxModel.prototype = {
         return null;
       }
 
-      const nodeFront = this.inspector.selection.nodeFront;
-      const inspectorFront = nodeFront.inspectorFront;
-      // TODO: remove once this is added to the inspectorFront initialize;
-      const pageStyle = await inspectorFront.getPageStyle();
+      const { nodeFront } = this.inspector.selection;
+      const inspectorFront = this.getCurrentInspectorFront();
+      const { pageStyle } = inspectorFront;
 
       let layout = await pageStyle.getLayout(nodeFront, {
         autoMargins: true,
@@ -195,18 +193,11 @@ BoxModel.prototype = {
         isPositionEditable,
       });
 
-      const actorCanGetOffSetParent = await nodeFront.targetFront.actorHasMethod(
-        "domwalker",
-        "getOffsetParent"
+      // Update the redux store with the latest offset parent DOM node
+      const offsetParent = await inspectorFront.walker.getOffsetParent(
+        nodeFront
       );
-
-      if (actorCanGetOffSetParent) {
-        // Update the redux store with the latest offset parent DOM node
-        const offsetParent = await inspectorFront.walker.getOffsetParent(
-          nodeFront
-        );
-        this.store.dispatch(updateOffsetParent(offsetParent));
-      }
+      this.store.dispatch(updateOffsetParent(offsetParent));
 
       // Update the redux store with the latest layout properties and update the box
       // model view.
@@ -239,11 +230,8 @@ BoxModel.prototype = {
    * Hides the box-model highlighter on the currently selected element.
    */
   onHideBoxModelHighlighter() {
-    if (!this.inspector) {
-      return;
-    }
-
-    this.inspector.highlighter.unhighlight();
+    const { highlighter } = this.getCurrentInspectorFront();
+    highlighter.unhighlight();
   },
 
   /**
@@ -408,8 +396,9 @@ BoxModel.prototype = {
       return;
     }
 
-    const nodeFront = this.inspector.selection.nodeFront;
-    this.inspector.highlighter.highlight(nodeFront, options);
+    const { highlighter } = this.getCurrentInspectorFront();
+    const { nodeFront } = this.inspector.selection;
+    highlighter.highlight(nodeFront, options);
   },
 
   /**
@@ -465,6 +454,10 @@ BoxModel.prototype = {
       markup.off("leave", this.onMarkupViewLeave);
       markup.off("node-hover", this.onMarkupViewNodeHover);
     }
+  },
+
+  getCurrentInspectorFront() {
+    return this.inspector.selection.nodeFront.inspectorFront;
   },
 };
 

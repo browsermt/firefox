@@ -13,7 +13,6 @@
 #include "mozilla/dom/MutationEventBinding.h"
 #include "HTMLInputElement.h"
 #include "ICUUtils.h"
-#include "nsIFocusManager.h"
 #include "nsFocusManager.h"
 #include "nsFontMetrics.h"
 #include "nsCheckboxRadioFrame.h"
@@ -419,7 +418,7 @@ nsresult nsNumberControlFrame::SetFormProperty(nsAtom* aName,
   return GetTextFieldFrame()->SetFormProperty(aName, aValue);
 }
 
-HTMLInputElement* nsNumberControlFrame::GetAnonTextControl() {
+HTMLInputElement* nsNumberControlFrame::GetAnonTextControl() const {
   return HTMLInputElement::FromNode(mTextField);
 }
 
@@ -572,6 +571,25 @@ bool nsNumberControlFrame::ShouldUseNativeStyleForSpinner() const {
              StyleAppearance::SpinnerDownbutton &&
          !PresContext()->HasAuthorSpecifiedRules(
              spinDownFrame, STYLES_DISABLING_NATIVE_THEMING);
+}
+
+bool nsNumberControlFrame::GetNaturalBaselineBOffset(
+    WritingMode aWM, BaselineSharingGroup aGroup, nscoord* aBaseline) const {
+  if (StyleDisplay()->IsContainLayout()) {
+    return false;
+  }
+  nsIFrame* inner = GetAnonTextControl()->GetPrimaryFrame();
+  nscoord baseline;
+  DebugOnly<bool> hasBaseline = inner->GetNaturalBaselineBOffset(
+      aWM, BaselineSharingGroup::First, &baseline);
+  MOZ_ASSERT(hasBaseline);
+  nsPoint offset = inner->GetOffsetToIgnoringScrolling(this);
+  baseline += aWM.IsVertical() ? offset.x : offset.y;
+  if (aGroup == BaselineSharingGroup::Last) {
+    baseline = BSize(aWM) - baseline;
+  }
+  *aBaseline = baseline;
+  return true;
 }
 
 void nsNumberControlFrame::AppendAnonymousContentTo(

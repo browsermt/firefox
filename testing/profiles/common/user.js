@@ -41,6 +41,8 @@ user_pref("extensions.legacy.enabled", true);
 user_pref("extensions.update.enabled", false);
 // Prevent network access for recommendations by default. The payload is {"results":[]}.
 user_pref("extensions.getAddons.discovery.api_url", "data:;base64,eyJyZXN1bHRzIjpbXX0%3D");
+// Treat WebExtension API/schema warnings as errors.
+user_pref("extensions.webextensions.warnings-as-errors", true);
 // Disable useragent updates.
 user_pref("general.useragent.updates.enabled", false);
 // Ensure WR doesn't get enabled in tests unless we do it explicitly with the MOZ_WEBRENDER envvar.
@@ -49,7 +51,7 @@ user_pref("hangmonitor.timeout", 0); // no hang monitor
 user_pref("media.gmp-manager.updateEnabled", false);
 // Don't do network connections for mitm priming
 user_pref("security.certerrors.mitm.priming.enabled", false);
-// Make enablePrivilege continue to work for test code. :-(
+// Enable some dangerous features for test code. :-(
 user_pref("security.turn_off_all_security_so_that_viruses_can_take_over_this_computer", true);
 user_pref("xpinstall.signatures.required", false);
 // Prevent Remote Settings to issue non local connections.
@@ -60,5 +62,8 @@ user_pref("media.autoplay.enabled.user-gestures-needed", true);
 user_pref("media.autoplay.ask-permission", false);
 user_pref("media.autoplay.block-webaudio", false);
 user_pref("media.allowed-to-play.enabled", true);
+// Ensure media can always play without delay
+user_pref("media.block-autoplay-until-in-foreground", false);
 user_pref("toolkit.telemetry.coverage.endpoint.base", "http://localhost");
-user_pref("layout.css.moz-binding.content.enabled", true); // Le sad
+// Don't ask for a request in testing unless explicitly set this as true.
+user_pref("media.geckoview.autoplay.request", false);

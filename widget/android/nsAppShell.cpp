@@ -10,21 +10,18 @@
 #include "base/task.h"
 #include "mozilla/Hal.h"
 #include "nsIScreen.h"
-#include "nsIScreenManager.h"
 #include "nsWindow.h"
 #include "nsThreadUtils.h"
-#include "nsICommandLineRunner.h"
 #include "nsIObserverService.h"
 #include "nsIAppStartup.h"
 #include "nsIGeolocationProvider.h"
 #include "nsCacheService.h"
-#include "nsIDOMEventListener.h"
 #include "nsIDOMWakeLockListener.h"
 #include "nsIPowerManagerService.h"
 #include "nsISpeculativeConnect.h"
 #include "nsIURIFixup.h"
 #include "nsCategoryManagerUtils.h"
-#include "nsGeoPosition.h"
+#include "mozilla/dom/GeolocationPosition.h"
 
 #include "mozilla/ArrayUtils.h"
 #include "mozilla/Components.h"
@@ -34,6 +31,7 @@
 #include "mozilla/Hal.h"
 #include "mozilla/dom/BrowserChild.h"
 #include "mozilla/intl/OSPreferences.h"
+#include "mozilla/ipc/GeckoChildProcessHost.h"
 #include "mozilla/widget/ScreenManager.h"
 #include "prenv.h"
 
@@ -58,7 +56,6 @@
 
 #include "AndroidAlerts.h"
 #include "AndroidUiThread.h"
-#include "ANRReporter.h"
 #include "GeckoBatteryManager.h"
 #include "GeckoNetworkManager.h"
 #include "GeckoProcessManager.h"
@@ -66,11 +63,10 @@
 #include "GeckoSystemStateListener.h"
 #include "GeckoTelemetryDelegate.h"
 #include "GeckoVRManager.h"
+#include "ImageDecoderSupport.h"
 #include "PrefsHelper.h"
 #include "ScreenHelperAndroid.h"
 #include "Telemetry.h"
-#include "fennec/MemoryMonitor.h"
-#include "fennec/ThumbnailHelper.h"
 #include "WebExecutorSupport.h"
 #include "Base64UtilsSupport.h"
 
@@ -340,17 +336,6 @@ class GeckoAppShellSupport final
     gLocationCallback->Update(geoPosition);
   }
 
-  static void NotifyUriVisited(jni::String::Param aUri) {
-#ifdef MOZ_ANDROID_HISTORY
-    nsCOMPtr<IHistory> history = services::GetHistoryService();
-    nsCOMPtr<nsIURI> visitedURI;
-    if (history &&
-        NS_SUCCEEDED(NS_NewURI(getter_AddRefs(visitedURI), aUri->ToString()))) {
-      history->NotifyVisited(visitedURI);
-    }
-#endif
-  }
-
   static void NotifyAlertListener(jni::String::Param aName,
                                   jni::String::Param aTopic,
                                   jni::String::Param aCookie) {
@@ -364,12 +349,45 @@ class GeckoAppShellSupport final
   }
 };
 
-class BrowserLocaleManagerSupport final
-    : public java::BrowserLocaleManager::Natives<BrowserLocaleManagerSupport> {
+class XPCOMEventTargetWrapper final
+    : public java::XPCOMEventTarget::Natives<XPCOMEventTargetWrapper> {
  public:
-  static void RefreshLocales() {
-    intl::OSPreferences::GetInstance()->Refresh();
+  // Wraps a java runnable into an XPCOM runnable and dispatches it to mTarget.
+  void DispatchNative(mozilla::jni::Object::Param aJavaRunnable) {
+    java::XPCOMEventTarget::JNIRunnable::GlobalRef r =
+        java::XPCOMEventTarget::JNIRunnable::Ref::From(aJavaRunnable);
+    mTarget->Dispatch(NS_NewRunnableFunction(
+        "XPCOMEventTargetWrapper::DispatchNative",
+        [runnable = std::move(r)]() { runnable->Run(); }));
   }
+
+  bool IsOnCurrentThread() { return mTarget->IsOnCurrentThread(); }
+
+  // Instantiates a wrapper. The Java code calls this only once per wrapped
+  // thread, and caches the result.
+  static java::XPCOMEventTarget::LocalRef CreateWrapper(
+      mozilla::jni::String::Param aName) {
+    nsString name(aName->ToString());
+    nsCOMPtr<nsIEventTarget> target;
+    if (name.EqualsLiteral("main")) {
+      target = do_GetMainThread();
+    } else if (name.EqualsLiteral("launcher")) {
+      target = ipc::GetIPCLauncher();
+    } else {
+      MOZ_CRASH("Trying to create JNI wrapper for unknown XPCOM thread");
+    }
+
+    auto java = java::XPCOMEventTarget::New();
+    auto native = MakeUnique<XPCOMEventTargetWrapper>(target.forget());
+    AttachNative(java, std::move(native));
+    return java;
+  }
+
+  explicit XPCOMEventTargetWrapper(already_AddRefed<nsIEventTarget> aTarget)
+      : mTarget(aTarget) {}
+
+ private:
+  nsCOMPtr<nsIEventTarget> mTarget;
 };
 
 nsAppShell::nsAppShell()
@@ -387,6 +405,7 @@ nsAppShell::nsAppShell()
     if (jni::IsAvailable()) {
       GeckoThreadSupport::Init();
       GeckoAppShellSupport::Init();
+      XPCOMEventTargetWrapper::Init();
       mozilla::GeckoSystemStateListener::Init();
       mozilla::widget::Telemetry::Init();
       mozilla::widget::GeckoTelemetryDelegate::Init();
@@ -405,6 +424,7 @@ nsAppShell::nsAppShell()
     AndroidBridge::ConstructBridge();
     GeckoAppShellSupport::Init();
     GeckoThreadSupport::Init();
+    XPCOMEventTargetWrapper::Init();
     mozilla::GeckoBatteryManager::Init();
     mozilla::GeckoNetworkManager::Init();
     mozilla::GeckoProcessManager::Init();
@@ -412,19 +432,13 @@ nsAppShell::nsAppShell()
     mozilla::GeckoSystemStateListener::Init();
     mozilla::PrefsHelper::Init();
     mozilla::widget::Telemetry::Init();
+    mozilla::widget::ImageDecoderSupport::Init();
     mozilla::widget::WebExecutorSupport::Init();
     mozilla::widget::Base64UtilsSupport::Init();
     nsWindow::InitNatives();
     mozilla::gl::AndroidSurfaceTexture::Init();
     mozilla::WebAuthnTokenManager::Init();
     mozilla::widget::GeckoTelemetryDelegate::Init();
-
-    if (jni::IsFennec()) {
-      BrowserLocaleManagerSupport::Init();
-      mozilla::ANRReporter::Init();
-      mozilla::MemoryMonitor::Init();
-      mozilla::ThumbnailHelper::Init();
-    }
 
     java::GeckoThread::SetState(java::GeckoThread::State::JNI_READY());
 
@@ -513,6 +527,7 @@ nsresult nsAppShell::Init() {
       mozilla::services::GetObserverService();
   if (obsServ) {
     obsServ->AddObserver(this, "browser-delayed-startup-finished", false);
+    obsServ->AddObserver(this, "geckoview-startup-complete", false);
     obsServ->AddObserver(this, "profile-after-change", false);
     obsServ->AddObserver(this, "quit-application", false);
     obsServ->AddObserver(this, "quit-application-granted", false);
@@ -562,7 +577,12 @@ nsAppShell::Observe(nsISupports* aSubject, const char* aTopic,
   } else if (!strcmp(aTopic, "browser-delayed-startup-finished")) {
     NS_CreateServicesFromCategory("browser-delayed-startup-finished", nullptr,
                                   "browser-delayed-startup-finished");
-
+  } else if (!strcmp(aTopic, "geckoview-startup-complete")) {
+    if (jni::IsAvailable()) {
+      java::GeckoThread::CheckAndSetState(
+          java::GeckoThread::State::PROFILE_READY(),
+          java::GeckoThread::State::RUNNING());
+    }
   } else if (!strcmp(aTopic, "profile-after-change")) {
     if (jni::IsAvailable()) {
       java::GeckoThread::SetState(java::GeckoThread::State::PROFILE_READY());
@@ -585,13 +605,6 @@ nsAppShell::Observe(nsISupports* aSubject, const char* aTopic,
     nsCOMPtr<dom::Document> doc = do_QueryInterface(aSubject);
     MOZ_ASSERT(doc);
     if (const RefPtr<nsWindow> window = nsWindow::From(doc->GetWindow())) {
-      if (jni::IsAvailable()) {
-        // When our first window has loaded, assume any JS
-        // initialization has run and set Gecko to ready.
-        java::GeckoThread::CheckAndSetState(
-            java::GeckoThread::State::PROFILE_READY(),
-            java::GeckoThread::State::RUNNING());
-      }
       window->OnGeckoViewReady();
     }
   } else if (!strcmp(aTopic, "quit-application")) {

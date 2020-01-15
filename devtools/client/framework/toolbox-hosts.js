@@ -7,14 +7,19 @@
 const EventEmitter = require("devtools/shared/event-emitter");
 const promise = require("promise");
 const Services = require("Services");
-const {
-  DOMHelpers,
-} = require("resource://devtools/client/shared/DOMHelpers.jsm");
+const { DOMHelpers } = require("devtools/shared/dom-helpers");
 
 loader.lazyRequireGetter(
   this,
   "gDevToolsBrowser",
   "devtools/client/framework/devtools-browser",
+  true
+);
+
+loader.lazyRequireGetter(
+  this,
+  "PrivateBrowsingUtils",
+  "resource://gre/modules/PrivateBrowsingUtils.jsm",
   true
 );
 
@@ -76,20 +81,11 @@ BottomHost.prototype = {
     this._browserContainer.appendChild(this._splitter);
     this._browserContainer.appendChild(this.frame);
 
-    // we have to load something so we can switch documents if we have to
-    this.frame.setAttribute("src", "about:blank");
+    focusTab(this.hostTab);
+    await createBlankDocument(this.frame);
+    this.emit("ready", this.frame);
 
-    const frame = await new Promise(resolve => {
-      const domHelper = new DOMHelpers(this.frame.contentWindow);
-      const frameLoad = () => {
-        this.emit("ready", this.frame);
-        resolve(this.frame);
-      };
-      domHelper.onceDOMReady(frameLoad);
-      focusTab(this.hostTab);
-    });
-
-    return frame;
+    return this.frame;
   },
 
   /**
@@ -173,19 +169,11 @@ class SidebarHost {
       this._browserPanel.insertBefore(this._splitter, this._browserContainer);
     }
 
-    this.frame.setAttribute("src", "about:blank");
+    focusTab(this.hostTab);
+    await createBlankDocument(this.frame);
+    this.emit("ready", this.frame);
 
-    const frame = await new Promise(resolve => {
-      const domHelper = new DOMHelpers(this.frame.contentWindow);
-      const frameLoad = () => {
-        this.emit("ready", this.frame);
-        resolve(this.frame);
-      };
-      domHelper.onceDOMReady(frameLoad);
-      focusTab(this.hostTab);
-    });
-
-    return frame;
+    return this.frame;
   }
 
   /**
@@ -238,23 +226,35 @@ class RightHost extends SidebarHost {
 /**
  * Host object for the toolbox in a separate window
  */
-function WindowHost() {
+function WindowHost(hostTab) {
   this._boundUnload = this._boundUnload.bind(this);
-
+  this.hostTab = hostTab;
   EventEmitter.decorate(this);
 }
 
 WindowHost.prototype = {
   type: "window",
 
-  WINDOW_URL: "chrome://devtools/content/framework/toolbox-window.xul",
+  WINDOW_URL: "chrome://devtools/content/framework/toolbox-window.xhtml",
 
   /**
    * Create a new xul window to contain the toolbox.
    */
   create: function() {
     return new Promise(resolve => {
-      const flags = "chrome,centerscreen,resizable,dialog=no";
+      let flags = "chrome,centerscreen,resizable,dialog=no";
+
+      // If we are debugging a tab which is in a Private window, we must also
+      // set the private flag on the DevTools host window. Otherwise switching
+      // hosts between docked and window modes can fail due to incompatible
+      // docshell origin attributes. See 1581093.
+      if (
+        this.hostTab &&
+        PrivateBrowsingUtils.isWindowPrivate(this.hostTab.ownerGlobal)
+      ) {
+        flags += ",private";
+      }
+
       const win = Services.ww.openWindow(
         null,
         this.WINDOW_URL,
@@ -333,61 +333,46 @@ WindowHost.prototype = {
 };
 
 /**
- * Host object for the toolbox in its own tab
+ * Host object for the Browser Toolbox
  */
-function CustomHost(hostTab, options) {
-  this.frame = options.customIframe;
-  this.uid = options.uid;
+function BrowserToolboxHost(hostTab, options) {
+  this.doc = options.doc;
   EventEmitter.decorate(this);
 }
 
-CustomHost.prototype = {
-  type: "custom",
+BrowserToolboxHost.prototype = {
+  type: "browsertoolbox",
 
-  _sendMessageToTopWindow: function(msg, data) {
-    // It's up to the custom frame owner (parent window) to honor
-    // "close" or "raise" instructions.
-    const topWindow = this.frame.ownerDocument.defaultView;
-    if (!topWindow) {
-      return;
-    }
-    const message = {
-      name: "toolbox-" + msg,
-      uid: this.uid,
-      data,
-    };
-    topWindow.postMessage(message, "*");
-  },
+  create: async function() {
+    this.frame = createDevToolsFrame(
+      this.doc,
+      "devtools-toolbox-browsertoolbox-iframe"
+    );
 
-  /**
-   * Create a new xul window to contain the toolbox.
-   */
-  create: function() {
-    return promise.resolve(this.frame);
+    this.doc.body.appendChild(this.frame);
+
+    await createBlankDocument(this.frame);
+    this.emit("ready", this.frame);
+
+    return this.frame;
   },
 
   /**
    * Raise the host.
    */
   raise: function() {
-    this._sendMessageToTopWindow("raise");
+    this.doc.defaultView.focus();
   },
 
   /**
    * Set the toolbox title.
    */
   setTitle: function(title) {
-    this._sendMessageToTopWindow("title", { value: title });
+    this.doc.title = title;
   },
 
-  /**
-   * Destroy the window.
-   */
+  // Do nothing. The BrowserToolbox is destroyed by quitting the application.
   destroy: function() {
-    if (!this._destroyed) {
-      this._destroyed = true;
-      this._sendMessageToTopWindow("close");
-    }
     return promise.resolve(null);
   },
 };
@@ -434,14 +419,31 @@ function focusTab(tab) {
  * Create an iframe that can be used to load DevTools via about:devtools-toolbox.
  */
 function createDevToolsFrame(doc, className) {
-  const frame = doc.createXULElement("iframe");
+  let frame;
+  if (Services.prefs.getBoolPref("devtools.toolbox.content-frame", false)) {
+    frame = doc.createXULElement("browser");
+    frame.setAttribute("type", "content");
+  } else {
+    frame = doc.createXULElement("iframe");
+  }
+
   frame.flex = 1; // Required to be able to shrink when the window shrinks
   frame.className = className;
-  if (Services.prefs.getBoolPref("devtools.toolbox.content-frame", false)) {
-    frame.setAttribute("type", "content");
-  }
   frame.tooltip = "aHTMLTooltip";
   return frame;
+}
+
+/**
+ * Load a blank document in the host frame.
+ * This is mandatory if the host is created for switching hosts. In that case,
+ * the new host's frame needs to have a valid document before we can swap the
+ * content of the previous host.
+ */
+function createBlankDocument(frame) {
+  return new Promise(resolve => {
+    frame.setAttribute("src", "about:blank");
+    DOMHelpers.onceDOMReady(frame.contentWindow, resolve);
+  });
 }
 
 exports.Hosts = {
@@ -449,6 +451,6 @@ exports.Hosts = {
   left: LeftHost,
   right: RightHost,
   window: WindowHost,
-  custom: CustomHost,
+  browsertoolbox: BrowserToolboxHost,
   page: PageHost,
 };

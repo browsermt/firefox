@@ -39,9 +39,9 @@ function gen_tab_impmod_t(insn)
      (table 30 30 funcref)
      ;; -------- Table initialisers --------
      (elem (i32.const 2) 3 1 4 1)
-     (elem passive 2 7 1 8)
+     (elem func 2 7 1 8)
      (elem (i32.const 12) 7 5 2 3 6)
-     (elem passive 5 9 2 7 6)
+     (elem func 5 9 2 7 6)
      ;; -------- Imports --------
      (import "a" "if0" (result i32))    ;; index 0
      (import "a" "if1" (result i32))
@@ -174,9 +174,9 @@ function gen_mem_mod_t(insn)
      (memory (export "memory0") 1 1)
      ;; -------- Memory initialisers --------
      (data (i32.const 2) "\\03\\01\\04\\01")
-     (data passive "\\02\\07\\01\\08")
+     (data "\\02\\07\\01\\08")
      (data (i32.const 12) "\\07\\05\\02\\03\\06")
-     (data passive "\\05\\09\\02\\07\\06")
+     (data "\\05\\09\\02\\07\\06")
 
      (func (export "testfn")
        ${insn}
@@ -264,8 +264,8 @@ mem_test("(memory.init 1 (i32.const 7) (i32.const 0) (i32.const 4)) \n" +
 assertErrorMessage(() => wasmEvalText(
     `(module
        (datacount 1)
-       (data passive "")
-       (data passive ""))`),
+       (data "")
+       (data ""))`),
                    WebAssembly.CompileError,
                    /number of data segments does not match declared count/);
 
@@ -273,8 +273,8 @@ assertErrorMessage(() => wasmEvalText(
 assertErrorMessage(() => wasmEvalText(
     `(module
        (datacount 3)
-       (data passive "")
-       (data passive ""))`),
+       (data "")
+       (data ""))`),
                    WebAssembly.CompileError,
                    /number of data segments does not match declared count/);
 
@@ -299,77 +299,6 @@ checkNoDataCount([I32ConstCode, 0,
 
 checkNoDataCount([MiscPrefix, DataDropCode, 0],
                  /data.drop requires a DataCount section/);
-
-// Verification that we can handle encoding errors for passive element segments
-// properly.
-
-function checkPassiveElemSegment(mangle, err) {
-    let bin = moduleWithSections(
-        [v2vSigSection, declSection([0]), // One function
-         tableSection(1),                 // One table
-         { name: elemId,                  // One passive segment
-           body: (function () {
-               let body = [];
-               body.push(1);           // 1 element segment
-               body.push(0x1 | 0x4);   // Flags: Passive and uses element expression
-               body.push(AnyFuncCode + (mangle == "type" ? 1 : 0)); // always anyfunc
-               body.push(1);           // Element count
-               body.push(RefFuncCode + (mangle == "ref.func" ? 1 : 0)); // always ref.func
-               body.push(0);           // func index
-               body.push(EndCode + (mangle == "end" ? 1 : 0));
-               return body;
-           })() },
-         bodySection(                   // Empty function
-             [funcBody(
-                 {locals:[],
-                  body:[]})])
-        ]);
-    if (err) {
-        assertErrorMessage(() => new WebAssembly.Module(bin),
-                           WebAssembly.CompileError,
-                           err);
-    } else {
-        new WebAssembly.Module(bin);
-    }
-}
-
-checkPassiveElemSegment("");
-checkPassiveElemSegment("type", /segments with element expressions can only contain function references/);
-checkPassiveElemSegment("ref.func", /failed to read initializer operation/);
-checkPassiveElemSegment("end", /failed to read end of initializer expression/);
-
-// Passive element segments can contain literal null values.
-
-{
-    let txt =
-        `(module
-           (table (export "t") 10 funcref)
-           (elem (i32.const 1) $m)
-           (elem (i32.const 3) $m)
-           (elem (i32.const 6) $m)
-           (elem (i32.const 8) $m)
-           (elem passive $f ref.null $g ref.null $h)
-           (func $m)
-           (func $f)
-           (func $g)
-           (func $h)
-           (func (export "doit") (param $idx i32)
-             (table.init 4 (local.get $idx) (i32.const 0) (i32.const 5))))`;
-    let ins = wasmEvalText(txt);
-    ins.exports.doit(0);
-    ins.exports.doit(5);
-    assertEq(typeof ins.exports.t.get(0), "function");
-    assertEq(ins.exports.t.get(1), null);
-    assertEq(typeof ins.exports.t.get(2), "function");
-    assertEq(ins.exports.t.get(0) == ins.exports.t.get(2), false);
-    assertEq(ins.exports.t.get(3), null);
-    assertEq(typeof ins.exports.t.get(4), "function");
-    assertEq(typeof ins.exports.t.get(5), "function");
-    assertEq(ins.exports.t.get(6), null);
-    assertEq(typeof ins.exports.t.get(7), "function");
-    assertEq(ins.exports.t.get(8), null);
-    assertEq(typeof ins.exports.t.get(9), "function");
-}
 
 //---------------------------------------------------------------------//
 //---------------------------------------------------------------------//
@@ -572,7 +501,8 @@ function checkRange(arr, minIx, maxIxPlusOne, expectedValue)
        )
      )`
     );
-    inst.exports.testfn();
+    assertErrorMessage(() => inst.exports.testfn(),
+                       WebAssembly.RuntimeError, /index out of bounds/);
 }
 
 // Very large range
@@ -752,7 +682,8 @@ function checkRange(arr, minIx, maxIxPlusOne, expectedValue)
        )
      )`
     );
-    inst.exports.testfn();
+    assertErrorMessage(() => inst.exports.testfn(),
+                       WebAssembly.RuntimeError, /index out of bounds/);
 }
 
 // Zero len with src offset out-of-bounds at the edge of memory
@@ -778,7 +709,8 @@ function checkRange(arr, minIx, maxIxPlusOne, expectedValue)
        )
      )`
     );
-    inst.exports.testfn();
+    assertErrorMessage(() => inst.exports.testfn(),
+                       WebAssembly.RuntimeError, /index out of bounds/);
 }
 
 // 100 random fills followed by 100 random copies, in a single-page buffer,

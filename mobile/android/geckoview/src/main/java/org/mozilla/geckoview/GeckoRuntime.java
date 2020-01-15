@@ -26,6 +26,7 @@ import android.support.annotation.AnyThread;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.annotation.UiThread;
+import android.support.v4.util.ArrayMap;
 import android.util.Log;
 
 import org.mozilla.gecko.EventDispatcher;
@@ -46,6 +47,8 @@ import org.yaml.snakeyaml.error.YAMLException;
 
 import java.io.File;
 import java.io.FileNotFoundException;
+import java.net.URI;
+import java.util.Map;
 
 public final class GeckoRuntime implements Parcelable {
     private static final String LOGTAG = "GeckoRuntime";
@@ -160,18 +163,20 @@ public final class GeckoRuntime implements Parcelable {
     private static GeckoRuntime sRuntime;
     private GeckoRuntimeSettings mSettings;
     private Delegate mDelegate;
+    private ServiceWorkerDelegate mServiceWorkerDelegate;
     private WebNotificationDelegate mNotificationDelegate;
     private RuntimeTelemetry mTelemetry;
-    private final WebExtensionEventDispatcher mWebExtensionDispatcher;
     private StorageController mStorageController;
     private final WebExtensionController mWebExtensionController;
     private WebPushController mPushController;
     private final ContentBlockingController mContentBlockingController;
+    private final LoginStorage.Proxy mLoginStorageProxy;
 
     private GeckoRuntime() {
-        mWebExtensionDispatcher = new WebExtensionEventDispatcher();
-        mWebExtensionController = new WebExtensionController(this, mWebExtensionDispatcher);
+        mWebExtensionController = new WebExtensionController(this);
         mContentBlockingController = new ContentBlockingController();
+        mLoginStorageProxy = new LoginStorage.Proxy();
+
         if (sRuntime != null) {
             throw new IllegalStateException("Only one GeckoRuntime instance is allowed");
         }
@@ -183,6 +188,44 @@ public final class GeckoRuntime implements Parcelable {
     private @Nullable static GeckoRuntime getInstance() {
         return sRuntime;
     }
+
+
+    /**
+     * Called by mozilla::dom::ClientOpenWindowInCurrentProcess to retrieve the window id to use
+     * for a ServiceWorkerClients.openWindow() request.
+     * @param baseUrl The base Url for the request.
+     * @param url Url being requested to be opened in a new window.
+     * @return SessionID to use for the request.
+     */
+    @WrapForJNI(calledFrom = "gecko")
+    private static @NonNull GeckoResult<String> serviceWorkerOpenWindow(final @NonNull String baseUrl, final @NonNull String url) {
+        if (sRuntime != null && sRuntime.mServiceWorkerDelegate != null) {
+            final URI actual = URI.create(baseUrl).resolve(url);
+            GeckoResult<String> result = new GeckoResult<>();
+            // perform the onOpenWindow call in the UI thread
+            ThreadUtils.postToUiThread(() -> {
+                sRuntime
+                    .mServiceWorkerDelegate
+                    .onOpenWindow(actual.toString())
+                    .accept( session -> {
+                        if (session != null) {
+                            if (!session.isOpen()) {
+                                result.completeExceptionally(new RuntimeException("Returned GeckoSession must be open."));
+                            } else {
+                                session.loadUri(actual.toString());
+                                result.complete(session.getId());
+                            }
+                        } else {
+                            result.complete(null);
+                        }
+                    });
+            });
+            return result;
+        } else {
+            return GeckoResult.fromException(new java.lang.RuntimeException("No available Service Worker delegate."));
+        }
+    }
+
 
     /**
      * Attach the runtime to the given context.
@@ -278,7 +321,18 @@ public final class GeckoRuntime implements Parcelable {
         info.args = settings.getArguments();
         info.extras = settings.getExtras();
         info.flags = flags;
-        info.prefs = settings.getPrefsMap();
+
+        // Bug 1605454: Temporary change for Fenix experiment that disables webrender
+        // Once the experiment ends or experimenter gets implemented in Gecko, this should be removed
+        // and replaced by :
+        // info.prefs = settings.getPrefsMap();
+        final Map<String, Object> prefMap = new ArrayMap<String, Object>();
+        prefMap.putAll(settings.getPrefsMap());
+        if (info.extras.getInt("forcedisablewebrender") == 1) {
+            prefMap.put("gfx.webrender.force-disabled", true);
+        }
+        info.prefs = prefMap;
+        // End of Bug 1605454 hack
 
         String configFilePath = settings.getConfigFilePath();
         if (configFilePath == null) {
@@ -415,7 +469,7 @@ public final class GeckoRuntime implements Parcelable {
         bundle.putBoolean("allowContentMessaging",
                 (webExtension.flags & WebExtension.Flags.ALLOW_CONTENT_MESSAGING) > 0);
 
-        mWebExtensionDispatcher.registerWebExtension(webExtension);
+        mWebExtensionController.registerWebExtension(webExtension);
 
         EventDispatcher.getInstance().dispatch("GeckoView:RegisterWebExtension",
                 bundle, result);
@@ -445,15 +499,11 @@ public final class GeckoRuntime implements Parcelable {
         final GeckoBundle bundle = new GeckoBundle(1);
         bundle.putString("id", webExtension.id);
 
-        mWebExtensionDispatcher.unregisterWebExtension(webExtension);
+        mWebExtensionController.unregisterWebExtension(webExtension);
 
         EventDispatcher.getInstance().dispatch("GeckoView:UnregisterWebExtension", bundle, result);
 
         return result;
-    }
-
-    /* protected */ @NonNull WebExtensionEventDispatcher getWebExtensionDispatcher() {
-        return mWebExtensionDispatcher;
     }
 
     /**
@@ -530,7 +580,64 @@ public final class GeckoRuntime implements Parcelable {
     }
 
     /**
+     * Set the {@link LoginStorage.Delegate} instance on this runtime.
+     * This delegate is required for handling login storage requests.
+     *
+     * @param delegate The {@link LoginStorage.Delegate} handling login storage
+     *                 requests.
+     */
+    @UiThread
+    public void setLoginStorageDelegate(
+            final @Nullable LoginStorage.Delegate delegate) {
+        ThreadUtils.assertOnUiThread();
+        mLoginStorageProxy.setDelegate(delegate);
+    }
+
+    /**
+     * Get the {@link LoginStorage.Delegate} instance set on this runtime.
+     *
+     * @return The {@link LoginStorage.Delegate} set on this runtime.
+     */
+    @UiThread
+    public @Nullable LoginStorage.Delegate getLoginStorageDelegate() {
+        ThreadUtils.assertOnUiThread();
+        return mLoginStorageProxy.getDelegate();
+    }
+
+    @UiThread
+    public interface ServiceWorkerDelegate {
+
+        /**
+         * This is called when a service worker tries to open a new window using client.openWindow()
+         * The GeckoView application should provide an open {@link GeckoSession} to open the url.
+         *
+         * @param url Url which the Service Worker wishes to open in a new window.
+         * @return New or existing open {@link GeckoSession} in which to open the requested url.
+         *
+         * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API">Service Worker API</a>
+         * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Clients/openWindow">openWindow()</a>
+         */
+        @UiThread
+        @NonNull
+        GeckoResult<GeckoSession> onOpenWindow(@NonNull String url);
+    }
+
+    /**
+     * Sets the {@link ServiceWorkerDelegate} to be used for Service Worker requests.
+     *
+     * @param serviceWorkerDelegate An instance of {@link ServiceWorkerDelegate}.
+     *
+     * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API">Service Worker API</a>
+     */
+    @UiThread
+    public void setServiceWorkerDelegate(final @Nullable ServiceWorkerDelegate serviceWorkerDelegate) {
+        mServiceWorkerDelegate = serviceWorkerDelegate;
+    }
+
+    /**
      * Sets the delegate to be used for handling Web Notifications.
+     *
+     * @param delegate An instance of {@link WebNotificationDelegate}.
      *
      * @see <a href="https://developer.mozilla.org/en-US/docs/Web/API/Notification">Web Notifications</a>
      */
@@ -575,13 +682,8 @@ public final class GeckoRuntime implements Parcelable {
         return mSettings;
     }
 
-    /* package */ void setPref(final String name, final Object value,
-                               final boolean override) {
-        if (override || !GeckoAppShell.isFennec()) {
-            // Override pref on Fennec only when requested to prevent
-            // overriding of persistent prefs.
-            PrefsHelper.setPref(name, value, /* flush */ false);
-        }
+    /* package */ void setPref(final String name, final Object value) {
+        PrefsHelper.setPref(name, value, /* flush */ false);
     }
 
     /**

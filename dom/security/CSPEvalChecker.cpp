@@ -5,12 +5,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #include "mozilla/dom/CSPEvalChecker.h"
+#include "mozilla/dom/Document.h"
 #include "mozilla/dom/WorkerPrivate.h"
 #include "mozilla/dom/WorkerRunnable.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/ErrorResult.h"
 #include "nsGlobalWindowInner.h"
-#include "mozilla/dom/Document.h"
-#include "nsContentSecurityManager.h"
+#include "nsContentSecurityUtils.h"
 #include "nsContentUtils.h"
 #include "nsCOMPtr.h"
 #include "nsJSUtils.h"
@@ -31,14 +32,17 @@ nsresult CheckInternal(nsIContentSecurityPolicy* aCSP,
   MOZ_ASSERT(NS_IsMainThread());
   MOZ_ASSERT(aAllowed);
 
-#if !defined(ANDROID) && (defined(NIGHTLY_BUILD) || defined(DEBUG))
-  JSContext* cx = nsContentUtils::GetCurrentJSContext();
-  nsContentSecurityManager::AssertEvalNotRestricted(cx, aSubjectPrincipal,
-                                                    aExpression);
-#endif
-
   // The value is set at any "return", but better to have a default value here.
   *aAllowed = false;
+
+#if !defined(ANDROID)
+  JSContext* cx = nsContentUtils::GetCurrentJSContext();
+  if (!nsContentSecurityUtils::IsEvalAllowed(
+          cx, aSubjectPrincipal->IsSystemPrincipal(), aExpression)) {
+    *aAllowed = false;
+    return NS_OK;
+  }
+#endif
 
   if (!aCSP) {
     *aAllowed = true;

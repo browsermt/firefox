@@ -9,6 +9,7 @@
 #include "mozilla/dom/ConsoleBinding.h"
 #include "ConsoleCommon.h"
 
+#include "js/Array.h"  // JS::GetArrayLength, JS::NewArrayObject
 #include "mozilla/dom/BlobBinding.h"
 #include "mozilla/dom/Document.h"
 #include "mozilla/dom/Exceptions.h"
@@ -25,6 +26,7 @@
 #include "mozilla/dom/WorkletGlobalScope.h"
 #include "mozilla/dom/WorkletImpl.h"
 #include "mozilla/dom/WorkletThread.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/StaticPrefs_devtools.h"
 #include "nsCycleCollectionParticipant.h"
@@ -40,12 +42,10 @@
 #include "mozilla/TimestampTimelineMarker.h"
 
 #include "nsIConsoleAPIStorage.h"
-#include "nsIDOMWindowUtils.h"
 #include "nsIException.h"  // for nsIStackFrame
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsILoadContext.h"
 #include "nsISensitiveInfoHiddenURI.h"
-#include "nsIServiceManager.h"
 #include "nsISupportsPrimitives.h"
 #include "nsIWebNavigation.h"
 #include "nsIXPConnect.h"
@@ -73,7 +73,7 @@ namespace mozilla {
 namespace dom {
 
 struct ConsoleStructuredCloneData {
-  nsCOMPtr<nsISupports> mParent;
+  nsCOMPtr<nsIGlobalObject> mGlobal;
   nsTArray<RefPtr<BlobImpl>> mBlobs;
 };
 
@@ -292,8 +292,9 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
 
       JS::Rooted<JS::Value> val(aCx);
       {
-        RefPtr<Blob> blob = Blob::Create(mClonedData.mParent,
-                                         mClonedData.mBlobs.ElementAt(aIndex));
+        nsCOMPtr<nsIGlobalObject> global = mClonedData.mGlobal;
+        RefPtr<Blob> blob =
+            Blob::Create(global, mClonedData.mBlobs.ElementAt(aIndex));
         if (!ToJSValue(aCx, blob, &val)) {
           return nullptr;
         }
@@ -342,7 +343,7 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
     ConsoleCommon::ClearException ce(aCx);
 
     JS::Rooted<JSObject*> arguments(
-        aCx, JS_NewArrayObject(aCx, aCallData->mCopiedArguments.Length()));
+        aCx, JS::NewArrayObject(aCx, aCallData->mCopiedArguments.Length()));
     if (NS_WARN_IF(!arguments)) {
       return false;
     }
@@ -381,7 +382,7 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
     JS::Rooted<JSObject*> argumentsObj(aCx, &argumentsValue.toObject());
 
     uint32_t length;
-    if (!JS_GetArrayLength(aCx, argumentsObj, &length)) {
+    if (!JS::GetArrayLength(aCx, argumentsObj, &length)) {
       return;
     }
 
@@ -421,7 +422,7 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
     ConsoleCommon::ClearException ce(aCx);
 
     JS::Rooted<JSObject*> arguments(
-        aCx, JS_NewArrayObject(aCx, aArguments.Length()));
+        aCx, JS::NewArrayObject(aCx, aArguments.Length()));
     if (NS_WARN_IF(!arguments)) {
       return false;
     }
@@ -452,7 +453,7 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
 
     JS::Rooted<JS::Value> argumentsValue(aCx);
     bool ok = Read(aCx, &argumentsValue);
-    mClonedData.mParent = nullptr;
+    mClonedData.mGlobal = nullptr;
 
     if (!ok) {
       return;
@@ -465,7 +466,7 @@ class ConsoleRunnable : public StructuredCloneHolderBase {
     }
 
     uint32_t length;
-    if (!JS_GetArrayLength(aCx, argumentsObj, &length)) {
+    if (!JS::GetArrayLength(aCx, argumentsObj, &length)) {
       return;
     }
 
@@ -570,7 +571,7 @@ class ConsoleCallDataWorkletRunnable final : public ConsoleWorkletRunnable {
     AutoSafeJSContext cx;
 
     JSObject* sandbox =
-        mConsole->GetOrCreateSandbox(cx, mWorkletImpl->LoadInfo().Principal());
+        mConsole->GetOrCreateSandbox(cx, mWorkletImpl->Principal());
     JS::Rooted<JSObject*> global(cx, sandbox);
     if (NS_WARN_IF(!global)) {
       return;
@@ -658,7 +659,8 @@ class ConsoleWorkerRunnable : public WorkerProxyToMainThreadRunnable,
       return;
     }
 
-    RunConsole(jsapi.cx(), aWorkerPrivate, outerWindow, aWindow);
+    RunConsole(jsapi.cx(), aWindow->AsGlobal(), aWorkerPrivate, outerWindow,
+               aWindow);
   }
 
   void RunWindowless(WorkerPrivate* aWorkerPrivate) {
@@ -689,7 +691,12 @@ class ConsoleWorkerRunnable : public WorkerProxyToMainThreadRunnable,
 
     JSAutoRealm ar(cx, global);
 
-    RunConsole(cx, aWorkerPrivate, nullptr, nullptr);
+    nsCOMPtr<nsIGlobalObject> globalObject = xpc::NativeGlobal(global);
+    if (NS_WARN_IF(!globalObject)) {
+      return;
+    }
+
+    RunConsole(cx, globalObject, aWorkerPrivate, nullptr, nullptr);
   }
 
   void RunBackOnWorkerThreadForCleanup(WorkerPrivate* aWorkerPrivate) override {
@@ -703,7 +710,8 @@ class ConsoleWorkerRunnable : public WorkerProxyToMainThreadRunnable,
   virtual bool PreDispatch(JSContext* aCx) = 0;
 
   // This method is called in the main-thread.
-  virtual void RunConsole(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
+  virtual void RunConsole(JSContext* aCx, nsIGlobalObject* aGlobal,
+                          WorkerPrivate* aWorkerPrivate,
                           nsPIDOMWindowOuter* aOuterWindow,
                           nsPIDOMWindowInner* aInnerWindow) = 0;
 
@@ -714,8 +722,6 @@ class ConsoleWorkerRunnable : public WorkerProxyToMainThreadRunnable,
 
   // This must be released on the worker thread.
   RefPtr<Console> mConsole;
-
-  ConsoleStructuredCloneData mClonedData;
 };
 
 // This runnable appends a CallData object into the Console queue running on
@@ -738,9 +744,11 @@ class ConsoleCallDataWorkerRunnable final : public ConsoleWorkerRunnable {
     return StoreConsoleData(aCx, mCallData);
   }
 
-  void RunConsole(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
+  void RunConsole(JSContext* aCx, nsIGlobalObject* aGlobal,
+                  WorkerPrivate* aWorkerPrivate,
                   nsPIDOMWindowOuter* aOuterWindow,
                   nsPIDOMWindowInner* aInnerWindow) override {
+    MOZ_ASSERT(aGlobal);
     MOZ_ASSERT(aWorkerPrivate);
     AssertIsOnMainThread();
 
@@ -771,12 +779,11 @@ class ConsoleCallDataWorkerRunnable final : public ConsoleWorkerRunnable {
       mCallData->SetIDs(id, innerID);
     }
 
-    // Now we could have the correct window (if we are not window-less).
-    mClonedData.mParent = aInnerWindow;
+    mClonedData.mGlobal = aGlobal;
 
     ProcessCallData(aCx, mConsole, mCallData);
 
-    mClonedData.mParent = nullptr;
+    mClonedData.mGlobal = nullptr;
   }
 
   virtual void ReleaseData() override {
@@ -818,7 +825,7 @@ class ConsoleProfileWorkletRunnable final : public ConsoleWorkletRunnable {
     AutoSafeJSContext cx;
 
     JSObject* sandbox =
-        mConsole->GetOrCreateSandbox(cx, mWorkletImpl->LoadInfo().Principal());
+        mConsole->GetOrCreateSandbox(cx, mWorkletImpl->Principal());
     JS::Rooted<JSObject*> global(cx, sandbox);
     if (NS_WARN_IF(!global)) {
       return;
@@ -859,17 +866,18 @@ class ConsoleProfileWorkerRunnable final : public ConsoleWorkerRunnable {
     return StoreProfileData(aCx, mArguments);
   }
 
-  void RunConsole(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
+  void RunConsole(JSContext* aCx, nsIGlobalObject* aGlobal,
+                  WorkerPrivate* aWorkerPrivate,
                   nsPIDOMWindowOuter* aOuterWindow,
                   nsPIDOMWindowInner* aInnerWindow) override {
     AssertIsOnMainThread();
+    MOZ_ASSERT(aGlobal);
 
-    // Now we could have the correct window (if we are not window-less).
-    mClonedData.mParent = aInnerWindow;
+    mClonedData.mGlobal = aGlobal;
 
     ProcessProfileData(aCx, mName, mAction);
 
-    mClonedData.mParent = nullptr;
+    mClonedData.mGlobal = nullptr;
   }
 
   virtual void ReleaseData() override {}
@@ -1428,7 +1436,7 @@ void Console::MethodInternal(JSContext* aCx, MethodName aMethodName,
       callData->SetAddonId(principal);
 
 #ifdef DEBUG
-      if (!nsContentUtils::IsSystemPrincipal(principal)) {
+      if (!principal->IsSystemPrincipal()) {
         nsCOMPtr<nsIWebNavigation> webNav = do_GetInterface(mGlobal);
         if (webNav) {
           nsCOMPtr<nsILoadContext> loadContext = do_QueryInterface(webNav);
@@ -1445,7 +1453,7 @@ void Console::MethodInternal(JSContext* aCx, MethodName aMethodName,
   } else if (WorkletThread::IsOnWorkletThread()) {
     nsCOMPtr<WorkletGlobalScope> global = do_QueryInterface(mGlobal);
     MOZ_ASSERT(global);
-    oa = global->Impl()->LoadInfo().OriginAttributesRef();
+    oa = global->Impl()->OriginAttributesRef();
   } else {
     WorkerPrivate* workerPrivate = GetCurrentThreadWorkerPrivate();
     MOZ_ASSERT(workerPrivate);
@@ -1865,6 +1873,9 @@ bool FlushOutput(JSContext* aCx, Sequence<JS::Value>& aSequence,
 bool Console::ProcessArguments(JSContext* aCx, const Sequence<JS::Value>& aData,
                                Sequence<JS::Value>& aSequence,
                                Sequence<nsString>& aStyles) const {
+  // This method processes the arguments as format strings (%d, %i, %s...)
+  // only if the first element of them is a valid and not-empty string.
+
   if (aData.IsEmpty()) {
     return true;
   }
@@ -1882,6 +1893,10 @@ bool Console::ProcessArguments(JSContext* aCx, const Sequence<JS::Value>& aData,
   nsAutoJSString string;
   if (NS_WARN_IF(!string.init(aCx, jsString))) {
     return false;
+  }
+
+  if (string.IsEmpty()) {
+    return ArgumentsToValueList(aData, aSequence);
   }
 
   nsString::const_iterator start, end;

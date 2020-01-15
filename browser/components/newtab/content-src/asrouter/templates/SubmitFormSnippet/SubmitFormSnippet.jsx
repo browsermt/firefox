@@ -45,7 +45,7 @@ export class SubmitFormSnippet extends React.PureComponent {
     this.setState({ disableForm: true });
     this.props.sendUserActionTelemetry({
       event: "CLICK_BUTTON",
-      value: "conversion-subscribe-activation",
+      event_context: "conversion-subscribe-activation",
       id: "NEWTAB_FOOTER_BAR_CONTENT",
     });
 
@@ -78,7 +78,7 @@ export class SubmitFormSnippet extends React.PureComponent {
       }
       this.props.sendUserActionTelemetry({
         event: "CLICK_BUTTON",
-        value: "subscribe-success",
+        event_context: "subscribe-success",
         id: "NEWTAB_FOOTER_BAR_CONTENT",
       });
     } else {
@@ -90,7 +90,7 @@ export class SubmitFormSnippet extends React.PureComponent {
       this.setState({ signupSuccess: false, signupSubmitted: true });
       this.props.sendUserActionTelemetry({
         event: "CLICK_BUTTON",
-        value: "subscribe-error",
+        event_context: "subscribe-error",
         id: "NEWTAB_FOOTER_BAR_CONTENT",
       });
     }
@@ -101,7 +101,7 @@ export class SubmitFormSnippet extends React.PureComponent {
   expandSnippet() {
     this.props.sendUserActionTelemetry({
       event: "CLICK_BUTTON",
-      value: "scene1-button-learn-more",
+      event_context: "scene1-button-learn-more",
       id: this.props.UISurface,
     });
 
@@ -177,7 +177,7 @@ export class SubmitFormSnippet extends React.PureComponent {
     const bodyText = isSuccess
       ? { success_text: content.success_text }
       : { error_text: content.error_text };
-    const retryButtonText = content.scene1_button_label;
+    const retryButtonText = content.retry_button_label;
     return (
       <SnippetBase {...this.props}>
         <div className="submissionStatus">

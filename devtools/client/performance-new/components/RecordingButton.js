@@ -1,6 +1,37 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+// @ts-check
+
+/**
+ * @template P
+ * @typedef {import("react-redux").ResolveThunks<P>} ResolveThunks<P>
+ */
+
+/**
+ * @typedef {Object} StateProps
+ * @property {RecordingState} recordingState
+ * @property {boolean} isSupportedPlatform
+ * @property {boolean} recordingUnexpectedlyStopped
+ * @property {PageContext} pageContext
+ */
+
+/**
+ * @typedef {Object} ThunkDispatchProps
+ * @property {typeof actions.startRecording} startRecording
+ * @property {typeof actions.getProfileAndStopProfiler} getProfileAndStopProfiler
+ * @property {typeof actions.stopProfilerAndDiscardProfile} stopProfilerAndDiscardProfile
+
+ */
+
+/**
+ * @typedef {ResolveThunks<ThunkDispatchProps>} DispatchProps
+ * @typedef {StateProps & DispatchProps} Props
+ * @typedef {import("../@types/perf").RecordingState} RecordingState
+ * @typedef {import("../@types/perf").State} StoreState
+ * @typedef {import("../@types/perf").PageContext} PageContext
+ */
+
 "use strict";
 
 const { PureComponent } = require("devtools/client/shared/vendor/react");
@@ -10,50 +41,38 @@ const {
   span,
   img,
 } = require("devtools/client/shared/vendor/react-dom-factories");
-const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const { connect } = require("devtools/client/shared/vendor/react-redux");
 const actions = require("devtools/client/performance-new/store/actions");
-const {
-  recordingState: {
-    NOT_YET_KNOWN,
-    AVAILABLE_TO_RECORD,
-    REQUEST_TO_START_RECORDING,
-    REQUEST_TO_GET_PROFILE_AND_STOP_PROFILER,
-    REQUEST_TO_STOP_PROFILER,
-    RECORDING,
-    OTHER_IS_RECORDING,
-    LOCKED_BY_PRIVATE_BROWSING,
-  },
-} = require("devtools/client/performance-new/utils");
 const selectors = require("devtools/client/performance-new/store/selectors");
 
 /**
  * This component is not responsible for the full life cycle of recording a profile. It
  * is only responsible for the actual act of stopping and starting recordings. It
  * also reacts to the changes of the recording state from external changes.
+ *
+ * @extends {React.PureComponent<Props>}
  */
 class RecordingButton extends PureComponent {
-  static get propTypes() {
-    return {
-      // StateProps
-      recordingState: PropTypes.string.isRequired,
-      isSupportedPlatform: PropTypes.bool,
-      recordingUnexpectedlyStopped: PropTypes.bool.isRequired,
-      isPopup: PropTypes.bool.isRequired,
-
-      // DispatchProps
-      startRecording: PropTypes.func.isRequired,
-      getProfileAndStopProfiler: PropTypes.func.isRequired,
-      stopProfilerAndDiscardProfile: PropTypes.func.isRequired,
-    };
-  }
-
+  /** @param {Props} props */
   constructor(props) {
     super(props);
     this._getProfileAndStopProfiler = () =>
       this.props.getProfileAndStopProfiler(window);
   }
 
+  /** @param {{
+   *   disabled?: boolean,
+   *   label?: React.ReactNode,
+   *   onClick?: any,
+   *   additionalMessage?: React.ReactNode,
+   *   isPrimary?: boolean,
+   *   pageContext?: PageContext,
+   *   additionalButton?: {
+   *     label: string,
+   *     onClick: any,
+   *   },
+   * }} buttonSettings
+   */
   renderButton(buttonSettings) {
     const {
       disabled,
@@ -61,12 +80,12 @@ class RecordingButton extends PureComponent {
       onClick,
       additionalMessage,
       isPrimary,
-      isPopup,
+      pageContext,
       additionalButton,
     } = buttonSettings;
 
     const nbsp = "\u00A0";
-    const showAdditionalMessage = isPopup && additionalMessage;
+    const showAdditionalMessage = pageContext === "popup" && additionalMessage;
     const buttonClass = isPrimary ? "primary" : "default";
 
     return div(
@@ -82,7 +101,6 @@ class RecordingButton extends PureComponent {
         button(
           {
             className: `perf-photon-button perf-photon-button-${buttonClass} perf-button`,
-            "data-standalone": true,
             disabled,
             onClick,
           },
@@ -92,7 +110,6 @@ class RecordingButton extends PureComponent {
           ? button(
               {
                 className: `perf-photon-button perf-photon-button-default perf-button`,
-                "data-standalone": true,
                 onClick: additionalButton.onClick,
                 disabled,
               },
@@ -124,10 +141,10 @@ class RecordingButton extends PureComponent {
 
     // TODO - L10N all of the messages. Bug 1418056
     switch (recordingState) {
-      case NOT_YET_KNOWN:
+      case "not-yet-known":
         return null;
 
-      case AVAILABLE_TO_RECORD:
+      case "available-to-record":
         return this.renderButton({
           onClick: startRecording,
           label: span(
@@ -143,39 +160,39 @@ class RecordingButton extends PureComponent {
             : null,
         });
 
-      case REQUEST_TO_STOP_PROFILER:
+      case "request-to-stop-profiler":
         return this.renderButton({
           label: "Stopping recording",
           disabled: true,
         });
 
-      case REQUEST_TO_GET_PROFILE_AND_STOP_PROFILER:
+      case "request-to-get-profile-and-stop-profiler":
         return this.renderButton({
           label: "Capturing profile",
           disabled: true,
         });
 
-      case REQUEST_TO_START_RECORDING:
-      case RECORDING:
+      case "request-to-start-recording":
+      case "recording":
         return this.renderButton({
           label: "Capture recording",
           isPrimary: true,
           onClick: this._getProfileAndStopProfiler,
-          disabled: recordingState === REQUEST_TO_START_RECORDING,
+          disabled: recordingState === "request-to-start-recording",
           additionalButton: {
             label: "Cancel recording",
             onClick: stopProfilerAndDiscardProfile,
           },
         });
 
-      case OTHER_IS_RECORDING:
+      case "other-is-recording":
         return this.renderButton({
           label: "Stop and discard the other recording",
           onClick: stopProfilerAndDiscardProfile,
           additionalMessage: "Another tool is currently recording.",
         });
 
-      case LOCKED_BY_PRIVATE_BROWSING:
+      case "locked-by-private-browsing":
         return this.renderButton({
           label: span(
             null,
@@ -196,6 +213,10 @@ class RecordingButton extends PureComponent {
   }
 }
 
+/**
+ * @param {StoreState} state
+ * @returns {StateProps}
+ */
 function mapStateToProps(state) {
   return {
     recordingState: selectors.getRecordingState(state),
@@ -203,10 +224,11 @@ function mapStateToProps(state) {
     recordingUnexpectedlyStopped: selectors.getRecordingUnexpectedlyStopped(
       state
     ),
-    isPopup: selectors.getIsPopup(state),
+    pageContext: selectors.getPageContext(state),
   };
 }
 
+/** @type {ThunkDispatchProps} */
 const mapDispatchToProps = {
   startRecording: actions.startRecording,
   stopProfilerAndDiscardProfile: actions.stopProfilerAndDiscardProfile,

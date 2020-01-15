@@ -4,12 +4,43 @@
 "use strict";
 
 const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
+const { XPCOMUtils } = ChromeUtils.import(
+  "resource://gre/modules/XPCOMUtils.jsm"
+);
 
 const PROVIDER_PREF_BRANCH =
   "browser.newtabpage.activity-stream.asrouter.providers.";
 const DEVTOOLS_PREF =
   "browser.newtabpage.activity-stream.asrouter.devtoolsEnabled";
 const FXA_USERNAME_PREF = "services.sync.username";
+const FIRST_RUN_PREF = "trailhead.firstrun.branches";
+const DEFAULT_FIRSTRUN_TRIPLET = "supercharge";
+const DEFAULT_FIRSTRUN_INTERRUPT = "join";
+
+function getTrailheadConfigFromPref(value) {
+  let [interrupt, triplet] = value.split("-");
+  return {
+    trailheadInterrupt: interrupt || DEFAULT_FIRSTRUN_INTERRUPT,
+    trailheadTriplet: triplet || DEFAULT_FIRSTRUN_TRIPLET,
+  };
+}
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "trailheadPrefs",
+  FIRST_RUN_PREF,
+  "",
+  null,
+  getTrailheadConfigFromPref
+);
+
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "useReleaseSnippets",
+  "browser.newtabpage.activity-stream.asrouter.useReleaseSnippets",
+  false,
+  null
+);
 
 const DEFAULT_STATE = {
   _initialized: false,
@@ -49,6 +80,32 @@ class _ASRouterPreferences {
   constructor() {
     Object.assign(this, DEFAULT_STATE);
     this._callbacks = new Set();
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "personalizedCfrScores",
+      "browser.messaging-system.personalized-cfr.scores",
+      "{}",
+      null,
+      this._transformPersonalizedCfrScores
+    );
+
+    XPCOMUtils.defineLazyPreferenceGetter(
+      this,
+      "personalizedCfrThreshold",
+      "browser.messaging-system.personalized-cfr.score-threshold",
+      5000
+    );
+  }
+
+  _transformPersonalizedCfrScores(value) {
+    let result = {};
+    try {
+      result = JSON.parse(value);
+    } catch (e) {
+      Cu.reportError(e);
+    }
+    return result;
   }
 
   _getProviderConfig() {
@@ -67,6 +124,11 @@ class _ASRouterPreferences {
       }
       return filtered;
     }, []);
+  }
+
+  // istanbul ignore next
+  get trailhead() {
+    return trailheadPrefs;
   }
 
   get providers() {
@@ -119,6 +181,10 @@ class _ASRouterPreferences {
     return this._devtoolsEnabled;
   }
 
+  get useReleaseSnippets() {
+    return useReleaseSnippets;
+  }
+
   observe(aSubject, aTopic, aPrefName) {
     if (aPrefName && aPrefName.startsWith(this._providerPrefBranch)) {
       this._providers = null;
@@ -129,11 +195,9 @@ class _ASRouterPreferences {
     this._callbacks.forEach(cb => cb(aPrefName));
   }
 
-  getUserPreference(providerId) {
-    if (!USER_PREFERENCES[providerId]) {
-      return null;
-    }
-    return Services.prefs.getBoolPref(USER_PREFERENCES[providerId], true);
+  getUserPreference(name) {
+    const prefName = USER_PREFERENCES[name] || name;
+    return Services.prefs.getBoolPref(prefName, true);
   }
 
   getAllUserPreferences() {
@@ -194,10 +258,12 @@ this._ASRouterPreferences = _ASRouterPreferences;
 this.ASRouterPreferences = new _ASRouterPreferences();
 this.TEST_PROVIDERS = TEST_PROVIDERS;
 this.TARGETING_PREFERENCES = TARGETING_PREFERENCES;
+this.getTrailheadConfigFromPref = getTrailheadConfigFromPref;
 
 const EXPORTED_SYMBOLS = [
   "_ASRouterPreferences",
   "ASRouterPreferences",
   "TEST_PROVIDERS",
   "TARGETING_PREFERENCES",
+  "getTrailheadConfigFromPref",
 ];

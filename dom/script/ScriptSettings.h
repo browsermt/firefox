@@ -23,7 +23,6 @@
 class nsPIDOMWindowInner;
 class nsGlobalWindowInner;
 class nsIScriptContext;
-class nsIDocShell;
 
 namespace mozilla {
 namespace dom {
@@ -31,12 +30,11 @@ namespace dom {
 class Document;
 
 /*
- * System-wide setup/teardown routines. Init and Destroy should be invoked
- * once each, at startup and shutdown (respectively).
+ * Per thread setup/teardown routines. Init and Destroy should be invoked
+ * once each, at startup and shutdown of the script runtime (respectively).
  */
 void InitScriptSettings();
 void DestroyScriptSettings();
-bool ScriptSettingsInitialized();
 
 /*
  * Static helpers in ScriptSettings which track the number of listeners

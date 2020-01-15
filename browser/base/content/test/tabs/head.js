@@ -91,7 +91,7 @@ async function wait_for_tab_media_blocked_event(tab, expectMediaBlocked) {
 
 async function is_audio_playing(tab) {
   let browser = tab.linkedBrowser;
-  let isPlaying = await ContentTask.spawn(browser, {}, async function() {
+  let isPlaying = await SpecialPowers.spawn(browser, [], async function() {
     let audio = content.document.querySelector("audio");
     return !audio.paused;
   });
@@ -100,7 +100,7 @@ async function is_audio_playing(tab) {
 
 async function play(tab, expectPlaying = true) {
   let browser = tab.linkedBrowser;
-  await ContentTask.spawn(browser, {}, async function() {
+  await SpecialPowers.spawn(browser, [], async function() {
     let audio = content.document.querySelector("audio");
     audio.play();
   });
@@ -278,15 +278,9 @@ function checkBrowserRemoteType(
 ) {
   // Check both parent and child to ensure that they have the correct remoteType.
   if (expectedRemoteType == E10SUtils.WEB_REMOTE_TYPE) {
-    ok(E10SUtils.isWebRemoteType(browser), message);
-    // E10sUtils.isWebRemoteType expects a browser, but we're trying to call this
-    // on a message manager, so fake up an object that looks like what
-    // isWebRemoteType expects.
+    ok(E10SUtils.isWebRemoteType(browser.remoteType), message);
     ok(
-      E10SUtils.isWebRemoteType({
-        ownerGlobal: browser.ownerGlobal,
-        remoteType: browser.messageManager.remoteType,
-      }),
+      E10SUtils.isWebRemoteType(browser.messageManager.remoteType),
       "Parent and child process should agree on the remote type."
     );
   } else {
@@ -299,14 +293,14 @@ function checkBrowserRemoteType(
   }
 }
 
-function test_url_for_process_types(
+function test_url_for_process_types({
   url,
   chromeResult,
   webContentResult,
   privilegedAboutContentResult,
   privilegedMozillaContentResult,
-  extensionProcessResult
-) {
+  extensionProcessResult,
+}) {
   const CHROME_PROCESS = E10SUtils.NOT_REMOTE;
   const WEB_CONTENT_PROCESS = E10SUtils.WEB_REMOTE_TYPE;
   const PRIVILEGEDABOUT_CONTENT_PROCESS = E10SUtils.PRIVILEGEDABOUT_REMOTE_TYPE;

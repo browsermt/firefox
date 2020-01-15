@@ -9,7 +9,8 @@
  * https://w3c.github.io/webvr/spec/1.1/#interface-gamepad
  */
 
-[Pref="dom.gamepad.enabled"]
+[Pref="dom.gamepad.enabled",
+ Exposed=Window]
 interface GamepadButton {
   readonly    attribute boolean pressed;
   readonly    attribute boolean touched;
@@ -22,12 +23,18 @@ enum GamepadHand {
   "right"
 };
 
+/**
+ * https://www.w3.org/TR/gamepad/#gamepadmappingtype-enum
+ * https://immersive-web.github.io/webxr-gamepads-module/#enumdef-gamepadmappingtype
+ */
 enum GamepadMappingType {
   "",
-  "standard"
+  "standard",
+  "xr-standard"
 };
 
-[Pref="dom.gamepad.enabled"]
+[Pref="dom.gamepad.enabled",
+ Exposed=Window]
 interface Gamepad {
   /**
    * An identifier, unique per type of device.

@@ -8,6 +8,9 @@
 
 #include "MessageEvent.h"
 #include "mozilla/dom/BlobBinding.h"
+#include "mozilla/dom/BrowsingContext.h"
+#include "mozilla/dom/BrowsingContextGroup.h"
+#include "mozilla/dom/DocGroup.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/File.h"
 #include "mozilla/dom/FileList.h"
@@ -18,7 +21,9 @@
 #include "mozilla/dom/PMessagePort.h"
 #include "mozilla/dom/StructuredCloneTags.h"
 #include "mozilla/dom/UnionConversions.h"
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/EventDispatcher.h"
+#include "mozilla/StaticPrefs_dom.h"
 #include "nsDocShell.h"
 #include "nsGlobalWindow.h"
 #include "nsIConsoleService.h"
@@ -31,19 +36,18 @@
 namespace mozilla {
 namespace dom {
 
-PostMessageEvent::PostMessageEvent(BrowsingContext* aSource,
-                                   const nsAString& aCallerOrigin,
-                                   nsGlobalWindowOuter* aTargetWindow,
-                                   nsIPrincipal* aProvidedPrincipal,
-                                   const Maybe<uint64_t>& aCallerWindowID,
-                                   nsIURI* aCallerDocumentURI,
-                                   bool aIsFromPrivateWindow)
+PostMessageEvent::PostMessageEvent(
+    BrowsingContext* aSource, const nsAString& aCallerOrigin,
+    nsGlobalWindowOuter* aTargetWindow, nsIPrincipal* aProvidedPrincipal,
+    const Maybe<uint64_t>& aCallerWindowID, nsIURI* aCallerDocumentURI,
+    bool aIsFromPrivateWindow, const Maybe<nsID>& aCallerAgentClusterId)
     : Runnable("dom::PostMessageEvent"),
       mSource(aSource),
       mCallerOrigin(aCallerOrigin),
       mTargetWindow(aTargetWindow),
       mProvidedPrincipal(aProvidedPrincipal),
       mCallerWindowID(aCallerWindowID),
+      mCallerAgentClusterId(aCallerAgentClusterId),
       mCallerDocumentURI(aCallerDocumentURI),
       mIsFromPrivateWindow(aIsFromPrivateWindow) {}
 
@@ -142,10 +146,10 @@ PostMessageEvent::Run() {
         rv = NS_GetSanitizedURIStringFromURI(callerDocumentURI, uriSpec);
         NS_ENSURE_SUCCESS(rv, rv);
 
-        rv = errorObject->Init(
-            errorText, uriSpec, EmptyString(), 0, 0, nsIScriptError::errorFlag,
-            "DOM Window", mIsFromPrivateWindow,
-            nsContentUtils::IsSystemPrincipal(mProvidedPrincipal));
+        rv = errorObject->Init(errorText, uriSpec, EmptyString(), 0, 0,
+                               nsIScriptError::errorFlag, "DOM Window",
+                               mIsFromPrivateWindow,
+                               mProvidedPrincipal->IsSystemPrincipal());
       }
       NS_ENSURE_SUCCESS(rv, rv);
 
@@ -162,10 +166,18 @@ PostMessageEvent::Run() {
   nsCOMPtr<mozilla::dom::EventTarget> eventTarget =
       do_QueryObject(targetWindow);
 
+  JS::CloneDataPolicy cloneDataPolicy;
+  MOZ_DIAGNOSTIC_ASSERT(targetWindow);
+  if (mCallerAgentClusterId.isSome() && targetWindow->GetDocGroup() &&
+      targetWindow->GetDocGroup()->AgentClusterId().Equals(
+          mCallerAgentClusterId.ref())) {
+    cloneDataPolicy.allowSharedMemory();
+  }
+
   StructuredCloneHolder* holder;
   if (mHolder.constructed<StructuredCloneHolder>()) {
-    mHolder.ref<StructuredCloneHolder>().Read(ToSupports(targetWindow), cx,
-                                              &messageData, rv);
+    mHolder.ref<StructuredCloneHolder>().Read(
+        targetWindow->AsGlobal(), cx, &messageData, cloneDataPolicy, rv);
     holder = &mHolder.ref<StructuredCloneHolder>();
   } else {
     MOZ_ASSERT(mHolder.constructed<ipc::StructuredCloneData>());
@@ -232,6 +244,54 @@ void PostMessageEvent::Dispatch(nsGlobalWindowInner* aTargetWindow,
   nsEventStatus status = nsEventStatus_eIgnore;
   EventDispatcher::Dispatch(ToSupports(aTargetWindow), presContext,
                             internalEvent, aEvent, &status);
+}
+
+void PostMessageEvent::DispatchToTargetThread(ErrorResult& aError) {
+  nsCOMPtr<nsIRunnable> event = this;
+
+  if (StaticPrefs::dom_separate_event_queue_for_post_message_enabled() &&
+      !DocGroup::TryToLoadIframesInBackground()) {
+    BrowsingContext* bc = mTargetWindow->GetBrowsingContext();
+    bc = bc ? bc->Top() : nullptr;
+    if (bc && bc->IsLoading()) {
+      // As long as the top level is loading, we can dispatch events to the
+      // queue because the queue will be flushed eventually
+      aError = bc->Group()->QueuePostMessageEvent(event.forget());
+      return;
+    }
+  }
+
+  // XXX Loading iframes in background isn't enabled by default and doesn't
+  //     work with Fission at the moment.
+  if (DocGroup::TryToLoadIframesInBackground()) {
+    RefPtr<nsIDocShell> docShell = mTargetWindow->GetDocShell();
+    RefPtr<nsDocShell> dShell = nsDocShell::Cast(docShell);
+
+    // PostMessage that are added to the BrowsingContextGroup are the ones that
+    // can be flushed when the top level document is loaded.
+    // TreadAsBackgroundLoad DocShells are treated specially.
+    if (dShell) {
+      if (!dShell->TreatAsBackgroundLoad()) {
+        BrowsingContext* bc = mTargetWindow->GetBrowsingContext();
+        bc = bc ? bc->Top() : nullptr;
+        if (bc && bc->IsLoading()) {
+          // As long as the top level is loading, we can dispatch events to the
+          // queue because the queue will be flushed eventually
+          aError = bc->Group()->QueuePostMessageEvent(event.forget());
+          return;
+        }
+      } else if (mTargetWindow->GetExtantDoc() &&
+                 mTargetWindow->GetExtantDoc()->GetReadyStateEnum() <
+                     Document::READYSTATE_COMPLETE) {
+        mozilla::dom::DocGroup* docGroup = mTargetWindow->GetDocGroup();
+        aError = docGroup->QueueIframePostMessages(event.forget(),
+                                                   dShell->GetOuterWindowID());
+        return;
+      }
+    }
+  }
+
+  aError = mTargetWindow->Dispatch(TaskCategory::Other, event.forget());
 }
 
 }  // namespace dom

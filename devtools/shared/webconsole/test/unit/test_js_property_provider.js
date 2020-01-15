@@ -132,6 +132,33 @@ function runChecks(dbgObject, environment, sandbox) {
     test_has_no_results(results);
   }
 
+  info("Test that suggestions are given for 'globalThis'");
+  results = propertyProvider("g");
+  test_has_result(results, "globalThis");
+
+  info("Test that suggestions are given for 'globalThis.'");
+  results = propertyProvider("globalThis.");
+  test_has_result(results, "testObject");
+
+  info("Test that suggestions are given for '(globalThis).'");
+  results = propertyProvider("(globalThis).");
+  test_has_result(results, "testObject");
+
+  info(
+    "Test that suggestions are given for deep 'globalThis' properties access"
+  );
+  results = propertyProvider("(globalThis).testObject.propA.");
+  test_has_result(results, "shift");
+
+  results = propertyProvider("(globalThis).testObject.propA[");
+  test_has_result(results, `"shift"`);
+
+  results = propertyProvider("(globalThis)['testObject']['propA'][");
+  test_has_result(results, `"shift"`);
+
+  results = propertyProvider("(globalThis).testObject['propA'].");
+  test_has_result(results, "shift");
+
   info("Testing lexical scope issues (Bug 1207868)");
   results = propertyProvider("foobar");
   test_has_result(results, "foobar");
@@ -546,6 +573,27 @@ function runChecks(dbgObject, environment, sandbox) {
 
   results = propertyProvider(`/*I'm a comment\n \t */\n\nt`);
   test_has_result(results, "testObject");
+
+  info("Test local expression variables");
+  results = propertyProvider("b", { expressionVars: ["a", "b", "c"] });
+  test_has_result(results, "b");
+  Assert.equal(results.matches.has("a"), false);
+  Assert.equal(results.matches.has("c"), false);
+
+  info(
+    "Test that local expression variables are not included when accessing an object properties"
+  );
+  results = propertyProvider("testObject.prop", {
+    expressionVars: ["propLocal"],
+  });
+  Assert.equal(results.matches.has("propLocal"), false);
+  test_has_result(results, "propA");
+
+  results = propertyProvider("testObject['prop", {
+    expressionVars: ["propLocal"],
+  });
+  test_has_result(results, "'propA'");
+  Assert.equal(results.matches.has("propLocal"), false);
 }
 
 /**

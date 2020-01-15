@@ -8,36 +8,14 @@
  * Check a |with| frame actor's bindings.
  */
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-
-registerCleanupFunction(() => {
-  Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-});
-
-function run_test() {
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-stack");
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-stack", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_pause_frame();
-    });
-  });
-  do_test_pending();
-}
+    );
 
-function test_pause_frame() {
-  gThreadFront.once("paused", function(packet) {
-    const env = packet.frame.environment;
+    const env = await packet.frame.getEnvironment();
     Assert.notEqual(env, undefined);
 
     const parentEnv = env.parent;
@@ -53,30 +31,33 @@ function test_pause_frame() {
     Assert.equal(vars.arguments.value.class, "Arguments");
     Assert.ok(!!vars.arguments.value.actor);
 
-    const objClient = gThreadFront.pauseGrip(env.object);
-    objClient.getPrototypeAndProperties(function(response) {
-      Assert.equal(response.ownProperties.PI.value, Math.PI);
-      Assert.equal(response.ownProperties.cos.value.type, "object");
-      Assert.equal(response.ownProperties.cos.value.class, "Function");
-      Assert.ok(!!response.ownProperties.cos.value.actor);
+    const objClient = threadFront.pauseGrip(env.object);
+    const response = await objClient.getPrototypeAndProperties();
+    Assert.equal(response.ownProperties.PI.value, Math.PI);
+    Assert.equal(response.ownProperties.cos.value.getGrip().type, "object");
+    Assert.equal(response.ownProperties.cos.value.getGrip().class, "Function");
+    Assert.ok(!!response.ownProperties.cos.value.actorID);
 
-      gThreadFront.resume().then(function() {
-        finishClient(gClient);
-      });
-    });
-  });
+    await threadFront.resume();
+  })
+);
 
+function evalCode(debuggee) {
   /* eslint-disable */
-  gDebuggee.eval("(" + function () {
-    function stopMe(number) {
-      var a;
-      var r = number;
-      with (Math) {
-        a = PI * r * r;
-        debugger;
-      }
-    }
-    stopMe(10);
-  } + ")()");
+  debuggee.eval(
+    "(" +
+      function() {
+        function stopMe(number) {
+          var a;
+          var r = number;
+          with (Math) {
+            a = PI * r * r;
+            debugger;
+          }
+        }
+        stopMe(10);
+      } +
+      ")()"
+  );
   /* eslint-enable */
 }

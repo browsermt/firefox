@@ -5,7 +5,6 @@
 // @flow
 
 import { bindActionCreators } from "redux";
-import { isOriginalId } from "devtools-source-map";
 
 import { copyToTheClipboard } from "../../../utils/clipboard";
 import {
@@ -37,7 +36,7 @@ export const continueToHereItem = (
 ) => ({
   accesskey: L10N.getStr("editor.continueToHere.accesskey"),
   disabled: !isPaused,
-  click: () => editorActions.continueToHere(cx, location.line, location.column),
+  click: () => editorActions.continueToHere(cx, location),
   id: "node-menu-continue-to-here",
   label: L10N.getStr("editor.continueToHere.label"),
 });
@@ -90,7 +89,7 @@ const jumpToMappedLocationItem = (
   id: "node-menu-jump",
   label: L10N.getFormatStr(
     "editor.jumpToMappedLocation1",
-    isOriginalId(selectedSource.id)
+    selectedSource.isOriginal
       ? L10N.getStr("generated")
       : L10N.getStr("original")
   ),

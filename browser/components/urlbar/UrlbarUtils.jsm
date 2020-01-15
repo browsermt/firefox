@@ -91,7 +91,7 @@ var UrlbarUtils = {
     // Payload: { url, icon, device, title }
     REMOTE_TAB: 6,
     // An actionable message to help the user with their query.
-    // Payload: { icon, text, buttonText, [buttonUrl], data, helpUrl }
+    // Payload: { text, buttonText, data, [buttonUrl], [helpUrl] }
     TIP: 7,
   },
 
@@ -110,10 +110,11 @@ var UrlbarUtils = {
     OTHER_NETWORK: 6,
   },
 
-  // This defines icon locations that are common used in the UI.
+  // This defines icon locations that are commonly used in the UI.
   ICON: {
     // DEFAULT is defined lazily so it doesn't eagerly initialize PlacesUtils.
     SEARCH_GLASS: "chrome://browser/skin/search-glass.svg",
+    TIP: "chrome://browser/skin/tip.svg",
   },
 
   // The number of results by which Page Up/Down move the selection.
@@ -156,6 +157,10 @@ var UrlbarUtils = {
   // character that no title would ever have.  We use \x1F, the non-printable
   // unit separator.
   TITLE_TAGS_SEPARATOR: "\x1F",
+
+  // Regex matching single words (no spaces, dots or url-like chars).
+  // We accept a trailing dot though.
+  REGEXP_SINGLE_WORD: /^[^\s.?@:/]+\.?$/,
 
   /**
    * Adds a url to history as long as it isn't in a private browsing window,
@@ -347,6 +352,11 @@ var UrlbarUtils = {
         );
         return { url, postData };
       }
+      case UrlbarUtils.RESULT_TYPE.TIP: {
+        // Return the button URL. Consumers must check payload.helpUrl
+        // themselves if they need the tip's help link.
+        return { url: result.payload.buttonUrl, postData: null };
+      }
     }
     return { url: null, postData: null };
   },
@@ -365,6 +375,30 @@ var UrlbarUtils = {
   getSearchQueryUrl(engine, query) {
     let submission = engine.getSubmission(query, null, "keyword");
     return [submission.uri.spec, submission.postData];
+  },
+
+  /**
+   * Get the number of rows a result should span in the autocomplete dropdown.
+   *
+   * @param {UrlbarResult} result The result being created.
+   * @returns {number}
+   *          The number of rows the result should span in the autocomplete
+   *          dropdown.
+   */
+  getSpanForResult(result) {
+    switch (result.type) {
+      case UrlbarUtils.RESULT_TYPE.URL:
+      case UrlbarUtils.RESULT_TYPE.BOOKMARKS:
+      case UrlbarUtils.RESULT_TYPE.REMOTE_TAB:
+      case UrlbarUtils.RESULT_TYPE.TAB_SWITCH:
+      case UrlbarUtils.RESULT_TYPE.KEYWORD:
+      case UrlbarUtils.RESULT_TYPE.SEARCH:
+      case UrlbarUtils.RESULT_TYPE.OMNIBOX:
+        return 1;
+      case UrlbarUtils.RESULT_TYPE.TIP:
+        return 3;
+    }
+    return 1;
   },
 
   /**
@@ -461,6 +495,19 @@ var UrlbarUtils = {
         event.inputType == "insertFromYank")
     );
   },
+
+  /**
+   * Given a string, checks if it looks like a single word host, not containing
+   * spaces nor dots (apart from a possible trailing one).
+   * @note This matching should stay in sync with the related code in
+   * nsDefaultURIFixup::KeywordURIFixup
+   * @param {string} value
+   * @returns {boolean} Whether the value looks like a single word host.
+   */
+  looksLikeSingleWordHost(value) {
+    let str = value.trim();
+    return this.REGEXP_SINGLE_WORD.test(str);
+  },
 };
 
 XPCOMUtils.defineLazyGetter(UrlbarUtils.ICON, "DEFAULT", () => {
@@ -495,6 +542,12 @@ class UrlbarQueryContext {
    *   Whether or not to allow providers to include autofill results.
    * @param {number} options.userContextId
    *   The container id where this context was generated, if any.
+   * @param {array} [options.sources]
+   *   A list of acceptable UrlbarUtils.RESULT_SOURCE for the context.
+   * @param {string} [options.engineName]
+   *   If sources is restricting to just SEARCH, this property can be used to
+   *   pick a specific search engine, by setting it to the name under which the
+   *   engine is registered with the search service.
    */
   constructor(options = {}) {
     this._checkRequiredOptions(options, [
@@ -510,22 +563,24 @@ class UrlbarQueryContext {
       );
     }
 
-    if (
-      options.providers &&
-      (!Array.isArray(options.providers) || !options.providers.length)
-    ) {
-      throw new Error(`Invalid providers list`);
-    }
-
-    if (
-      options.sources &&
-      (!Array.isArray(options.sources) || !options.sources.length)
-    ) {
-      throw new Error(`Invalid sources list`);
+    // Manage optional properties of options.
+    for (let [prop, checkFn] of [
+      ["providers", v => Array.isArray(v) && v.length],
+      ["sources", v => Array.isArray(v) && v.length],
+      ["engineName", v => typeof v == "string" && !!v.length],
+    ]) {
+      if (options[prop]) {
+        if (!checkFn(options[prop])) {
+          throw new Error(`Invalid value for option "${prop}"`);
+        }
+        this[prop] = options[prop];
+      }
     }
 
     this.lastResultCount = 0;
-    this.userContextId = options.userContextId;
+    this.userContextId =
+      options.userContextId ||
+      Ci.nsIScriptSecurityManager.DEFAULT_USER_CONTEXT_ID;
   }
 
   /**
@@ -560,6 +615,7 @@ class UrlbarMuxer {
   get name() {
     return "UrlbarMuxerBase";
   }
+
   /**
    * Sorts queryContext results in-place.
    * @param {UrlbarQueryContext} queryContext the context to sort results for.
@@ -583,6 +639,7 @@ class UrlbarProvider {
   get name() {
     return "UrlbarProviderBase";
   }
+
   /**
    * The type of the provider, must be one of UrlbarUtils.PROVIDER_TYPE.
    * @abstract
@@ -590,6 +647,7 @@ class UrlbarProvider {
   get type() {
     throw new Error("Trying to access the base class, must be overridden");
   }
+
   /**
    * Whether this provider should be invoked for the given context.
    * If this method returns false, the providers manager won't start a query
@@ -601,6 +659,7 @@ class UrlbarProvider {
   isActive(queryContext) {
     throw new Error("Trying to access the base class, must be overridden");
   }
+
   /**
    * Whether this provider wants to restrict results to just itself.
    * Other providers won't be invoked, unless this provider doesn't
@@ -612,6 +671,7 @@ class UrlbarProvider {
   isRestricting(queryContext) {
     throw new Error("Trying to access the base class, must be overridden");
   }
+
   /**
    * Starts querying.
    * @param {UrlbarQueryContext} queryContext The query context object
@@ -624,6 +684,7 @@ class UrlbarProvider {
   startQuery(queryContext, addCallback) {
     throw new Error("Trying to access the base class, must be overridden");
   }
+
   /**
    * Cancels a running query,
    * @param {UrlbarQueryContext} queryContext the query context object to cancel
@@ -633,6 +694,26 @@ class UrlbarProvider {
   cancelQuery(queryContext) {
     throw new Error("Trying to access the base class, must be overridden");
   }
+
+  /**
+   * Called when a result from the provider without a URL is picked, but
+   * currently only for tip results.  The provider should handle the pick.
+   * @param {UrlbarResult} result
+   *   The result that was picked.
+   * @abstract
+   */
+  pickResult(result) {
+    throw new Error("Trying to access the base class, must be overridden");
+  }
+
+  /**
+   * Called when the user starts and ends an engagement with the urlbar.
+   *
+   * @param {boolean} isPrivate True if the engagement is in a private context.
+   * @param {string} state The state of the engagement, one of: start,
+   *        engagement, abandonment, discard.
+   */
+  onEngagement(isPrivate, state) {}
 }
 
 /**

@@ -7,6 +7,7 @@
 #include "gc/Zone-inl.h"
 
 #include "gc/FreeOp.h"
+#include "gc/GCLock.h"
 #include "gc/Policy.h"
 #include "gc/PublicIterators.h"
 #include "jit/BaselineIC.h"
@@ -71,12 +72,60 @@ void js::ZoneAllocator::updateGCThresholds(GCRuntime& gc,
                                     gc.tunables.mallocGrowthFactor(), lock);
 }
 
+bool ZoneAllocator::addSharedMemory(void* mem, size_t nbytes, MemoryUse use) {
+  // nbytes can be zero here for SharedArrayBuffers.
+
+  MOZ_ASSERT(CurrentThreadCanAccessRuntime(runtime_));
+
+  auto ptr = sharedMemoryUseCounts.lookupForAdd(mem);
+  MOZ_ASSERT_IF(ptr, ptr->value().use == use);
+
+  if (!ptr && !sharedMemoryUseCounts.add(ptr, mem, gc::SharedMemoryUse(use))) {
+    return false;
+  }
+
+  ptr->value().count++;
+
+  // Allocations can grow, so add any increase over the previous size and record
+  // the new size.
+  if (nbytes > ptr->value().nbytes) {
+    mallocHeapSize.addBytes(nbytes - ptr->value().nbytes);
+    ptr->value().nbytes = nbytes;
+  }
+
+  maybeMallocTriggerZoneGC();
+
+  return true;
+}
+
+void ZoneAllocator::removeSharedMemory(void* mem, size_t nbytes,
+                                       MemoryUse use) {
+  // nbytes can be zero here for SharedArrayBuffers.
+
+  MOZ_ASSERT(CurrentThreadCanAccessRuntime(runtime_));
+  MOZ_ASSERT(CurrentThreadIsGCSweeping());
+
+  auto ptr = sharedMemoryUseCounts.lookup(mem);
+
+  MOZ_ASSERT(ptr);
+  MOZ_ASSERT(ptr->value().count != 0);
+  MOZ_ASSERT(ptr->value().use == use);
+  MOZ_ASSERT(ptr->value().nbytes >= nbytes);
+
+  ptr->value().count--;
+  if (ptr->value().count == 0) {
+    mallocHeapSize.removeBytes(ptr->value().nbytes, true);
+    sharedMemoryUseCounts.remove(ptr);
+  }
+}
+
 void ZoneAllocPolicy::decMemory(size_t nbytes) {
   // Unfortunately we don't have enough context here to know whether we're being
   // called on behalf of the collector so we have to do a TLS lookup to find
   // out.
   JSContext* cx = TlsContext.get();
-  zone_->decPolicyMemory(this, nbytes, cx->defaultFreeOp()->isCollecting());
+  zone_->decNonGCMemory(this, nbytes, MemoryUse::ZoneAllocPolicy,
+                        cx->defaultFreeOp()->isCollecting());
 }
 
 JS::Zone::Zone(JSRuntime* rt)
@@ -107,6 +156,8 @@ JS::Zone::Zone(JSRuntime* rt)
       purgeAtomsDeferred(this, 0),
       tenuredStrings(this, 0),
       allocNurseryStrings(this, true),
+      tenuredBigInts(this, 0),
+      allocNurseryBigInts(this, true),
       propertyTree_(this, this),
       baseShapes_(this, this),
       initialShapes_(this, this),
@@ -116,13 +167,16 @@ JS::Zone::Zone(JSRuntime* rt)
 #ifdef DEBUG
       gcSweepGroupIndex(0),
 #endif
+      finalizationRecordMap_(this, this),
       jitZone_(this, nullptr),
       gcScheduled_(false),
       gcScheduledSaved_(false),
       gcPreserveCode_(false),
       keepShapeCaches_(this, false),
       wasCollected_(false),
-      listNext_(NotOnList) {
+      listNext_(NotOnList),
+      weakRefMap_(this, this),
+      keptObjects(this, this) {
   /* Ensure that there are no vtables to mess us up here. */
   MOZ_ASSERT(reinterpret_cast<JS::shadow::Zone*>(this) ==
              static_cast<JS::shadow::Zone*>(this));
@@ -154,33 +208,20 @@ void Zone::setNeedsIncrementalBarrier(bool needs) {
 
 void Zone::beginSweepTypes() { types.beginSweep(); }
 
-void Zone::sweepBreakpoints(JSFreeOp* fop) {
-  if (fop->runtime()->debuggerList().isEmpty()) {
-    return;
-  }
+template <class Pred>
+static void EraseIf(js::gc::WeakEntryVector& entries, Pred pred) {
+  auto* begin = entries.begin();
+  auto* const end = entries.end();
 
-  /*
-   * Sweep all compartments in a zone at the same time, since there is no way
-   * to iterate over the scripts belonging to a single compartment in a zone.
-   */
-
-  MOZ_ASSERT(isGCSweepingOrCompacting());
-  for (auto iter = cellIterUnsafe<JSScript>(); !iter.done(); iter.next()) {
-    JSScript* script = iter;
-    DebugAPI::sweepBreakpoints(fop, script);
-  }
-
-  for (RealmsInZoneIter realms(this); !realms.done(); realms.next()) {
-    for (wasm::Instance* instance : realms->wasm.instances()) {
-      if (!instance->debugEnabled()) {
-        continue;
-      }
-      if (!IsAboutToBeFinalized(&instance->object_)) {
-        continue;
-      }
-      instance->debug().clearAllBreakpoints(fop, instance->objectUnbarriered());
+  auto* newEnd = begin;
+  for (auto* p = begin; p != end; p++) {
+    if (!pred(*p)) {
+      *newEnd++ = *p;
     }
   }
+
+  size_t removed = end - newEnd;
+  entries.shrinkBy(removed);
 }
 
 static void SweepWeakEntryVectorWhileMinorSweeping(
@@ -240,7 +281,7 @@ void Zone::sweepWeakKeysAfterMinorGC() {
     // If the key has a delegate, then it will map to a WeakKeyEntryVector
     // containing the key that needs to be updated.
 
-    JSObject* delegate = WeakMapBase::getDelegate(key->as<JSObject>());
+    JSObject* delegate = gc::detail::GetDelegate(key->as<JSObject>());
     if (!delegate) {
       continue;
     }
@@ -377,6 +418,11 @@ void Zone::discardJitCode(JSFreeOp* fop,
       script->maybeReleaseJitScript(fop);
       jitScript = script->maybeJitScript();
       if (!jitScript) {
+        // Try to discard the ScriptCounts too.
+        if (!script->realm()->collectCoverageForDebug() &&
+            !fop->runtime()->profilingScripts) {
+          script->destroyScriptCounts();
+        }
         continue;
       }
     }
@@ -390,10 +436,6 @@ void Zone::discardJitCode(JSFreeOp* fop,
       // be inlined during Ion compilation.
       jitScript->clearIonCompiledOrInlined();
     }
-
-    // Clear the JitScript's control flow graph. The LifoAlloc is purged
-    // below.
-    jitScript->clearControlFlowGraph();
 
     // Finally, reset the active flag.
     jitScript->resetActive();
@@ -411,13 +453,6 @@ void Zone::discardJitCode(JSFreeOp* fop,
     jitZone()->optimizedStubSpace()->freeAllAfterMinorGC(this);
     jitZone()->purgeIonCacheIRStubInfo();
   }
-
-  /*
-   * Free all control flow graphs that are cached on BaselineScripts.
-   * Assuming this happens on the main thread and all control flow
-   * graph reads happen on the main thread, this is safe.
-   */
-  jitZone()->cfgSpace()->lifoAlloc().freeAll();
 }
 
 #ifdef JSGC_HASH_TABLE_CHECKS
@@ -469,14 +504,14 @@ bool Zone::canCollect() {
 }
 
 void Zone::notifyObservingDebuggers() {
+  AutoAssertNoGC nogc;
   MOZ_ASSERT(JS::RuntimeHeapIsCollecting(),
              "This method should be called during GC.");
 
   JSRuntime* rt = runtimeFromMainThread();
-  JSContext* cx = rt->mainContextFromOwnThread();
 
   for (RealmsInZoneIter realms(this); !realms.done(); realms.next()) {
-    RootedGlobalObject global(cx, realms->unsafeUnbarrieredMaybeGlobal());
+    GlobalObject* global = realms->unsafeUnbarrieredMaybeGlobal();
     if (!global) {
       continue;
     }
@@ -587,16 +622,16 @@ void Zone::traceAtomCache(JSTracer* trc) {
 }
 
 void Zone::addSizeOfIncludingThis(
-    mozilla::MallocSizeOf mallocSizeOf, size_t* typePool, size_t* regexpZone,
-    size_t* jitZone, size_t* baselineStubsOptimized, size_t* cachedCFG,
+    mozilla::MallocSizeOf mallocSizeOf, JS::CodeSizes* code, size_t* typePool,
+    size_t* regexpZone, size_t* jitZone, size_t* baselineStubsOptimized,
     size_t* uniqueIdMap, size_t* shapeCaches, size_t* atomsMarkBitmaps,
     size_t* compartmentObjects, size_t* crossCompartmentWrappersTables,
     size_t* compartmentsPrivateData, size_t* scriptCountsMapArg) {
   *typePool += types.typeLifoAlloc().sizeOfExcludingThis(mallocSizeOf);
   *regexpZone += regExps().sizeOfExcludingThis(mallocSizeOf);
   if (jitZone_) {
-    jitZone_->addSizeOfIncludingThis(mallocSizeOf, jitZone,
-                                     baselineStubsOptimized, cachedCFG);
+    jitZone_->addSizeOfIncludingThis(mallocSizeOf, code, jitZone,
+                                     baselineStubsOptimized);
   }
   *uniqueIdMap += uniqueIds().shallowSizeOfExcludingThis(mallocSizeOf);
   *shapeCaches += baseShapes().sizeOfExcludingThis(mallocSizeOf) +
@@ -627,6 +662,10 @@ void* ZoneAllocator::onOutOfMemory(js::AllocFunction allocFunc,
   if (!js::CurrentThreadCanAccessRuntime(runtime_)) {
     return nullptr;
   }
+  // The analysis sees that JSRuntime::onOutOfMemory could report an error,
+  // which with a JSErrorInterceptor could GC. But we're passing a null cx (to
+  // a default parameter) so the error will not be reported.
+  JS::AutoSuppressGCAnalysis suppress;
   return runtimeFromMainThread()->onOutOfMemory(allocFunc, arena, nbytes,
                                                 reallocPtr);
 }
@@ -763,8 +802,8 @@ void Zone::fixupScriptMapsAfterMovingGC(JSTracer* trc) {
     }
   }
 
-  if (scriptNameMap) {
-    for (ScriptNameMap::Enum e(*scriptNameMap); !e.empty(); e.popFront()) {
+  if (scriptLCovMap) {
+    for (ScriptLCovMap::Enum e(*scriptLCovMap); !e.empty(); e.popFront()) {
       JSScript* script = e.front().key();
       if (!IsAboutToBeFinalizedUnbarriered(&script) &&
           script != e.front().key()) {
@@ -809,12 +848,12 @@ void Zone::checkScriptMapsAfterMovingGC() {
     }
   }
 
-  if (scriptNameMap) {
-    for (auto r = scriptNameMap->all(); !r.empty(); r.popFront()) {
+  if (scriptLCovMap) {
+    for (auto r = scriptLCovMap->all(); !r.empty(); r.popFront()) {
       JSScript* script = r.front().key();
       MOZ_ASSERT(script->zone() == this);
       CheckGCThingAfterMovingGC(script);
-      auto ptr = scriptNameMap->lookup(script);
+      auto ptr = scriptLCovMap->lookup(script);
       MOZ_RELEASE_ASSERT(ptr.found() && &*ptr == &r.front());
     }
   }
@@ -861,15 +900,34 @@ void Zone::clearScriptCounts(Realm* realm) {
   }
 }
 
-void Zone::clearScriptNames(Realm* realm) {
-  if (!scriptNameMap) {
+void Zone::clearScriptLCov(Realm* realm) {
+  if (!scriptLCovMap) {
     return;
   }
 
-  for (auto i = scriptNameMap->modIter(); !i.done(); i.next()) {
+  for (auto i = scriptLCovMap->modIter(); !i.done(); i.next()) {
     JSScript* script = i.get().key();
     if (script->realm() == realm) {
       i.remove();
     }
   }
 }
+
+void Zone::finishRoots() {
+  for (RealmsInZoneIter r(this); !r.done(); r.next()) {
+    r->finishRoots();
+  }
+
+  // Finalization callbacks are not called if we're shutting down.
+  finalizationRecordMap().clear();
+
+  clearKeptObjects();
+}
+
+void Zone::traceKeptObjects(JSTracer* trc) { keptObjects.ref().trace(trc); }
+
+bool Zone::keepDuringJob(HandleObject target) {
+  return keptObjects.ref().put(target);
+}
+
+void Zone::clearKeptObjects() { keptObjects.ref().clear(); }

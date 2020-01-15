@@ -20,6 +20,8 @@
 #  include "mozilla/mscom/Ptr.h"
 #  include "nsWinUtils.h"
 #  include "RootAccessible.h"
+#else
+#  include "mozilla/a11y/DocAccessiblePlatformExtParent.h"
 #endif
 
 namespace mozilla {
@@ -137,6 +139,7 @@ uint32_t DocAccessibleParent::AddSubtree(
       break;
     }
   }
+  DebugOnly<bool> isOuterDoc = newProxy->ChildrenCount() == 1;
 
   uint32_t accessibles = 1;
   uint32_t kids = newChild.ChildrenCount();
@@ -147,7 +150,7 @@ uint32_t DocAccessibleParent::AddSubtree(
     accessibles += consumed;
   }
 
-  MOZ_ASSERT(newProxy->ChildrenCount() == kids);
+  MOZ_ASSERT((isOuterDoc && kids == 0) || newProxy->ChildrenCount() == kids);
 
   return accessibles;
 }
@@ -566,7 +569,6 @@ ipc::IPCResult DocAccessibleParent::AddChildDoc(DocAccessibleParent* aChildDoc,
     ProxyCreated(aChildDoc, Interfaces::DOCUMENT | Interfaces::HYPERTEXT);
   }
 
-#if defined(XP_WIN)
   if (aChildDoc->IsTopLevelInContentProcess()) {
     // aChildDoc is an embedded document in a different content process to
     // this document.
@@ -575,6 +577,7 @@ ipc::IPCResult DocAccessibleParent::AddChildDoc(DocAccessibleParent* aChildDoc,
     dom::BrowserBridgeParent* bridge =
         embeddedBrowser->GetBrowserBridgeParent();
     if (bridge) {
+#if defined(XP_WIN)
       // Send a COM proxy for the embedded document to the embedder process
       // hosting the iframe. This will be returned as the child of the
       // embedder OuterDocAccessible.
@@ -603,6 +606,7 @@ ipc::IPCResult DocAccessibleParent::AddChildDoc(DocAccessibleParent* aChildDoc,
         Unused << aChildDoc->SendEmulatedWindow(
             reinterpret_cast<uintptr_t>(mEmulatedWindowHandle), nullptr);
       }
+#endif  // defined(XP_WIN)
       // We need to fire a reorder event on the outer doc accessible.
       // For same-process documents, this is fired by the content process, but
       // this isn't possible when the document is in a different process to its
@@ -611,7 +615,6 @@ ipc::IPCResult DocAccessibleParent::AddChildDoc(DocAccessibleParent* aChildDoc,
       Unused << RecvEvent(aParentID, nsIAccessibleEvent::EVENT_REORDER);
     }
   }
-#endif  // defined(XP_WIN)
 
   return IPC_OK();
 }
@@ -916,6 +919,23 @@ mozilla::ipc::IPCResult DocAccessibleParent::RecvBatch(
 #  endif  // defined(XP_WIN)
   return IPC_OK();
 }
+
+bool DocAccessibleParent::DeallocPDocAccessiblePlatformExtParent(
+    PDocAccessiblePlatformExtParent* aActor) {
+  delete aActor;
+  return true;
+}
+
+PDocAccessiblePlatformExtParent*
+DocAccessibleParent::AllocPDocAccessiblePlatformExtParent() {
+  return new DocAccessiblePlatformExtParent();
+}
+
+DocAccessiblePlatformExtParent* DocAccessibleParent::GetPlatformExtension() {
+  return static_cast<DocAccessiblePlatformExtParent*>(
+      SingleManagedOrNull(ManagedPDocAccessiblePlatformExtParent()));
+}
+
 #endif  // !defined(XP_WIN)
 
 Tuple<DocAccessibleParent*, uint64_t> DocAccessibleParent::GetRemoteEmbedder() {

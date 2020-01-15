@@ -6,7 +6,7 @@
 
 #include "mozilla/Assertions.h"
 
-#include "jsutil.h"
+#include "js/Utility.h"
 #include "threading/posix/ThreadPlatformData.h"
 #include "threading/Thread.h"
 
@@ -36,6 +36,10 @@ bool ThreadId::operator==(const ThreadId& aOther) const {
 
 bool Thread::create(void* (*aMain)(void*), void* aArg) {
   MOZ_RELEASE_ASSERT(!joinable());
+
+  if (oom::ShouldFailWithOOM()) {
+    return false;
+  }
 
   pthread_attr_t attrs;
   int r = pthread_attr_init(&attrs);

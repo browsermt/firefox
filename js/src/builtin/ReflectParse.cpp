@@ -17,6 +17,7 @@
 #include "builtin/Array.h"
 #include "builtin/Reflect.h"
 #include "frontend/ModuleSharedContext.h"
+#include "frontend/ParseInfo.h"
 #include "frontend/ParseNode.h"
 #include "frontend/Parser.h"
 #include "js/CharacterEncoding.h"
@@ -101,6 +102,7 @@ enum BinaryOperator {
   BINOP_IN,
   BINOP_INSTANCEOF,
   BINOP_PIPELINE,
+  BINOP_COALESCE,
 
   BINOP_LIMIT
 };
@@ -177,6 +179,7 @@ static const char* const binopNames[] = {
     "in",         /* BINOP_IN */
     "instanceof", /* BINOP_INSTANCEOF */
     "|>",         /* BINOP_PIPELINE */
+    "??",         /* BINOP_COALESCE */
 };
 
 static const char* const unopNames[] = {
@@ -633,7 +636,7 @@ class NodeBuilder {
   MOZ_MUST_USE bool updateExpression(HandleValue expr, bool incr, bool prefix,
                                      TokenPos* pos, MutableHandleValue dst);
 
-  MOZ_MUST_USE bool logicalExpression(bool lor, HandleValue left,
+  MOZ_MUST_USE bool logicalExpression(ParseNodeKind pnk, HandleValue left,
                                       HandleValue right, TokenPos* pos,
                                       MutableHandleValue dst);
 
@@ -1102,12 +1105,28 @@ bool NodeBuilder::updateExpression(HandleValue expr, bool incr, bool prefix,
                  "prefix", prefixVal, dst);
 }
 
-bool NodeBuilder::logicalExpression(bool lor, HandleValue left,
+bool NodeBuilder::logicalExpression(ParseNodeKind pnk, HandleValue left,
                                     HandleValue right, TokenPos* pos,
                                     MutableHandleValue dst) {
   RootedValue opName(cx);
-  if (!atomValue(lor ? "||" : "&&", &opName)) {
-    return false;
+  switch (pnk) {
+    case ParseNodeKind::OrExpr:
+      if (!atomValue("||", &opName)) {
+        return false;
+      }
+      break;
+    case ParseNodeKind::CoalesceExpr:
+      if (!atomValue("??", &opName)) {
+        return false;
+      }
+      break;
+    case ParseNodeKind::AndExpr:
+      if (!atomValue("&&", &opName)) {
+        return false;
+      }
+      break;
+    default:
+      MOZ_CRASH("Unexpected ParseNodeKind: Must be `Or`, `And`, or `Coalesce`");
   }
 
   RootedValue cb(cx, callbacks[AST_LOGICAL_EXPR]);
@@ -1826,6 +1845,8 @@ BinaryOperator ASTSerializer::binop(ParseNodeKind kind) {
       return BINOP_INSTANCEOF;
     case ParseNodeKind::PipelineExpr:
       return BINOP_PIPELINE;
+    case ParseNodeKind::CoalesceExpr:
+      return BINOP_COALESCE;
     default:
       return BINOP_ERR;
   }
@@ -2286,7 +2307,7 @@ bool ASTSerializer::statement(ParseNode* pn, MutableHandleValue dst) {
       if (!pn->isKind(ParseNodeKind::StatementList)) {
         return statement(pn, dst);
       }
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
 
     case ParseNodeKind::StatementList:
       return blockStatement(&pn->as<ListNode>(), dst);
@@ -2563,9 +2584,10 @@ bool ASTSerializer::classField(ClassField* classField, MutableHandleValue dst) {
 bool ASTSerializer::leftAssociate(ListNode* node, MutableHandleValue dst) {
   MOZ_ASSERT(!node->empty());
 
-  ParseNodeKind kind = node->getKind();
-  bool lor = kind == ParseNodeKind::OrExpr;
-  bool logop = lor || (kind == ParseNodeKind::AndExpr);
+  ParseNodeKind pnk = node->getKind();
+  bool lor = pnk == ParseNodeKind::OrExpr;
+  bool coalesce = pnk == ParseNodeKind::CoalesceExpr;
+  bool logop = lor || coalesce || pnk == ParseNodeKind::AndExpr;
 
   ParseNode* head = node->head();
   RootedValue left(cx);
@@ -2581,7 +2603,7 @@ bool ASTSerializer::leftAssociate(ListNode* node, MutableHandleValue dst) {
     TokenPos subpos(node->pn_pos.begin, next->pn_pos.end);
 
     if (logop) {
-      if (!builder.logicalExpression(lor, left, right, &subpos, &left)) {
+      if (!builder.logicalExpression(pnk, left, right, &subpos, &left)) {
         return false;
       }
     } else {
@@ -2678,6 +2700,7 @@ bool ASTSerializer::expression(ParseNode* pn, MutableHandleValue dst) {
                                            dst);
     }
 
+    case ParseNodeKind::CoalesceExpr:
     case ParseNodeKind::OrExpr:
     case ParseNodeKind::AndExpr:
       return leftAssociate(&pn->as<ListNode>(), dst);
@@ -3100,7 +3123,8 @@ bool ASTSerializer::propertyName(ParseNode* key, MutableHandleValue dst) {
   }
 
   LOCAL_ASSERT(key->isKind(ParseNodeKind::StringExpr) ||
-               key->isKind(ParseNodeKind::NumberExpr));
+               key->isKind(ParseNodeKind::NumberExpr) ||
+               key->isKind(ParseNodeKind::BigIntExpr));
 
   return literal(key, dst);
 }
@@ -3161,7 +3185,8 @@ bool ASTSerializer::literal(ParseNode* pn, MutableHandleValue dst) {
       break;
 
     case ParseNodeKind::RegExpExpr: {
-      RootedObject re1(cx, pn->as<RegExpLiteral>().objbox()->object());
+      RootedObject re1(
+          cx, pn->as<RegExpLiteral>().getOrCreate(cx, parser->getParseInfo()));
       LOCAL_ASSERT(re1 && re1->is<RegExpObject>());
 
       RootedObject re2(cx, CloneRegExpObject(cx, re1.as<RegExpObject>()));
@@ -3178,7 +3203,7 @@ bool ASTSerializer::literal(ParseNode* pn, MutableHandleValue dst) {
       break;
 
     case ParseNodeKind::BigIntExpr: {
-      BigInt* x = pn->as<BigIntLiteral>().box()->value();
+      BigInt* x = pn->as<BigIntLiteral>().getOrCreate(cx);
       cx->check(x);
       val.setBigInt(x);
       break;
@@ -3631,10 +3656,12 @@ static bool reflect_parse(JSContext* cx, uint32_t argc, Value* vp) {
 
   CompileOptions options(cx);
   options.setFileAndLine(filename.get(), lineno);
-  options.setCanLazilyParse(false);
+  options.setForceFullParse();
   options.allowHTMLComments = target == ParseGoal::Script;
   mozilla::Range<const char16_t> chars = linearChars.twoByteRange();
-  UsedNameTracker usedNames(cx);
+
+  LifoAllocScope allocScope(&cx->tempLifoAlloc());
+  ParseInfo parseInfo(cx, allocScope);
 
   RootedScriptSourceObject sourceObject(
       cx, frontend::CreateScriptSourceObject(cx, options, mozilla::Nothing()));
@@ -3643,9 +3670,8 @@ static bool reflect_parse(JSContext* cx, uint32_t argc, Value* vp) {
   }
 
   Parser<FullParseHandler, char16_t> parser(
-      cx, cx->tempLifoAlloc(), options, chars.begin().get(), chars.length(),
-      /* foldConstants = */ false, usedNames, nullptr, nullptr, sourceObject,
-      target);
+      cx, options, chars.begin().get(), chars.length(),
+      /* foldConstants = */ false, parseInfo, nullptr, nullptr, sourceObject);
   if (!parser.checkOptions()) {
     return false;
   }
@@ -3678,6 +3704,10 @@ static bool reflect_parse(JSContext* cx, uint32_t argc, Value* vp) {
     }
 
     pn = pn->as<ModuleNode>().body();
+  }
+
+  if (!parser.publishDeferredFunctions()) {
+    return false;
   }
 
   RootedValue val(cx);

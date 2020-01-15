@@ -3,14 +3,38 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 :host {
+  overflow: auto;
   padding: 40px;
-  display: flex;
-  flex-direction: column;
 
   --reveal-checkbox-opacity: .8;
   --reveal-checkbox-opacity-hover: .6;
   --reveal-checkbox-opacity-active: 1;
   --success-color: #00c100;
+  --edit-delete-button-color: #4a4a4f;
+}
+
+/* Only overwrite the deemphasized text color in non-dark mode. */
+@media not all and (prefers-color-scheme: dark) {
+  :host {
+    --in-content-deemphasized-text: #737373;
+  }
+}
+@supports not (-moz-bool-pref("browser.in-content.dark-mode")) {
+  :host {
+    --in-content-deemphasized-text: #737373;
+  }
+}
+
+.container {
+  box-sizing: border-box;
+  height: 100%;
+  max-width: 700px;
+  display: flex;
+  flex-direction: column;
+}
+
+button {
+  min-width: 100px;
 }
 
 form {
@@ -67,7 +91,7 @@ input[type="url"][readOnly] {
 .header {
   display: flex;
   align-items: center;
-  border-bottom: 1px solid var(--in-content-box-border-color);
+  border-bottom: 1px solid var(--in-content-border-color);
   margin-bottom: 40px;
 }
 
@@ -82,6 +106,7 @@ input[type="url"][readOnly] {
 
 .delete-button,
 .edit-button {
+  color: var(--edit-delete-button-color) !important;
   background-repeat: no-repeat;
   background-position: 8px;
   -moz-context-properties: fill;
@@ -190,17 +215,21 @@ input[type="url"][readOnly]:hover:active {
 
 .meta-info {
   font-size: smaller;
+  font-weight: 300;
   color: var(--in-content-deemphasized-text);
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
 .meta-info:first-of-type::before {
   content: "";
   display: block;
   margin-bottom: 20px;
-  border-top: 1px solid var(--in-content-box-border-color);
+  border-top: 1px solid var(--in-content-border-color);
   width: 40px;
 }
 
+input.password-display,
 input[name="password"] {
   font-family: monospace !important; /* override `all: unset` in the rule above */
 }
@@ -265,12 +294,7 @@ input[name="password"] {
   border-radius: 8px;
   border: 1px solid var(--in-content-border-color);
   background-color: var(--yellow-10);
-  background-image: url("chrome://global/skin/icons/warning.svg");
-  background-repeat: no-repeat;
-  background-position: left 10px top 10px;
   color: #0C0C0D;
-  -moz-context-properties: fill;
-  fill: var(--red-90);
   box-shadow: 0 2px 8px 0 rgba(12,12,13,0.1);
   font-size: .9em;
   font-weight: 300;
@@ -282,14 +306,18 @@ input[name="password"] {
   position: relative;
 }
 
-.breach-alert:dir(rtl) {
-  background-position: right 10px top 10px;
-}
-
-a.breach-alert-link {
+.breach-alert-link {
   color: inherit;
   text-decoration: underline;
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.breach-icon {
+  position: absolute;
+  inset-block-start: 10px;
+  inset-inline-start: 10px;
+  -moz-context-properties: fill;
+  fill: var(--red-90);
 }
 
 .dismiss-breach-alert {
@@ -297,21 +325,31 @@ a.breach-alert-link {
   padding: 0;
   margin: 0;
   position: absolute;
-  background-image: url("chrome://global/skin/icons/close.svg");
-  background-repeat: no-repeat;
-  background-size: contain;
-  min-height: 16px;
-  min-width: 16px;
+  inset-inline-end: 12px;
+  inset-block-start: 12px;
+  min-width: auto;
+  min-height: auto;
+  line-height: 0;
+}
+
+.dismiss-breach-alert {
+  background-color: transparent;
+}
+
+.dismiss-breach-alert:enabled:hover {
+  background-color: var(--grey-90-a20);
+}
+
+.dismiss-breach-alert:enabled:hover:active {
+  background-color: var(--grey-90-a30);
+}
+
+.dismiss-breach-alert-icon {
   -moz-context-properties: fill, fill-opacity;
   fill-opacity: 0;
   fill: currentColor;
-  inset-inline-end: 12px;
-  inset-block-start: 12px;
-}
-
-.dismiss-breach-alert,
-.dismiss-breach-alert:hover {
-  background-color: transparent;
+  width: 16px;
+  height: 16px;
 }
 
 .error-message {
@@ -334,6 +372,20 @@ a.breach-alert-link {
   background-position-x: right 10px;
 }
 
+.error-message-link > a,
+.error-message-link > a:hover,
+.error-message-link > a:hover:active {
+  color: currentColor;
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+@media (-moz-windows-default-theme: 0) {
+  .breach-icon {
+    fill: currentColor;
+  }
+}
+
 @supports -moz-bool-pref("browser.in-content.dark-mode") {
   @media (prefers-color-scheme: dark) {
     :host {
@@ -341,6 +393,7 @@ a.breach-alert-link {
       --reveal-checkbox-opacity-hover: 1;
       --reveal-checkbox-opacity-active: .6;
       --success-color: #86DE74;
+      --edit-delete-button-color: #cfcfd1;
     }
 
     .breach-alert {

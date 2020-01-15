@@ -22,7 +22,6 @@
 //! ```
 //! # extern crate cranelift_codegen;
 //! # #[macro_use] extern crate target_lexicon;
-//! # fn main() {
 //! use cranelift_codegen::isa;
 //! use cranelift_codegen::settings::{self, Configurable};
 //! use std::str::FromStr;
@@ -40,7 +39,6 @@
 //!         let isa = isa_builder.finish(shared_flags);
 //!     }
 //! }
-//! # }
 //! ```
 //!
 //! The configured target ISA trait object is a `Box<TargetIsa>` which can be used for multiple
@@ -63,10 +61,12 @@ use crate::result::CodegenResult;
 use crate::settings;
 use crate::settings::SetResult;
 use crate::timing;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::fmt;
-use failure_derive::Fail;
-use std::boxed::Box;
-use target_lexicon::{Architecture, PointerWidth, Triple};
+use target_lexicon::{triple, Architecture, PointerWidth, Triple};
+use thiserror::Error;
 
 #[cfg(feature = "riscv")]
 mod riscv;
@@ -88,51 +88,50 @@ pub mod registers;
 mod stack;
 
 /// Returns a builder that can create a corresponding `TargetIsa`
-/// or `Err(LookupError::Unsupported)` if not enabled.
+/// or `Err(LookupError::SupportDisabled)` if not enabled.
 macro_rules! isa_builder {
-    ($name:ident, $feature:tt) => {{
+    ($name: ident, $feature: tt, $triple: ident) => {{
         #[cfg(feature = $feature)]
-        fn $name(triple: Triple) -> Result<Builder, LookupError> {
-            Ok($name::isa_builder(triple))
-        };
-        #[cfg(not(feature = $feature))]
-        fn $name(_triple: Triple) -> Result<Builder, LookupError> {
-            Err(LookupError::Unsupported)
+        {
+            Ok($name::isa_builder($triple))
         }
-        $name
+        #[cfg(not(feature = $feature))]
+        {
+            Err(LookupError::SupportDisabled)
+        }
     }};
 }
 
-/// Look for a supported ISA with the given `name`.
+/// Look for an ISA for the given `triple`.
 /// Return a builder that can create a corresponding `TargetIsa`.
 pub fn lookup(triple: Triple) -> Result<Builder, LookupError> {
     match triple.architecture {
-        Architecture::Riscv32 | Architecture::Riscv64 => isa_builder!(riscv, "riscv")(triple),
+        Architecture::Riscv32 | Architecture::Riscv64 => isa_builder!(riscv, "riscv", triple),
         Architecture::I386 | Architecture::I586 | Architecture::I686 | Architecture::X86_64 => {
-            isa_builder!(x86, "x86")(triple)
+            isa_builder!(x86, "x86", triple)
         }
-        Architecture::Thumbv6m
-        | Architecture::Thumbv7em
-        | Architecture::Thumbv7m
-        | Architecture::Arm
-        | Architecture::Armv4t
-        | Architecture::Armv5te
-        | Architecture::Armv7
-        | Architecture::Armv7s => isa_builder!(arm32, "arm32")(triple),
-        Architecture::Aarch64 => isa_builder!(arm64, "arm64")(triple),
+        Architecture::Arm { .. } => isa_builder!(arm32, "arm32", triple),
+        Architecture::Aarch64 { .. } => isa_builder!(arm64, "arm64", triple),
         _ => Err(LookupError::Unsupported),
     }
 }
 
+/// Look for a supported ISA with the given `name`.
+/// Return a builder that can create a corresponding `TargetIsa`.
+pub fn lookup_by_name(name: &str) -> Result<Builder, LookupError> {
+    use alloc::str::FromStr;
+    lookup(triple!(name))
+}
+
 /// Describes reason for target lookup failure
-#[derive(Fail, PartialEq, Eq, Copy, Clone, Debug)]
+#[derive(Error, PartialEq, Eq, Copy, Clone, Debug)]
 pub enum LookupError {
     /// Support for this target was disabled in the current build.
-    #[fail(display = "Support for this target is disabled")]
+    #[error("Support for this target is disabled")]
     SupportDisabled,
 
     /// Support for this target has not yet been implemented.
-    #[fail(display = "Support for this target has not been implemented yet")]
+    #[error("Support for this target has not been implemented yet")]
     Unsupported,
 }
 
@@ -315,7 +314,7 @@ pub trait TargetIsa: fmt::Display + Sync {
     /// Arguments and return values for the caller's frame pointer and other callee-saved registers
     /// should not be added by this function. These arguments are not added until after register
     /// allocation.
-    fn legalize_signature(&self, sig: &mut ir::Signature, current: bool);
+    fn legalize_signature(&self, sig: &mut Cow<ir::Signature>, current: bool);
 
     /// Get the register class that should be used to represent an ABI argument or return value of
     /// type `ty`. This should be the top-level register class that contains the argument
@@ -350,7 +349,8 @@ pub trait TargetIsa: fmt::Display + Sync {
             func.stack_slots.push(ss);
         }
 
-        layout_stack(&mut func.stack_slots, word_size)?;
+        let is_leaf = func.is_leaf();
+        layout_stack(&mut func.stack_slots, is_leaf, word_size)?;
         Ok(())
     }
 
@@ -372,4 +372,17 @@ pub trait TargetIsa: fmt::Display + Sync {
 
     /// Emit a whole function into memory.
     fn emit_function_to_memory(&self, func: &ir::Function, sink: &mut binemit::MemoryCodeSink);
+
+    /// IntCC condition for Unsigned Addition Overflow (Carry).
+    fn unsigned_add_overflow_condition(&self) -> ir::condcodes::IntCC;
+
+    /// IntCC condition for Unsigned Subtraction Overflow (Borrow/Carry).
+    fn unsigned_sub_overflow_condition(&self) -> ir::condcodes::IntCC;
+
+    /// Emit unwind information for the given function.
+    ///
+    /// Only some calling conventions (e.g. Windows fastcall) will have unwind information.
+    fn emit_unwind_info(&self, _func: &ir::Function, _mem: &mut Vec<u8>) {
+        // No-op by default
+    }
 }

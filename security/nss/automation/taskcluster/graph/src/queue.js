@@ -17,7 +17,7 @@ let image_tasks = new Map();
 let parameters = {};
 
 let queue = new taskcluster.Queue({
-  baseUrl: "http://taskcluster/queue/v1"
+  rootUrl: process.env.TASKCLUSTER_PROXY_URL,
 });
 
 function fromNow(hours) {
@@ -96,7 +96,8 @@ function convertTask(def) {
 
   let env = merge({
     NSS_HEAD_REPOSITORY: process.env.NSS_HEAD_REPOSITORY,
-    NSS_HEAD_REVISION: process.env.NSS_HEAD_REVISION
+    NSS_HEAD_REVISION: process.env.NSS_HEAD_REVISION,
+    NSS_MAX_MP_PBE_ITERATION_COUNT: "100",
   }, def.env || {});
 
   if (def.parent) {
@@ -113,6 +114,14 @@ function convertTask(def) {
 
   if (def.cycle) {
     env.NSS_CYCLES = def.cycle;
+  }
+  if (def.kind === "build") {
+    // Disable leak checking during builds (bug 1579290).
+    if (env.ASAN_OPTIONS) {
+      env.ASAN_OPTIONS += ":detect_leaks=0";
+    } else {
+      env.ASAN_OPTIONS = "detect_leaks=0";
+    }
   }
 
   let payload = {
@@ -143,12 +152,12 @@ function convertTask(def) {
   }
 
   let extra = Object.assign({
-      treeherder: parseTreeherder(def)
+    treeherder: parseTreeherder(def)
   }, parameters);
 
   return {
-    provisionerId: def.provisioner || "aws-provisioner-v1",
-    workerType: def.workerType || "hg-worker",
+    provisionerId: def.provisioner || `nss-${process.env.MOZ_SCM_LEVEL}`,
+    workerType: def.workerType || "linux",
     schedulerId: process.env.TC_SCHEDULER_ID,
     taskGroupId: process.env.TASK_ID,
 
@@ -211,6 +220,9 @@ export async function submit() {
     maps.forEach(map => { task = map(merge({}, task)) });
 
     let log_id = `${task.name} @ ${task.platform}[${task.collection || "opt"}]`;
+    if (task.group) {
+      log_id = `${task.group}::${log_id}`;
+    }
     console.log(`+ Submitting ${log_id}.`);
 
     // Index that task for each tag specified

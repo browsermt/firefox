@@ -13,7 +13,7 @@ const {
   CanvasFrameAnonymousContentHelper,
   createSVGNode,
   createNode,
-} = require("./utils/markup");
+} = require("devtools/server/actors/highlighters/utils/markup");
 
 // Maximum size, in pixel, for the horizontal ruler and vertical ruler
 // used by RulersHighlighter
@@ -293,7 +293,7 @@ RulersHighlighter.prototype = {
     const { window } = this.env;
     const { innerHeight, innerWidth } = window;
     const infobarId = this.ID_CLASS_PREFIX + "viewport-infobar-container";
-    const textContent = innerHeight + "px \u00D7 " + innerWidth + "px";
+    const textContent = innerWidth + "px \u00D7 " + innerHeight + "px";
     this.markup.getElement(infobarId).setTextContent(textContent);
   },
 

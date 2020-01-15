@@ -18,8 +18,8 @@ const {
 } = require("devtools/shared/protocol");
 
 class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
-  constructor(client) {
-    super(client);
+  constructor(client, targetFront, parentFront) {
+    super(client, targetFront, parentFront);
     this.isParent = false;
     this._processTargetFront = null;
     this._targetFrontPromise = null;
@@ -41,9 +41,9 @@ class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
     if (form.actor.includes("parentProcessTarget")) {
       // ParentProcessTargetActor doesn't have a specific front, instead it uses
       // BrowsingContextTargetFront on the client side.
-      front = new BrowsingContextTargetFront(this._client);
+      front = new BrowsingContextTargetFront(this._client, null, this);
     } else {
-      front = new ContentProcessTargetFront(this._client);
+      front = new ContentProcessTargetFront(this._client, null, this);
     }
     // As these fronts aren't instantiated by protocol.js, we have to set their actor ID
     // manually like that:
@@ -54,38 +54,49 @@ class ProcessDescriptorFront extends FrontClassWithSpec(processDescriptorSpec) {
     return front;
   }
 
+  getCachedTarget() {
+    return this._processTargetFront;
+  }
+
   async getTarget() {
+    // Only return the cached Target if it is still alive.
     if (this._processTargetFront && this._processTargetFront.actorID) {
       return this._processTargetFront;
     }
+    // Otherwise, ensure that we don't try to spawn more than one Target by
+    // returning the pending promise
     if (this._targetFrontPromise) {
       return this._targetFrontPromise;
     }
     this._targetFrontPromise = (async () => {
+      let targetFront = null;
       try {
         const targetForm = await super.getTarget();
-        this._processTargetFront = await this._createProcessTargetFront(
-          targetForm
-        );
-        await this._processTargetFront.attach();
-        // clear the promise if we are finished so that we can re-connect if
-        // necessary
-        this._targetFrontPromise = null;
-        return this._processTargetFront;
+        targetFront = await this._createProcessTargetFront(targetForm);
+        await targetFront.attach();
       } catch (e) {
         // This is likely to happen if we get a lot of events which drop previous
         // processes.
         console.log(
           `Request to connect to ProcessDescriptor "${this.id}" failed: ${e}`
         );
-        return null;
       }
+      // Save the reference to the target only after the call to attach
+      // so that getTarget always returns the attached target in case of concurrent calls
+      this._processTargetFront = targetFront;
+      // clear the promise if we are finished so that we can re-connect if
+      // necessary
+      this._targetFrontPromise = null;
+      return targetFront;
     })();
     return this._targetFrontPromise;
   }
 
   destroy() {
-    this._processTargetFront = null;
+    if (this._processTargetFront) {
+      this._processTargetFront.destroy();
+      this._processTargetFront = null;
+    }
     this._targetFrontPromise = null;
     super.destroy();
   }

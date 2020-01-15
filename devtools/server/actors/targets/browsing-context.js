@@ -41,12 +41,6 @@ const {
 const {
   browsingContextTargetSpec,
 } = require("devtools/shared/specs/targets/browsing-context");
-loader.lazyRequireGetter(
-  this,
-  "FrameDescriptorActor",
-  "devtools/server/actors/descriptors/frame",
-  true
-);
 
 loader.lazyRequireGetter(
   this,
@@ -100,13 +94,13 @@ function getDocShellChromeEventHandler(docShell) {
 }
 
 function getChildDocShells(parentDocShell) {
-  const docShellsEnum = parentDocShell.getDocShellEnumerator(
+  const allDocShells = parentDocShell.getAllDocShellsInSubtree(
     Ci.nsIDocShellTreeItem.typeAll,
     Ci.nsIDocShell.ENUMERATE_FORWARDS
   );
 
   const docShells = [];
-  for (const docShell of docShellsEnum) {
+  for (const docShell of allDocShells) {
     docShell
       .QueryInterface(Ci.nsIInterfaceRequestor)
       .getInterface(Ci.nsIWebProgress);
@@ -265,7 +259,7 @@ const browsingContextTargetPrototype = {
 
     // Flag eventually overloaded by sub classes in order to watch new docshells
     // Used by the ParentProcessTargetActor to list all frames in the Browser Toolbox
-    this.listenForNewDocShells = false;
+    this.watchNewDocShells = false;
 
     let canRewind = false;
     if (isReplaying) {
@@ -288,7 +282,6 @@ const browsingContextTargetPrototype = {
 
     this._workerTargetActorList = null;
     this._workerTargetActorPool = null;
-    this._frameDescriptorActorPool = null;
     this._onWorkerTargetActorListChanged = this._onWorkerTargetActorListChanged.bind(
       this
     );
@@ -312,6 +305,16 @@ const browsingContextTargetPrototype = {
 
   get attached() {
     return !!this._attached;
+  },
+
+  /*
+   * Return a Debugger instance or create one if there is none yet
+   */
+  get dbg() {
+    if (!this._dbg) {
+      this._dbg = this.makeDebugger();
+    }
+    return this._dbg;
   },
 
   /**
@@ -360,10 +363,6 @@ const browsingContextTargetPrototype = {
       "`docShell` getter should be overridden by a subclass of " +
         "`BrowsingContextTargetActor`"
     );
-  },
-
-  get childBrowsingContexts() {
-    return this.docShell.browsingContext.getChildren();
   },
 
   /**
@@ -494,6 +493,7 @@ const browsingContextTargetPrototype = {
 
     const response = {
       actor: this.actorID,
+      browsingContextID: this.docShell.browsingContext.id,
       traits: {
         // FF64+ exposes a new trait to help identify BrowsingContextActor's inherited
         // actorss from the client side.
@@ -626,9 +626,7 @@ const browsingContextTargetPrototype = {
 
   _watchDocshells() {
     // In child processes, we watch all docshells living in the process.
-    if (this.listenForNewDocShells) {
-      Services.obs.addObserver(this, "webnavigation-create");
-    }
+    Services.obs.addObserver(this, "webnavigation-create");
     Services.obs.addObserver(this, "webnavigation-destroy");
 
     // We watch for all child docshells under the current document,
@@ -673,49 +671,6 @@ const browsingContextTargetPrototype = {
     return { frames: windows };
   },
 
-  listRemoteFrames() {
-    const frames = [];
-    const contextsToWalk = this.childBrowsingContexts;
-
-    if (contextsToWalk == 0) {
-      return { frames };
-    }
-
-    const pool = new Pool(this.conn);
-    while (contextsToWalk.length) {
-      const currentContext = contextsToWalk.pop();
-      let frameDescriptor = this._getKnownFrameDescriptor(currentContext.id);
-      if (!frameDescriptor) {
-        frameDescriptor = new FrameDescriptorActor(this.conn, currentContext);
-      }
-      pool.manage(frameDescriptor);
-      frames.push(frameDescriptor);
-      contextsToWalk.push(...currentContext.getChildren());
-    }
-    // Do not destroy the pool before transfering ownership to the newly created
-    // pool, so that we do not accidently destroy actors that are still in use.
-    if (this._frameDescriptorActorPool) {
-      this._frameDescriptorActorPool.destroy();
-    }
-
-    this._frameDescriptorActorPool = pool;
-
-    return { frames };
-  },
-
-  _getKnownFrameDescriptor(id) {
-    // if there is no pool, then we do not have any descriptors
-    if (!this._frameDescriptorActorPool) {
-      return null;
-    }
-    for (const descriptor of this._frameDescriptorActorPool.poolChildren()) {
-      if (descriptor.id === id) {
-        return descriptor;
-      }
-    }
-    return null;
-  },
-
   ensureWorkerTargetActorList() {
     if (this._workerTargetActorList === null) {
       this._workerTargetActorList = new WorkerTargetActorList(this.conn, {
@@ -727,7 +682,9 @@ const browsingContextTargetPrototype = {
   },
 
   pauseWorkersUntilAttach(shouldPause) {
-    this.ensureWorkerTargetActorList().setPauseMatchingWorkers(shouldPause);
+    this.ensureWorkerTargetActorList().workerPauser.setPauseMatching(
+      shouldPause
+    );
   },
 
   listWorkers(request) {
@@ -816,7 +773,11 @@ const browsingContextTargetPrototype = {
       // In child processes, we have new root docshells,
       // let's watch them and all their child docshells.
       if (this._isRootDocShell(docShell)) {
-        this._progressListener.watch(docShell);
+        if (this.watchNewDocShells) {
+          this._progressListener.watch(docShell);
+        }
+      } else if (this._progressListener.isParentWatched(docShell)) {
+        docShell.watchedByDevtools = true;
       }
       this._notifyDocShellsUpdate([docShell]);
     });
@@ -986,9 +947,7 @@ const browsingContextTargetPrototype = {
       this._originalWindow = null;
 
       // Removes the observers being set in _watchDocShells
-      if (this.listenForNewDocShells) {
-        Services.obs.removeObserver(this, "webnavigation-create");
-      }
+      Services.obs.removeObserver(this, "webnavigation-create");
       Services.obs.removeObserver(this, "webnavigation-destroy");
     }
 
@@ -1003,8 +962,7 @@ const browsingContextTargetPrototype = {
 
     // Make sure that no more workerListChanged notifications are sent.
     if (this._workerTargetActorList !== null) {
-      this._workerTargetActorList.onListChanged = null;
-      this._workerTargetActorList.setPauseMatchingWorkers(false);
+      this._workerTargetActorList.destroy();
       this._workerTargetActorList = null;
     }
 
@@ -1013,9 +971,9 @@ const browsingContextTargetPrototype = {
       this._workerTargetActorPool = null;
     }
 
-    if (this._frameDescriptorActorPool !== null) {
-      this._frameDescriptorActorPool.destroy();
-      this._frameDescriptorActorPool = null;
+    if (this._dbg) {
+      this._dbg.disable();
+      this._dbg = null;
     }
 
     this._attached = false;
@@ -1598,7 +1556,12 @@ DebuggerProgressListener.prototype = {
       this._knownWindowIDs.set(getWindowID(win), win);
     }
 
+    // The watchedByDevtools flag is set on each docshell this target is
+    // associated with. This enables Gecko behavior tied to this flag, such as
+    // reporting the contents of HTML loaded in the docshells, or capturing
+    // stacks for the network monitor.
     docShell.watchedByDevtools = true;
+    getChildDocShells(docShell).forEach(d => (d.watchedByDevtools = true));
   },
 
   unwatch(docShell) {
@@ -1606,6 +1569,7 @@ DebuggerProgressListener.prototype = {
     if (!this._watchedDocShells.has(docShellWindow)) {
       return;
     }
+    this._watchedDocShells.delete(docShellWindow);
 
     const webProgress = docShell
       .QueryInterface(Ci.nsIInterfaceRequestor)
@@ -1631,6 +1595,18 @@ DebuggerProgressListener.prototype = {
     }
 
     docShell.watchedByDevtools = false;
+    getChildDocShells(docShell).forEach(d => (d.watchedByDevtools = false));
+  },
+
+  isParentWatched(docShell) {
+    let parent = docShell.parent;
+    while (parent) {
+      if (this._watchedDocShells.has(parent.domWindow)) {
+        return true;
+      }
+      parent = parent.parent;
+    }
+    return false;
   },
 
   _getWindowsInDocShell(docShell) {
@@ -1708,6 +1684,22 @@ DebuggerProgressListener.prototype = {
     if (window) {
       this._knownWindowIDs.delete(innerID);
       this._targetActor._windowDestroyed(window, innerID);
+    }
+
+    // Bug 1598364: when debugging browser.xhtml from the Browser Toolbox
+    // the DOMWindowCreated/pageshow/pagehide event listeners have to be
+    // re-registered against the next document when we reload browser.html
+    // (or navigate to another doc).
+    // That's because we registered the listener on docShell.domWindow as
+    // top level windows don't have a chromeEventHandler.
+    if (
+      this._watchedDocShells.has(window) &&
+      !window.docShell.chromeEventHandler
+    ) {
+      // First cleanup all the existing listeners
+      this.unwatch(window.docShell);
+      // Re-register new ones. The docShell is already referencing the new document.
+      this.watch(window.docShell);
     }
   }, "DebuggerProgressListener.prototype.observe"),
 

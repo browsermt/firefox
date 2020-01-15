@@ -20,13 +20,16 @@
 #include "mozilla/dom/BindingDeclarations.h"
 #include "mozilla/dom/BlobBinding.h"
 #include "mozilla/dom/DocumentInlines.h"
+#include "mozilla/dom/DOMCollectedFramesBinding.h"
 #include "mozilla/dom/Event.h"
 #include "mozilla/dom/Touch.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/PendingAnimationTracker.h"
 #include "nsIObjectLoadingContent.h"
 #include "nsFrame.h"
-#include "mozilla/layers/ShadowLayers.h"
 #include "mozilla/layers/APZCCallbackHelper.h"
+#include "mozilla/layers/PCompositorBridgeTypes.h"
+#include "mozilla/layers/ShadowLayers.h"
 #include "ClientLayerManager.h"
 #include "nsQueryObject.h"
 #include "CubebDeviceEnumerator.h"
@@ -42,10 +45,12 @@
 #include "nsJSUtils.h"
 
 #include "mozilla/ChaosMode.h"
-#include "mozilla/EventStateManager.h"
+#include "mozilla/CheckedInt.h"
 #include "mozilla/MiscEvents.h"
 #include "mozilla/MouseEvents.h"
 #include "mozilla/PresShell.h"
+#include "mozilla/PresShellInlines.h"
+#include "mozilla/Span.h"
 #include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/TextEvents.h"
 #include "mozilla/TextEventDispatcher.h"
@@ -57,7 +62,6 @@
 #include "nsComputedDOMStyle.h"
 #include "nsCSSProps.h"
 #include "nsIDocShell.h"
-#include "nsIContentViewer.h"
 #include "mozilla/StyleAnimationValue.h"
 #include "mozilla/dom/File.h"
 #include "mozilla/dom/FileBinding.h"
@@ -88,7 +92,6 @@
 #include "nsPrintfCString.h"
 #include "nsViewportInfo.h"
 #include "nsIFormControl.h"
-#include "nsIScriptError.h"
 //#include "nsWidgetsCID.h"
 #include "FrameLayerBuilder.h"
 #include "nsDisplayList.h"
@@ -98,7 +101,6 @@
 #include "nsIInterfaceRequestorUtils.h"
 #include "GeckoProfiler.h"
 #include "mozilla/Preferences.h"
-#include "nsIStyleSheetService.h"
 #include "nsContentPermissionHelper.h"
 #include "nsCSSPseudoElements.h"  // for PseudoStyleType
 #include "nsNetUtil.h"
@@ -183,7 +185,7 @@ class NativeInputRunnable final : public PrioritizableRunnable {
 
 NativeInputRunnable::NativeInputRunnable(already_AddRefed<nsIRunnable>&& aEvent)
     : PrioritizableRunnable(std::move(aEvent),
-                            nsIRunnablePriority::PRIORITY_INPUT) {}
+                            nsIRunnablePriority::PRIORITY_INPUT_HIGH) {}
 
 /* static */
 already_AddRefed<nsIRunnable> NativeInputRunnable::Create(
@@ -422,6 +424,7 @@ nsDOMWindowUtils::SetDisplayPortForElement(float aXPx, float aYPx,
   }
 
   bool hadDisplayPort = false;
+  bool wasPainted = false;
   nsRect oldDisplayPort;
   {
     DisplayPortPropertyData* currentData =
@@ -433,6 +436,7 @@ nsDOMWindowUtils::SetDisplayPortForElement(float aXPx, float aYPx,
       }
       hadDisplayPort = true;
       oldDisplayPort = currentData->mRect;
+      wasPainted = currentData->mPainted;
     }
   }
 
@@ -441,19 +445,10 @@ nsDOMWindowUtils::SetDisplayPortForElement(float aXPx, float aYPx,
                      nsPresContext::CSSPixelsToAppUnits(aWidthPx),
                      nsPresContext::CSSPixelsToAppUnits(aHeightPx));
 
-  aElement->SetProperty(nsGkAtoms::DisplayPort,
-                        new DisplayPortPropertyData(displayport, aPriority),
-                        nsINode::DeleteProperty<DisplayPortPropertyData>);
-
-  if (StaticPrefs::layout_scroll_root_frame_containers()) {
-    nsIFrame* rootScrollFrame = presShell->GetRootScrollFrame();
-    if (rootScrollFrame && aElement == rootScrollFrame->GetContent() &&
-        nsLayoutUtils::UsesAsyncScrolling(rootScrollFrame)) {
-      // We are setting a root displayport for a document.
-      // The pres shell needs a special flag set.
-      presShell->SetIgnoreViewportScrolling(true);
-    }
-  }
+  aElement->SetProperty(
+      nsGkAtoms::DisplayPort,
+      new DisplayPortPropertyData(displayport, aPriority, wasPainted),
+      nsINode::DeleteProperty<DisplayPortPropertyData>);
 
   nsLayoutUtils::InvalidateForDisplayPortChange(aElement, hadDisplayPort,
                                                 oldDisplayPort, displayport);
@@ -1489,6 +1484,24 @@ nsDOMWindowUtils::GetVisualViewportOffset(int32_t* aOffsetX,
 }
 
 NS_IMETHODIMP
+nsDOMWindowUtils::SetDynamicToolbarMaxHeight(uint32_t aHeightInScreen) {
+  if (aHeightInScreen > INT32_MAX) {
+    return NS_ERROR_INVALID_ARG;
+  }
+
+  RefPtr<nsPresContext> presContext = GetPresContext();
+  if (!presContext) {
+    return NS_OK;
+  }
+
+  MOZ_ASSERT(presContext->IsRootContentDocumentCrossProcess());
+
+  presContext->SetDynamicToolbarMaxHeight(ScreenIntCoord(aHeightInScreen));
+
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 nsDOMWindowUtils::GetScrollbarSize(bool aFlushLayout, int32_t* aWidth,
                                    int32_t* aHeight) {
   *aWidth = 0;
@@ -1691,13 +1704,15 @@ nsDOMWindowUtils::GetFullZoom(float* aFullZoom) {
   return NS_OK;
 }
 
-NS_IMETHODIMP
-nsDOMWindowUtils::DispatchDOMEventViaPresShell(nsINode* aTarget, Event* aEvent,
-                                               bool* aRetVal) {
+NS_IMETHODIMP nsDOMWindowUtils::DispatchDOMEventViaPresShellForTesting(
+    nsINode* aTarget, Event* aEvent, bool* aRetVal) {
   NS_ENSURE_STATE(aEvent);
   aEvent->SetTrusted(true);
   WidgetEvent* internalEvent = aEvent->WidgetEventPtr();
   NS_ENSURE_STATE(internalEvent);
+  // This API is currently used only by EventUtils.js.  Thus we should always
+  // set mIsSynthesizedForTests to true.
+  internalEvent->mFlags.mIsSynthesizedForTests = true;
   nsCOMPtr<nsIContent> content = do_QueryInterface(aTarget);
   NS_ENSURE_STATE(content);
   nsCOMPtr<nsPIDOMWindowOuter> window = do_QueryReferent(mWindow);
@@ -2002,7 +2017,8 @@ nsDOMWindowUtils::GetVisitedDependentComputedStyle(
   }
 
   static_cast<nsComputedDOMStyle*>(decl.get())->SetExposeVisitedStyle(true);
-  nsresult rv = decl->GetPropertyValue(aPropertyName, aResult);
+  nsresult rv =
+      decl->GetPropertyValue(NS_ConvertUTF16toUTF8(aPropertyName), aResult);
   static_cast<nsComputedDOMStyle*>(decl.get())->SetExposeVisitedStyle(false);
 
   return rv;
@@ -2516,7 +2532,8 @@ nsDOMWindowUtils::ComputeAnimationDistance(Element* aElement,
                                            double* aResult) {
   NS_ENSURE_ARG_POINTER(aElement);
 
-  nsCSSPropertyID property = nsCSSProps::LookupProperty(aProperty);
+  nsCSSPropertyID property =
+      nsCSSProps::LookupProperty(NS_ConvertUTF16toUTF8(aProperty));
   if (property == eCSSProperty_UNKNOWN || nsCSSProps::IsShorthand(property)) {
     return NS_ERROR_ILLEGAL_VALUE;
   }
@@ -2543,7 +2560,8 @@ nsDOMWindowUtils::GetUnanimatedComputedStyle(Element* aElement,
     return NS_ERROR_INVALID_ARG;
   }
 
-  nsCSSPropertyID propertyID = nsCSSProps::LookupProperty(aProperty);
+  nsCSSPropertyID propertyID =
+      nsCSSProps::LookupProperty(NS_ConvertUTF16toUTF8(aProperty));
   if (propertyID == eCSSProperty_UNKNOWN ||
       nsCSSProps::IsShorthand(propertyID)) {
     return NS_ERROR_INVALID_ARG;
@@ -2562,7 +2580,8 @@ nsDOMWindowUtils::GetUnanimatedComputedStyle(Element* aElement,
       return NS_ERROR_INVALID_ARG;
   }
 
-  if (!GetPresShell()) {
+  RefPtr<PresShell> presShell = GetPresShell();
+  if (!presShell) {
     return NS_ERROR_FAILURE;
   }
 
@@ -2579,7 +2598,11 @@ nsDOMWindowUtils::GetUnanimatedComputedStyle(Element* aElement,
   if (!value) {
     return NS_ERROR_FAILURE;
   }
-  Servo_AnimationValue_Serialize(value, propertyID, &aResult);
+  if (!aElement->GetComposedDoc()) {
+    return NS_ERROR_FAILURE;
+  }
+  Servo_AnimationValue_Serialize(value, propertyID,
+                                 presShell->StyleSet()->RawSet(), &aResult);
   return NS_OK;
 }
 
@@ -2877,7 +2900,7 @@ nsDOMWindowUtils::GetFileReferences(const nsAString& aDatabaseName, int64_t aId,
   IDBOpenDBOptions options;
   JS::Rooted<JS::Value> optionsVal(aCx, aOptions);
   if (!options.Init(aCx, optionsVal)) {
-    return NS_ERROR_TYPE_ERR;
+    return NS_ERROR_UNEXPECTED;
   }
 
   quota::PersistenceType persistenceType =
@@ -3250,7 +3273,7 @@ nsDOMWindowUtils::RemoveSheetUsingURIString(const nsACString& aSheetURI,
 
 NS_IMETHODIMP
 nsDOMWindowUtils::GetIsHandlingUserInput(bool* aHandlingUserInput) {
-  *aHandlingUserInput = EventStateManager::IsHandlingUserInput();
+  *aHandlingUserInput = UserActivation::IsHandlingUserInput();
 
   return NS_OK;
 }
@@ -3258,7 +3281,7 @@ nsDOMWindowUtils::GetIsHandlingUserInput(bool* aHandlingUserInput) {
 NS_IMETHODIMP
 nsDOMWindowUtils::GetMillisSinceLastUserInput(
     double* aMillisSinceLastUserInput) {
-  TimeStamp lastInput = EventStateManager::LatestUserInputStart();
+  TimeStamp lastInput = UserActivation::LatestUserInputStart();
   if (lastInput.IsNull()) {
     *aMillisSinceLastUserInput = -1.0f;
     return NS_OK;
@@ -3419,11 +3442,6 @@ nsDOMWindowUtils::GetOMTAStyle(Element* aElement, const nsAString& aProperty,
 
   RefPtr<nsROCSSPrimitiveValue> cssValue = nullptr;
   if (frame && nsLayoutUtils::AreAsyncAnimationsEnabled()) {
-    RefPtr<LayerManager> widgetLayerManager;
-    if (nsIWidget* widget = GetWidget()) {
-      widgetLayerManager = widget->GetLayerManager();
-    }
-
     if (aProperty.EqualsLiteral("opacity")) {
       OMTAValue value = GetOMTAValue(frame, DisplayItemType::TYPE_OPACITY,
                                      GetWebRenderBridge());
@@ -3434,7 +3452,11 @@ nsDOMWindowUtils::GetOMTAStyle(Element* aElement, const nsAString& aProperty,
     } else if (aProperty.EqualsLiteral("transform") ||
                aProperty.EqualsLiteral("translate") ||
                aProperty.EqualsLiteral("rotate") ||
-               aProperty.EqualsLiteral("scale")) {
+               aProperty.EqualsLiteral("scale") ||
+               aProperty.EqualsLiteral("offset-path") ||
+               aProperty.EqualsLiteral("offset-distance") ||
+               aProperty.EqualsLiteral("offset-rotate") ||
+               aProperty.EqualsLiteral("offset-anchor")) {
       OMTAValue value = GetOMTAValue(frame, DisplayItemType::TYPE_TRANSFORM,
                                      GetWebRenderBridge());
       if (value.type() == OMTAValue::TMatrix4x4) {
@@ -3569,7 +3591,7 @@ NS_IMPL_ISUPPORTS(HandlingUserInputHelper, nsIJSRAIIHelper)
 HandlingUserInputHelper::HandlingUserInputHelper(bool aHandlingUserInput)
     : mHandlingUserInput(aHandlingUserInput), mDestructCalled(false) {
   if (aHandlingUserInput) {
-    EventStateManager::StartHandlingUserInput(eVoidEvent);
+    UserActivation::StartHandlingUserInput(eVoidEvent);
   }
 }
 
@@ -3589,7 +3611,7 @@ HandlingUserInputHelper::Destruct() {
 
   mDestructCalled = true;
   if (mHandlingUserInput) {
-    EventStateManager::StopHandlingUserInput(eVoidEvent);
+    UserActivation::StopHandlingUserInput(eVoidEvent);
   }
 
   return NS_OK;
@@ -3661,7 +3683,7 @@ nsDOMWindowUtils::PostRestyleSelfEvent(Element* aElement) {
     return NS_ERROR_INVALID_ARG;
   }
 
-  nsLayoutUtils::PostRestyleEvent(aElement, StyleRestyleHint_RESTYLE_SELF,
+  nsLayoutUtils::PostRestyleEvent(aElement, RestyleHint::RESTYLE_SELF,
                                   nsChangeHint(0));
   return NS_OK;
 }
@@ -4041,61 +4063,164 @@ nsDOMWindowUtils::WrCapture() {
 }
 
 NS_IMETHODIMP
-nsDOMWindowUtils::SetCompositionRecording(bool aValue) {
-  if (CompositorBridgeChild* cbc = GetCompositorBridge()) {
-    if (aValue) {
-      RefPtr<nsDOMWindowUtils> self = this;
-      cbc->SendBeginRecording(TimeStamp::Now())
-          ->Then(
-              GetCurrentThreadSerialEventTarget(), __func__,
-              [self](const bool& aSuccess) {
-                if (!aSuccess) {
-                  self->ReportErrorMessageForWindow(
-                      NS_LITERAL_STRING(
-                          "The composition recorder is already running."),
-                      "DOM", true);
-                }
-              },
-              [self](const mozilla::ipc::ResponseRejectReason&) {
-                self->ReportErrorMessageForWindow(
-                    NS_LITERAL_STRING(
-                        "Could not start the composition recorder."),
-                    "DOM", true);
-              });
-    } else {
-      bool success = false;
-      if (!cbc->SendEndRecording(&success)) {
-        ReportErrorMessageForWindow(
-            NS_LITERAL_STRING("Could not stop the composition recorder."),
-            "DOM", true);
-      } else if (!success) {
-        ReportErrorMessageForWindow(
-            NS_LITERAL_STRING("The composition recorder is not running."),
-            "DOM", true);
-      }
-    }
+nsDOMWindowUtils::SetCompositionRecording(bool aValue, Promise** aOutPromise) {
+  return aValue ? StartCompositionRecording(aOutPromise)
+                : StopCompositionRecording(true, aOutPromise);
+}
+
+NS_IMETHODIMP
+nsDOMWindowUtils::StartCompositionRecording(Promise** aOutPromise) {
+  NS_ENSURE_ARG(aOutPromise);
+  *aOutPromise = nullptr;
+
+  nsCOMPtr<nsPIDOMWindowOuter> outer = do_QueryReferent(mWindow);
+  NS_ENSURE_STATE(outer);
+  nsCOMPtr<nsPIDOMWindowInner> inner = outer->GetCurrentInnerWindow();
+  NS_ENSURE_STATE(inner);
+
+  ErrorResult err;
+  RefPtr<Promise> promise = Promise::Create(inner->AsGlobal(), err);
+  if (NS_WARN_IF(err.Failed())) {
+    return err.StealNSResult();
   }
 
+  CompositorBridgeChild* cbc = GetCompositorBridge();
+  if (NS_WARN_IF(!cbc)) {
+    promise->MaybeReject(NS_ERROR_UNEXPECTED);
+  } else {
+    cbc->SendBeginRecording(TimeStamp::Now())
+        ->Then(
+            GetCurrentThreadSerialEventTarget(), __func__,
+            [promise](const bool& aSuccess) {
+              if (aSuccess) {
+                promise->MaybeResolve(true);
+              } else {
+                promise->MaybeRejectWithDOMException(
+                    NS_ERROR_DOM_INVALID_STATE_ERR,
+                    "The composition recorder is already running.");
+              }
+            },
+            [promise](const mozilla::ipc::ResponseRejectReason&) {
+              promise->MaybeRejectWithDOMException(
+                  NS_ERROR_DOM_INVALID_STATE_ERR,
+                  "Could not start the composition recorder.");
+            });
+  }
+
+  promise.forget(aOutPromise);
   return NS_OK;
 }
 
-void nsDOMWindowUtils::ReportErrorMessageForWindow(
-    const nsAString& aErrorMessage, const char* aClassification,
-    bool aFromChrome) {
-  bool isPrivateWindow = false;
+NS_IMETHODIMP
+nsDOMWindowUtils::StopCompositionRecording(bool aWriteToDisk,
+                                           Promise** aOutPromise) {
+  NS_ENSURE_ARG_POINTER(aOutPromise);
+  *aOutPromise = nullptr;
 
-  if (nsCOMPtr<nsPIDOMWindowOuter> window = do_QueryReferent(mWindow)) {
-    if (nsIPrincipal* principal =
-            nsGlobalWindowOuter::Cast(window)->GetPrincipal()) {
-      uint32_t privateBrowsingId = 0;
+  nsCOMPtr<nsPIDOMWindowOuter> outer = do_QueryReferent(mWindow);
+  NS_ENSURE_STATE(outer);
+  nsCOMPtr<nsPIDOMWindowInner> inner = outer->GetCurrentInnerWindow();
+  NS_ENSURE_STATE(inner);
 
-      if (NS_SUCCEEDED(principal->GetPrivateBrowsingId(&privateBrowsingId))) {
-        isPrivateWindow = !!privateBrowsingId;
-      }
-    }
+  ErrorResult err;
+  RefPtr<Promise> promise = Promise::Create(inner->AsGlobal(), err);
+  if (NS_WARN_IF(err.Failed())) {
+    return err.StealNSResult();
   }
-  nsContentUtils::LogSimpleConsoleError(aErrorMessage, aClassification,
-                                        isPrivateWindow, aFromChrome);
+
+  CompositorBridgeChild* cbc = GetCompositorBridge();
+  if (NS_WARN_IF(!cbc)) {
+    promise->MaybeReject(NS_ERROR_UNEXPECTED);
+  } else if (aWriteToDisk) {
+    cbc->SendEndRecordingToDisk()->Then(
+        GetCurrentThreadSerialEventTarget(), __func__,
+        [promise](const bool& aSuccess) {
+          if (aSuccess) {
+            promise->MaybeResolveWithUndefined();
+          } else {
+            promise->MaybeRejectWithDOMException(
+                NS_ERROR_DOM_INVALID_STATE_ERR,
+                "The composition recorder is not running.");
+          }
+        },
+        [promise](const mozilla::ipc::ResponseRejectReason&) {
+          promise->MaybeRejectWithDOMException(
+              NS_ERROR_DOM_UNKNOWN_ERR,
+              "Could not stop the composition recorder.");
+        });
+  } else {
+    cbc->SendEndRecordingToMemory()->Then(
+        GetCurrentThreadSerialEventTarget(), __func__,
+        [promise](Maybe<CollectedFramesParams>&& aFrames) {
+          if (!aFrames) {
+            promise->MaybeRejectWithDOMException(
+                NS_ERROR_DOM_UNKNOWN_ERR,
+                "Could not stop the composition recorder.");
+            return;
+          }
+
+          DOMCollectedFrames domFrames;
+          if (!domFrames.mFrames.SetCapacity(aFrames->frames().Length(),
+                                             fallible)) {
+            promise->MaybeReject(NS_ERROR_OUT_OF_MEMORY);
+            return;
+          }
+
+          domFrames.mRecordingStart = aFrames->recordingStart();
+
+          CheckedInt<size_t> totalSize(0);
+          for (const CollectedFrameParams& frame : aFrames->frames()) {
+            totalSize += frame.length();
+          }
+
+          if (totalSize.isValid() &&
+              totalSize.value() > aFrames->buffer().Size<char>()) {
+            promise->MaybeRejectWithDOMException(
+                NS_ERROR_DOM_UNKNOWN_ERR,
+                "Could not interpret returned frames.");
+            return;
+          }
+
+          Span<const char> buffer(aFrames->buffer().get<char>(),
+                                  aFrames->buffer().Size<char>());
+
+          for (const CollectedFrameParams& frame : aFrames->frames()) {
+            size_t length = frame.length();
+
+            Span<const char> dataUri = buffer.First(length);
+
+            // We have to do a fallible AppendElement() because WebIDL
+            // dictionaries use FallibleTArray. However, this cannot fail due to
+            // the pre-allocation earlier.
+            DOMCollectedFrame* domFrame =
+                domFrames.mFrames.AppendElement(fallible);
+            MOZ_ASSERT(domFrame);
+
+            domFrame->mTimeOffset = frame.timeOffset();
+            domFrame->mDataUri = nsCString(dataUri);
+
+            buffer = buffer.Subspan(length);
+          }
+
+          promise->MaybeResolve(domFrames);
+        },
+        [promise](const mozilla::ipc::ResponseRejectReason&) {
+          promise->MaybeRejectWithDOMException(
+              NS_ERROR_DOM_UNKNOWN_ERR,
+              "Could not stop the composition recorder.");
+        });
+  }
+
+  promise.forget(aOutPromise);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsDOMWindowUtils::SetTransactionLogging(bool aValue) {
+  if (WebRenderBridgeChild* wrbc = GetWebRenderBridge()) {
+    wrbc->SetTransactionLogging(aValue);
+  }
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -4155,5 +4280,12 @@ nsDOMWindowUtils::GetLayersId(uint64_t* aOutLayersId) {
 NS_IMETHODIMP
 nsDOMWindowUtils::GetUsesOverlayScrollbars(bool* aResult) {
   *aResult = Document::UseOverlayScrollbars(GetDocument());
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+nsDOMWindowUtils::GetPaintCount(uint64_t* aPaintCount) {
+  auto* presShell = GetPresShell();
+  *aPaintCount = presShell ? presShell->GetPaintCount() : 0;
   return NS_OK;
 }

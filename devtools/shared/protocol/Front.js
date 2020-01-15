@@ -7,25 +7,12 @@
 var { settleAll } = require("devtools/shared/DevToolsUtils");
 var EventEmitter = require("devtools/shared/event-emitter");
 
-var { Pool } = require("./Pool");
+var { Pool } = require("devtools/shared/protocol/Pool");
 var {
   getStack,
   callFunctionWithAsyncStack,
 } = require("devtools/shared/platform/stack");
-// Bug 1454373: devtools/shared/defer still uses Promise.jsm which is slower
-// than DOM Promises. So implement our own copy of `defer` based on DOM Promises.
-function defer() {
-  let resolve, reject;
-  const promise = new Promise(function() {
-    resolve = arguments[0];
-    reject = arguments[1];
-  });
-  return {
-    resolve: resolve,
-    reject: reject,
-    promise: promise,
-  };
-}
+const defer = require("devtools/shared/defer");
 
 /**
  * Base class for client-side actor fronts.
@@ -54,9 +41,9 @@ class Front extends Pool {
     this.parentFront = parentFront;
     this._requests = [];
 
-    // Front listener functions registered via `onFront` get notified
-    // of new fronts via this dedicated EventEmitter object.
-    this._frontListeners = new EventEmitter();
+    // Front listener functions registered via `watchFronts`
+    this._frontCreationListeners = new EventEmitter();
+    this._frontDestructionListeners = new EventEmitter();
 
     // List of optional listener for each event, that is processed immediatly on packet
     // receival, before emitting event via EventEmitter on the Front.
@@ -85,11 +72,12 @@ class Front extends Pool {
     this.actorID = null;
     this.targetFront = null;
     this.parentFront = null;
-    this._frontListeners = null;
+    this._frontCreationListeners = null;
+    this._frontDestructionListeners = null;
     this._beforeListeners = null;
   }
 
-  manage(front) {
+  async manage(front, form, ctx) {
     if (!front.actorID) {
       throw new Error(
         "Can't manage front without an actor ID.\n" +
@@ -100,21 +88,71 @@ class Front extends Pool {
     }
     super.manage(front);
 
-    // Call listeners registered via `onFront` method
-    this._frontListeners.emit(front.typeName, front);
+    if (typeof front.initialize == "function") {
+      await front.initialize();
+    }
+
+    // Ensure calling form() *before* notifying about this front being just created.
+    // We exprect the front to be fully initialized, especially via its form attributes.
+    // But do that *after* calling manage() so that the front is already registered
+    // in Pools and can be fetched by its ID, in case a child actor, created in form()
+    // tries to get a reference to its parent via the actor ID.
+    if (form) {
+      front.form(form, ctx);
+    }
+
+    // Call listeners registered via `watchFronts` method
+    this._frontCreationListeners.emit(front.typeName, front);
   }
 
-  // Run callback on every front of this type that currently exists, and on every
-  // instantiation of front type in the future.
-  onFront(typeName, callback) {
-    // First fire the callback on already instantiated fronts
-    for (const front of this.poolChildren()) {
-      if (front.typeName == typeName) {
-        callback(front);
+  async unmanage(front) {
+    super.unmanage(front);
+
+    // Call listeners registered via `watchFronts` method
+    this._frontDestructionListeners.emit(front.typeName, front);
+  }
+
+  /*
+   * Listen for the creation and/or destruction of fronts matching one of the provided types.
+   *
+   * @param {String} typeName
+   *        Actor type to watch.
+   * @param {Function} onAvailable (optional)
+   *        Callback fired when a front has been just created or was already available.
+   *        The function is called with one arguments, the front.
+   * @param {Function} onDestroy (optional)
+   *        Callback fired in case of front destruction.
+   *        The function is called with the same argument than onAvailable.
+   */
+  watchFronts(typeName, onAvailable, onDestroy) {
+    if (onAvailable) {
+      // First fire the callback on already instantiated fronts
+      for (const front of this.poolChildren()) {
+        if (front.typeName == typeName) {
+          onAvailable(front);
+        }
       }
+
+      // Then register the callback for fronts instantiated in the future
+      this._frontCreationListeners.on(typeName, onAvailable);
     }
-    // Then register the callback for fronts instantiated in the future
-    this._frontListeners.on(typeName, callback);
+
+    if (onDestroy) {
+      this._frontDestructionListeners.on(typeName, onDestroy);
+    }
+  }
+
+  /**
+   * Stop listening for the creation and/or destruction of a given type of fronts.
+   * See `watchFronts()` for documentation of the arguments.
+   */
+  unwatchFronts(typeName, onAvailable, onDestroy) {
+    if (onAvailable) {
+      this._frontCreationListeners.off(typeName, onAvailable);
+    }
+    if (onDestroy) {
+      this._frontDestructionListeners.off(typeName, onDestroy);
+    }
   }
 
   /**
@@ -228,8 +266,6 @@ class Front extends Pool {
     callFunctionWithAsyncStack(
       () => {
         if (packet.error) {
-          // "Protocol error" is here to avoid TBPL heuristics. See also
-          // https://dxr.mozilla.org/webtools-central/source/tbpl/php/inc/GeneralErrorFilter.php
           let message;
           if (packet.error && packet.message) {
             message =
@@ -237,7 +273,8 @@ class Front extends Pool {
           } else {
             message = packet.error;
           }
-          deferred.reject(message);
+          const packetError = new Error(message);
+          deferred.reject(packetError);
         } else {
           deferred.resolve(packet);
         }

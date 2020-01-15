@@ -11,6 +11,7 @@
 #include "nsHttp.h"
 #include "nsHttpAuthCache.h"
 #include "nsHttpConnectionMgr.h"
+#include "AlternateServices.h"
 #include "ASpdySession.h"
 #include "HttpTrafficAnalyzer.h"
 
@@ -29,6 +30,7 @@ class nsIHttpChannel;
 class nsIPrefBranch;
 class nsICancelable;
 class nsICookieService;
+class nsIProcessSwitchRequestor;
 class nsIIOService;
 class nsIRequestContextService;
 class nsISiteSecurityService;
@@ -44,7 +46,7 @@ class EventTokenBucket;
 class Tickler;
 class nsHttpConnection;
 class nsHttpConnectionInfo;
-class nsHttpTransaction;
+class HttpTransactionShell;
 class AltSvcMapping;
 
 /*
@@ -244,7 +246,11 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   nsHttpAuthCache* AuthCache(bool aPrivate) {
     return aPrivate ? &mPrivateAuthCache : &mAuthCache;
   }
-  nsHttpConnectionMgr* ConnMgr() { return mConnMgr; }
+  nsHttpConnectionMgr* ConnMgr() { return mConnMgr->AsHttpConnectionMgr(); }
+  AltSvcCache* AltServiceCache() const {
+    MOZ_ASSERT(XRE_IsParentProcess());
+    return mAltSvcCache.get();
+  }
 
   // cache support
   uint32_t GenerateUniqueID() { return ++mLastUniqueID; }
@@ -263,39 +269,28 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   // Called to kick-off a new transaction, by default the transaction
   // will be put on the pending transaction queue if it cannot be
   // initiated at this time.  Callable from any thread.
-  MOZ_MUST_USE nsresult InitiateTransaction(nsHttpTransaction* trans,
-                                            int32_t priority) {
-    return mConnMgr->AddTransaction(trans, priority);
-  }
+  MOZ_MUST_USE nsresult InitiateTransaction(HttpTransactionShell* trans,
+                                            int32_t priority);
 
   // This function is also called to kick-off a new transaction. But the new
   // transaction will take a sticky connection from |transWithStickyConn|
   // and reuse it.
-  MOZ_MUST_USE nsresult
-  InitiateTransactionWithStickyConn(nsHttpTransaction* trans, int32_t priority,
-                                    nsHttpTransaction* transWithStickyConn) {
-    return mConnMgr->AddTransactionWithStickyConn(trans, priority,
-                                                  transWithStickyConn);
-  }
+  MOZ_MUST_USE nsresult InitiateTransactionWithStickyConn(
+      HttpTransactionShell* trans, int32_t priority,
+      HttpTransactionShell* transWithStickyConn);
 
   // Called to change the priority of an existing transaction that has
   // already been initiated.
-  MOZ_MUST_USE nsresult RescheduleTransaction(nsHttpTransaction* trans,
-                                              int32_t priority) {
-    return mConnMgr->RescheduleTransaction(trans, priority);
-  }
+  MOZ_MUST_USE nsresult RescheduleTransaction(HttpTransactionShell* trans,
+                                              int32_t priority);
 
-  void UpdateClassOfServiceOnTransaction(nsHttpTransaction* trans,
-                                         uint32_t classOfService) {
-    mConnMgr->UpdateClassOfServiceOnTransaction(trans, classOfService);
-  }
+  void UpdateClassOfServiceOnTransaction(HttpTransactionShell* trans,
+                                         uint32_t classOfService);
 
   // Called to cancel a transaction, which may or may not be assigned to
   // a connection.  Callable from any thread.
-  MOZ_MUST_USE nsresult CancelTransaction(nsHttpTransaction* trans,
-                                          nsresult reason) {
-    return mConnMgr->CancelTransaction(trans, reason);
-  }
+  MOZ_MUST_USE nsresult CancelTransaction(HttpTransactionShell* trans,
+                                          nsresult reason);
 
   // Called when a connection is done processing a transaction.  Callable
   // from any thread.
@@ -327,16 +322,16 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   void UpdateAltServiceMapping(AltSvcMapping* map, nsProxyInfo* proxyInfo,
                                nsIInterfaceRequestor* callbacks, uint32_t caps,
                                const OriginAttributes& originAttributes) {
-    mConnMgr->UpdateAltServiceMapping(map, proxyInfo, callbacks, caps,
-                                      originAttributes);
+    mAltSvcCache->UpdateAltServiceMapping(map, proxyInfo, callbacks, caps,
+                                          originAttributes);
   }
 
   already_AddRefed<AltSvcMapping> GetAltServiceMapping(
       const nsACString& scheme, const nsACString& host, int32_t port, bool pb,
       bool isolated, const nsACString& topWindowOrigin,
       const OriginAttributes& originAttributes) {
-    return mConnMgr->GetAltServiceMapping(scheme, host, port, pb, isolated,
-                                          topWindowOrigin, originAttributes);
+    return mAltSvcCache->GetAltServiceMapping(
+        scheme, host, port, pb, isolated, topWindowOrigin, originAttributes);
   }
 
   //
@@ -375,11 +370,6 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
     NotifyObservers(chan, NS_HTTP_ON_STOP_REQUEST_TOPIC);
   }
 
-  // Called by the channel and cached in the loadGroup
-  void OnUserAgentRequest(nsIHttpChannel* chan) {
-    NotifyObservers(chan, NS_HTTP_ON_USERAGENT_REQUEST_TOPIC);
-  }
-
   // Called by the channel before setting up the transaction
   void OnBeforeConnect(nsIHttpChannel* chan) {
     NotifyObservers(chan, NS_HTTP_ON_BEFORE_CONNECT_TOPIC);
@@ -412,10 +402,6 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
     NotifyObservers(chan, NS_HTTP_ON_EXAMINE_CACHED_RESPONSE_TOPIC);
   }
 
-  void OnMayChangeProcess(nsIHttpChannel* chan) {
-    NotifyObservers(chan, NS_HTTP_ON_MAY_CHANGE_PROCESS_TOPIC);
-  }
-
   // Generates the host:port string for use in the Host: header as well as the
   // CONNECT line for proxies. This handles IPv6 literals correctly.
   static MOZ_MUST_USE nsresult GenerateHostPort(const nsCString& host,
@@ -439,6 +425,15 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   bool Bug1563538() const { return mBug1563538; }
   bool Bug1563695() const { return mBug1563695; }
   bool Bug1556491() const { return mBug1556491; }
+
+  bool IsHttp3VersionSupportedHex(const nsACString& version);
+  nsCString Http3Version() { return kHttp3Version; }
+
+  bool IsHttp3Enabled() const { return mHttp3Enabled; }
+  uint32_t DefaultQpackTableSize() const { return mQpackTableSize; }
+  uint16_t DefaultHttp3MaxBlockedStreams() const {
+    return (uint16_t)mHttp3MaxBlockedStreams;
+  }
 
   uint32_t MaxHttpResponseHeaderSize() const {
     return mMaxHttpResponseHeaderSize;
@@ -476,6 +471,7 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   //
   void BuildUserAgent();
   void InitUserAgentComponents();
+  static void PrefsChanged(const char* pref, void* self);
   void PrefsChanged(const char* pref);
 
   MOZ_MUST_USE nsresult SetAcceptLanguages();
@@ -486,8 +482,6 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   void NotifyObservers(nsIChannel* chan, const char* event);
 
   void SetFastOpenOSSupport();
-
-  void EnsureUAOverridesInit();
 
   // Checks if there are any user certs or active smart cards on a different
   // thread. Updates mSpeculativeConnectEnabled when done.
@@ -505,11 +499,9 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   nsHttpAuthCache mPrivateAuthCache;
 
   // the connection manager
-  RefPtr<nsHttpConnectionMgr> mConnMgr;
+  RefPtr<HttpConnectionMgrShell> mConnMgr;
 
-  // This thread is used for performing operations that should not block
-  // the main thread.
-  nsCOMPtr<nsIThread> mBackgroundThread;
+  UniquePtr<AltSvcCache> mAltSvcCache;
 
   //
   // prefs
@@ -555,6 +547,8 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   uint32_t mTailTotalMax;
 
   uint8_t mRedirectionLimit;
+
+  bool mBeConservativeForProxy;
 
   // we'll warn the user if we load an URL containing a userpass field
   // unless its length is less than this threshold.  this warning is
@@ -690,6 +684,13 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   Atomic<bool, Relaxed> mBug1563695;
   Atomic<bool, Relaxed> mBug1556491;
 
+  Atomic<bool, Relaxed> mHttp3Enabled;
+  // Http3 parameters
+  Atomic<uint32_t, Relaxed> mQpackTableSize;
+  Atomic<uint32_t, Relaxed>
+      mHttp3MaxBlockedStreams;  // uint16_t is enough here, but Atomic only
+                                // supports uint32_t or uint64_t.
+
   // The max size (in bytes) for received Http response header.
   uint32_t mMaxHttpResponseHeaderSize;
 
@@ -770,6 +771,7 @@ class nsHttpHandler final : public nsIHttpProtocolHandler,
   Mutex mLastActiveTabLoadOptimizationLock;
   TimeStamp mLastActiveTabLoadOptimizationHit;
 
+  Mutex mSpdyBlacklistLock;
  public:
   MOZ_MUST_USE nsresult NewChannelId(uint64_t& channelId);
 

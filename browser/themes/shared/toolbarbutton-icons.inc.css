@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 :root {
   --toolbarbutton-icon-fill-attention: var(--lwt-toolbarbutton-icon-fill-attention, #0a84ff);
 }
@@ -20,6 +24,7 @@ toolbar[brighttext] {
 }
 
 .toolbarbutton-animatable-box {
+  display: block;
   position: absolute;
   overflow: hidden;
   z-index: 2;
@@ -59,7 +64,7 @@ toolbar[brighttext] {
   display: none;
 }
 #nav-bar-customization-target > #stop-reload-button > :-moz-any(#reload-button, #stop-button) > .toolbarbutton-animatable-box {
-  display: -moz-box;
+  display: block;
 }
 
 #stop-reload-button[animate] > #reload-button > .toolbarbutton-icon,

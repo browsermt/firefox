@@ -14,8 +14,6 @@
 #include "mozilla/net/NeckoCommon.h"
 #include "mozilla/net/NeckoParent.h"
 #include "mozilla/MozPromise.h"
-#include "nsICrossProcessSwitchChannel.h"
-#include "nsIObserver.h"
 #include "nsIParentRedirectingChannel.h"
 #include "nsIProgressEventSink.h"
 #include "nsIChannelEventSink.h"
@@ -24,6 +22,7 @@
 #include "nsIAuthPromptProvider.h"
 #include "mozilla/dom/ipc/IdType.h"
 #include "nsIDeprecationWarner.h"
+#include "nsIMultiPartChannel.h"
 
 class nsICacheEntry;
 
@@ -62,7 +61,7 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
                                 public nsIAsyncVerifyRedirectReadyCallback,
                                 public nsIChannelEventSink,
                                 public nsIRedirectResultListener,
-                                public nsICrossProcessSwitchChannel {
+                                public nsIMultiPartChannelListener {
   virtual ~HttpChannelParent();
 
  public:
@@ -78,7 +77,7 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   NS_DECL_NSIASYNCVERIFYREDIRECTREADYCALLBACK
   NS_DECL_NSICHANNELEVENTSINK
   NS_DECL_NSIREDIRECTRESULTLISTENER
-  NS_DECL_NSICROSSPROCESSSWITCHCHANNEL
+  NS_DECL_NSIMULTIPARTCHANNELLISTENER
 
   NS_DECLARE_STATIC_IID_ACCESSOR(HTTP_CHANNEL_PARENT_IID)
 
@@ -132,11 +131,9 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
 
   base::ProcessId OtherPid() const;
 
-  // Calling this method will cancel the HttpChannelChild because the consumer
-  // needs to be relocated to another process.
-  // Any OnStart/Stop/DataAvailable calls that follow will not be sent to the
-  // child channel.
-  void CancelChildCrossProcessRedirect();
+  // Inform the child actor that our referrer info was modified late during
+  // BeginConnect.
+  void OverrideReferrerInfoDuringBeginConnect(nsIReferrerInfo* aReferrerInfo);
 
  protected:
   // used to connect redirected-to channel in parent with just created
@@ -149,7 +146,7 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
       const Maybe<URIParams>& docUri, nsIReferrerInfo* aReferrerInfo,
       const Maybe<URIParams>& internalRedirectUri,
       const Maybe<URIParams>& topWindowUri,
-      const PrincipalInfo& aContentBlockingAllowListPrincipal,
+      nsIPrincipal* aContentBlockingAllowListPrincipal,
       const uint32_t& loadFlags, const RequestHeaderTuples& requestHeaders,
       const nsCString& requestMethod, const Maybe<IPCStream>& uploadStream,
       const bool& uploadStreamHasHeaders, const int16_t& priority,
@@ -182,7 +179,7 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
       const TimeStamp& aHandleFetchEventEnd,
       const bool& aForceMainDocumentChannel,
       const TimeStamp& aNavigationStartTimeStamp,
-      const bool& hasSandboxedAuxiliaryNavigations);
+      const bool& hasNonEmptySandboxingFlag);
 
   virtual mozilla::ipc::IPCResult RecvSetPriority(
       const int16_t& priority) override;
@@ -195,7 +192,8 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   virtual mozilla::ipc::IPCResult RecvCancel(const nsresult& status) override;
   virtual mozilla::ipc::IPCResult RecvRedirect2Verify(
       const nsresult& result, const RequestHeaderTuples& changedHeaders,
-      const ChildLoadInfoForwarderArgs& aLoadInfoForwarder,
+      const uint32_t& aSourceRequestBlockingReason,
+      const ChildLoadInfoForwarderArgs& aTargetLoadInfoForwarder,
       const uint32_t& loadFlags, nsIReferrerInfo* aReferrerInfo,
       const Maybe<URIParams>& apiRedirectUri,
       const Maybe<CorsPreflightArgs>& aCorsPreflightArgs,
@@ -209,9 +207,6 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   virtual mozilla::ipc::IPCResult RecvDivertOnStopRequest(
       const nsresult& statusCode) override;
   virtual mozilla::ipc::IPCResult RecvDivertComplete() override;
-  virtual mozilla::ipc::IPCResult RecvCrossProcessRedirectDone(
-      const nsresult& aResult,
-      const mozilla::Maybe<LoadInfoArgs>& aLoadInfoArgs) override;
   virtual mozilla::ipc::IPCResult RecvRemoveCorsPreflightCacheEntry(
       const URIParams& uri,
       const mozilla::ipc::PrincipalInfo& requestingPrincipal) override;
@@ -356,9 +351,12 @@ class HttpChannelParent final : public nsIInterfaceRequestor,
   uint8_t mNeedFlowControl : 1;
   uint8_t mSuspendedForFlowControl : 1;
 
-  // The child channel was cancelled, as the consumer was relocated to another
-  // process.
-  uint8_t mDoingCrossProcessRedirect : 1;
+  // Set to true if we get OnStartRequest called with an nsIMultiPartChannel,
+  // and expect multiple OnStartRequest calls.
+  // When this happens we send OnTransportAndData and OnStopRequest over
+  // PHttpChannel instead of PHttpBackgroundChannel to make synchronizing all
+  // the parts easier.
+  uint8_t mIsMultiPart : 1;
 
   // Number of events to wait before actually invoking AsyncOpen on the main
   // channel. For each asynchronous step required before InvokeAsyncOpen, should

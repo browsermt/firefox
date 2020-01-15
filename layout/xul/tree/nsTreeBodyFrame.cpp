@@ -44,7 +44,6 @@
 #include "nsWidgetsCID.h"
 #include "nsIFrameInlines.h"
 #include "nsBoxFrame.h"
-#include "nsIURL.h"
 #include "nsBoxLayoutState.h"
 #include "nsTreeContentView.h"
 #include "nsTreeUtils.h"
@@ -52,7 +51,6 @@
 #include "nsITheme.h"
 #include "imgIRequest.h"
 #include "imgIContainer.h"
-#include "imgILoader.h"
 #include "mozilla/dom/NodeInfo.h"
 #include "nsContentUtils.h"
 #include "nsLayoutUtils.h"
@@ -1928,6 +1926,11 @@ nsresult nsTreeBodyFrame::GetImage(int32_t aRowIndex, nsTreeColumn* aCol,
           imgNotificationObserver, nsIRequest::LOAD_NORMAL, EmptyString(),
           getter_AddRefs(imageRequest));
       NS_ENSURE_SUCCESS(rv, rv);
+
+      // NOTE(heycam): If it's an SVG image, and we need to want the image to
+      // able to respond to media query changes, it needs to be added to the
+      // document's ImageTracker (like nsImageBoxFrame does).  For now, assume
+      // we don't need this.
     }
     listener->UnsuppressInvalidation();
 
@@ -3092,7 +3095,6 @@ ImgDrawResult nsTreeBodyFrame::PaintCell(
     if (dirtyRect.IntersectRect(aDirtyRect, elementRect)) {
       switch (aColumn->GetType()) {
         case TreeColumn_Binding::TYPE_TEXT:
-        case TreeColumn_Binding::TYPE_PASSWORD:
           result &= PaintText(aRowIndex, aColumn, elementRect, aPresContext,
                               aRenderingContext, aDirtyRect, currX);
           break;
@@ -3376,18 +3378,6 @@ ImgDrawResult nsTreeBodyFrame::PaintImage(
   return result;
 }
 
-static void FillBufWithPWChars(nsAString* aOutString, int32_t aLength) {
-  MOZ_ASSERT(aOutString);
-
-  // change the output to the platform password character
-  char16_t passwordChar = LookAndFeel::GetPasswordCharacter();
-
-  aOutString->Truncate();
-  for (int32_t i = 0; i < aLength; i++) {
-    aOutString->Append(passwordChar);
-  }
-}
-
 ImgDrawResult nsTreeBodyFrame::PaintText(
     int32_t aRowIndex, nsTreeColumn* aColumn, const nsRect& aTextRect,
     nsPresContext* aPresContext, gfxContext& aRenderingContext,
@@ -3399,10 +3389,6 @@ ImgDrawResult nsTreeBodyFrame::PaintText(
   // Now obtain the text for our cell.
   nsAutoString text;
   mView->GetCellText(aRowIndex, aColumn, text);
-
-  if (aColumn->Type() == TreeColumn_Binding::TYPE_PASSWORD) {
-    FillBufWithPWChars(&text, text.Length());
-  }
 
   // We're going to paint this text so we need to ensure bidi is enabled if
   // necessary
@@ -3475,22 +3461,22 @@ ImgDrawResult nsTreeBodyFrame::PaintText(
 
   nscoord offset;
   nscoord size;
-  if (decorations &
-      (StyleTextDecorationLine_OVERLINE | StyleTextDecorationLine_UNDERLINE)) {
+  if (decorations & (StyleTextDecorationLine::OVERLINE |
+                     StyleTextDecorationLine::UNDERLINE)) {
     fontMet->GetUnderline(offset, size);
-    if (decorations & StyleTextDecorationLine_OVERLINE) {
+    if (decorations & StyleTextDecorationLine::OVERLINE) {
       nsRect r(textRect.x, textRect.y, textRect.width, size);
       Rect devPxRect = NSRectToSnappedRect(r, appUnitsPerDevPixel, *drawTarget);
       drawTarget->FillRect(devPxRect, color);
     }
-    if (decorations & StyleTextDecorationLine_UNDERLINE) {
+    if (decorations & StyleTextDecorationLine::UNDERLINE) {
       nsRect r(textRect.x, textRect.y + baseline - offset, textRect.width,
                size);
       Rect devPxRect = NSRectToSnappedRect(r, appUnitsPerDevPixel, *drawTarget);
       drawTarget->FillRect(devPxRect, color);
     }
   }
-  if (decorations & StyleTextDecorationLine_LINE_THROUGH) {
+  if (decorations & StyleTextDecorationLine::LINE_THROUGH) {
     fontMet->GetStrikeout(offset, size);
     nsRect r(textRect.x, textRect.y + baseline - offset, textRect.width, size);
     Rect devPxRect = NSRectToSnappedRect(r, appUnitsPerDevPixel, *drawTarget);

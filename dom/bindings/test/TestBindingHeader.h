@@ -60,31 +60,6 @@ class nsRenamedInterface : public nsISupports, public nsWrapperCache {
 
 NS_DEFINE_STATIC_IID_ACCESSOR(nsRenamedInterface, NS_RENAMED_INTERFACE_IID)
 
-// IID for the IndirectlyImplementedInterface
-#define NS_INDIRECTLY_IMPLEMENTED_INTERFACE_IID      \
-  {                                                  \
-    0xfed55b69, 0x7012, 0x4849, {                    \
-      0xaf, 0x56, 0x4b, 0xa9, 0xee, 0x41, 0x30, 0x89 \
-    }                                                \
-  }
-
-class IndirectlyImplementedInterface : public nsISupports,
-                                       public nsWrapperCache {
- public:
-  NS_DECLARE_STATIC_IID_ACCESSOR(NS_INDIRECTLY_IMPLEMENTED_INTERFACE_IID)
-  NS_DECL_ISUPPORTS
-
-  // We need a GetParentObject to make binding codegen happy
-  virtual nsISupports* GetParentObject();
-
-  bool IndirectlyImplementedProperty();
-  void IndirectlyImplementedProperty(bool);
-  void IndirectlyImplementedMethod();
-};
-
-NS_DEFINE_STATIC_IID_ACCESSOR(IndirectlyImplementedInterface,
-                              NS_INDIRECTLY_IMPLEMENTED_INTERFACE_IID)
-
 // IID for the TestExternalInterface
 #define NS_TEST_EXTERNAL_INTERFACE_IID               \
   {                                                  \
@@ -126,34 +101,27 @@ class TestInterface : public nsISupports, public nsWrapperCache {
 
   // And now our actual WebIDL API
   // Constructors
+  static already_AddRefed<TestInterface> Constructor(const GlobalObject&);
   static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
-                                                     ErrorResult&);
-  static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
-                                                     const nsAString&,
-                                                     ErrorResult&);
+                                                     const nsAString&);
   static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
                                                      uint32_t,
-                                                     const Nullable<bool>&,
-                                                     ErrorResult&);
+                                                     const Nullable<bool>&);
   static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
-                                                     TestInterface*,
-                                                     ErrorResult&);
-  static already_AddRefed<TestInterface> Constructor(
-      const GlobalObject&, uint32_t, IndirectlyImplementedInterface&,
-      ErrorResult&);
+                                                     TestInterface*);
+  static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
+                                                     uint32_t, TestInterface&);
 
-  static already_AddRefed<TestInterface> Constructor(const GlobalObject&, Date&,
-                                                     ErrorResult&);
   static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
-                                                     const ArrayBuffer&,
-                                                     ErrorResult&);
+                                                     Date&);
   static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
-                                                     const Uint8Array&,
-                                                     ErrorResult&);
+                                                     const ArrayBuffer&);
+  static already_AddRefed<TestInterface> Constructor(const GlobalObject&,
+                                                     const Uint8Array&);
   /*  static
   already_AddRefed<TestInterface>
     Constructor(const GlobalObject&, uint32_t, uint32_t,
-                const TestInterfaceOrOnlyForUseInConstructor&, ErrorResult&);
+                const TestInterfaceOrOnlyForUseInConstructor&);
   */
 
   static already_AddRefed<TestInterface> Test(const GlobalObject&,
@@ -349,21 +317,6 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void ReceiveNullableNonWrapperCacheInterfaceNullableSequence(
       Nullable<nsTArray<RefPtr<TestNonWrapperCacheInterface>>>&);
 
-  already_AddRefed<IndirectlyImplementedInterface> ReceiveOther();
-  already_AddRefed<IndirectlyImplementedInterface> ReceiveNullableOther();
-  IndirectlyImplementedInterface* ReceiveWeakOther();
-  IndirectlyImplementedInterface* ReceiveWeakNullableOther();
-  void PassOther(IndirectlyImplementedInterface&);
-  void PassNullableOther(IndirectlyImplementedInterface*);
-  already_AddRefed<IndirectlyImplementedInterface> NonNullOther();
-  void SetNonNullOther(IndirectlyImplementedInterface&);
-  already_AddRefed<IndirectlyImplementedInterface> GetNullableOther();
-  void SetNullableOther(IndirectlyImplementedInterface*);
-  void PassOptionalOther(const Optional<IndirectlyImplementedInterface*>&);
-  void PassOptionalNonNullOther(
-      const Optional<NonNull<IndirectlyImplementedInterface>>&);
-  void PassOptionalOtherWithDefault(IndirectlyImplementedInterface*);
-
   already_AddRefed<TestExternalInterface> ReceiveExternal();
   already_AddRefed<TestExternalInterface> ReceiveNullableExternal();
   TestExternalInterface* ReceiveWeakExternal();
@@ -393,10 +346,6 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassOptionalNonNullCallbackInterface(
       const Optional<OwningNonNull<TestCallbackInterface>>&);
   void PassOptionalCallbackInterfaceWithDefault(TestCallbackInterface*);
-
-  already_AddRefed<IndirectlyImplementedInterface>
-  ReceiveConsequentialInterface();
-  void PassConsequentialInterface(IndirectlyImplementedInterface&);
 
   // Sequence types
   void GetReadonlySequence(nsTArray<int32_t>&);
@@ -462,6 +411,9 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void ReceiveByteStringSequence(nsTArray<nsCString>&);
   void PassByteStringSequence(const Sequence<nsCString>&);
 
+  void ReceiveUTF8StringSequence(nsTArray<nsCString>&);
+  void PassUTF8StringSequence(const Sequence<nsCString>&);
+
   void ReceiveAnySequence(JSContext*, nsTArray<JS::Value>&);
   void ReceiveNullableAnySequence(JSContext*, Nullable<nsTArray<JS::Value>>&);
   void ReceiveAnySequenceSequence(JSContext*, nsTArray<nsTArray<JS::Value>>&);
@@ -505,6 +457,7 @@ class TestInterface : public nsISupports, public nsWrapperCache {
       const Record<nsString, RefPtr<TestExternalInterface>>&);
   void PassStringRecord(const Record<nsString, nsString>&);
   void PassByteStringRecord(const Record<nsString, nsCString>&);
+  void PassUTF8StringRecord(const Record<nsString, nsCString>&);
   void PassRecordOfRecords(const Record<nsString, Record<nsString, int32_t>>&);
   void ReceiveRecord(Record<nsString, int32_t>&);
   void ReceiveNullableRecord(Nullable<Record<nsString, int32_t>>&);
@@ -564,6 +517,17 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassOptionalUnionByteString(const Optional<ByteStringOrLong>&);
   void PassOptionalUnionByteStringWithDefaultValue(const ByteStringOrLong&);
 
+  // UTF8String types
+  void PassUTF8String(const nsACString&);
+  void PassNullableUTF8String(const nsACString&);
+  void PassOptionalUTF8String(const Optional<nsACString>&);
+  void PassOptionalUTF8StringWithDefaultValue(const nsACString&);
+  void PassOptionalNullableUTF8String(const Optional<nsACString>&);
+  void PassOptionalNullableUTF8StringWithDefaultValue(const nsACString&);
+  void PassVariadicUTF8String(const Sequence<nsCString>&);
+  void PassOptionalUnionUTF8String(const Optional<UTF8StringOrLong>&);
+  void PassOptionalUnionUTF8StringWithDefaultValue(const UTF8StringOrLong&);
+
   // USVString types
   void PassUSVS(const nsAString&);
   void PassNullableUSVS(const nsAString&);
@@ -573,6 +537,14 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassOptionalNullableUSVSWithDefaultValue(const nsAString&);
   void PassVariadicUSVS(const Sequence<nsString>&);
   void ReceiveUSVS(DOMString&);
+
+  // JSString types
+  void PassJSString(JSContext*, JS::Handle<JSString*>);
+  void PassOptionalJSStringWithDefaultValue(JSContext*, JS::Handle<JSString*>);
+  void ReceiveJSString(JSContext*, JS::MutableHandle<JSString*>);
+  void GetReadonlyJSStringAttr(JSContext*, JS::MutableHandle<JSString*>);
+  void GetJsStringAttr(JSContext*, JS::MutableHandle<JSString*>);
+  void SetJsStringAttr(JSContext*, JS::Handle<JSString*>);
 
   // Enumerated types
   void PassEnum(TestEnum);
@@ -747,6 +719,7 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassUnion28(const EventInitOrStringSequence&);
   void PassUnionWithCallback(const EventHandlerNonNullOrNullOrLong& arg);
   void PassUnionWithByteString(const ByteStringOrLong&);
+  void PassUnionWithUTF8String(const UTF8StringOrLong&);
   void PassUnionWithRecord(const StringStringRecordOrString&);
   void PassUnionWithRecordAndSequence(
       const StringStringRecordOrStringSequence&);
@@ -791,6 +764,9 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassUnionWithDefaultValue20(const DoubleOrUSVString& arg);
   void PassUnionWithDefaultValue21(const DoubleOrUSVString& arg);
   void PassUnionWithDefaultValue22(const DoubleOrUSVString& arg);
+  void PassUnionWithDefaultValue23(const DoubleOrUTF8String& arg);
+  void PassUnionWithDefaultValue24(const DoubleOrUTF8String& arg);
+  void PassUnionWithDefaultValue25(const DoubleOrUTF8String& arg);
 
   void PassNullableUnionWithDefaultValue1(const Nullable<DoubleOrString>& arg);
   void PassNullableUnionWithDefaultValue2(const Nullable<DoubleOrString>& arg);
@@ -834,6 +810,14 @@ class TestInterface : public nsISupports, public nsWrapperCache {
       const Nullable<DoubleOrUSVString>& arg);
   void PassNullableUnionWithDefaultValue24(
       const Nullable<DoubleOrUSVString>& arg);
+  void PassNullableUnionWithDefaultValue25(
+      const Nullable<DoubleOrUTF8String>& arg);
+  void PassNullableUnionWithDefaultValue26(
+      const Nullable<DoubleOrUTF8String>& arg);
+  void PassNullableUnionWithDefaultValue27(
+      const Nullable<DoubleOrUTF8String>& arg);
+  void PassNullableUnionWithDefaultValue28(
+      const Nullable<DoubleOrUTF8String>& arg);
 
   void PassSequenceOfUnions(
       const Sequence<OwningCanvasPatternOrCanvasGradient>&);
@@ -885,13 +869,10 @@ class TestInterface : public nsISupports, public nsWrapperCache {
 
   // binaryNames tests
   void MethodRenamedTo();
-  void OtherMethodRenamedTo();
   void MethodRenamedTo(int8_t);
   int8_t AttributeGetterRenamedTo();
   int8_t AttributeRenamedTo();
   void SetAttributeRenamedTo(int8_t);
-  int8_t OtherAttributeRenamedTo();
-  void SetOtherAttributeRenamedTo(int8_t);
 
   // Dictionary tests
   void PassDictionary(JSContext*, const Dict&);
@@ -1088,24 +1069,23 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void SetNonEnumerableAttr(bool);
   void NonEnumerableMethod();
 
-  // Methods and properties imported via "implements"
-  bool ImplementedProperty();
-  void SetImplementedProperty(bool);
-  void ImplementedMethod();
-  bool ImplementedParentProperty();
-  void SetImplementedParentProperty(bool);
-  void ImplementedParentMethod();
-  bool IndirectlyImplementedProperty();
-  void SetIndirectlyImplementedProperty(bool);
-  void IndirectlyImplementedMethod();
-  uint32_t DiamondImplementedProperty();
+  // Methods and properties imported via "includes"
+  bool MixedInProperty();
+  void SetMixedInProperty(bool);
+  void MixedInMethod();
 
   // Test EnforceRange/Clamp
   void DontEnforceRangeOrClamp(int8_t);
   void DoEnforceRange(int8_t);
+  void DoEnforceRangeNullable(const Nullable<int8_t>&);
   void DoClamp(int8_t);
+  void DoClampNullable(const Nullable<int8_t>&);
   void SetEnforcedByte(int8_t);
   int8_t EnforcedByte();
+  void SetEnforcedNullableByte(const Nullable<int8_t>&);
+  Nullable<int8_t> GetEnforcedNullableByte() const;
+  void SetClampedNullableByte(const Nullable<int8_t>&);
+  Nullable<int8_t> GetClampedNullableByte() const;
   void SetClampedByte(int8_t);
   int8_t ClampedByte();
 
@@ -1239,9 +1219,6 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassOptionalUnsignedLongLong(Optional<uint64_t>&) = delete;
   void PassOptionalSelf(Optional<TestInterface*>&) = delete;
   void PassOptionalNonNullSelf(Optional<NonNull<TestInterface>>&) = delete;
-  void PassOptionalOther(Optional<IndirectlyImplementedInterface*>&);
-  void PassOptionalNonNullOther(
-      Optional<NonNull<IndirectlyImplementedInterface>>&);
   void PassOptionalExternal(Optional<TestExternalInterface*>&) = delete;
   void PassOptionalNonNullExternal(Optional<TestExternalInterface*>&) = delete;
   void PassOptionalSequence(Optional<Sequence<int32_t>>&) = delete;
@@ -1275,6 +1252,15 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassOptionalNullableByteString(Optional<nsCString>&) = delete;
   void PassOptionalNullableByteStringWithDefaultValue(nsCString&) = delete;
   void PassVariadicByteString(Sequence<nsCString>&) = delete;
+
+  // cstrings should be const as well
+  void PassUTF8String(nsACString&) = delete;
+  void PassNullableUTF8String(nsACString&) = delete;
+  void PassOptionalUTF8String(Optional<nsACString>&) = delete;
+  void PassOptionalUTF8StringWithDefaultValue(nsACString&) = delete;
+  void PassOptionalNullableUTF8String(Optional<nsACString>&) = delete;
+  void PassOptionalNullableUTF8StringWithDefaultValue(nsACString&) = delete;
+  void PassVariadicUTF8String(Sequence<nsCString>&) = delete;
 
   // Make sure dictionary arguments are always const
   void PassDictionary(JSContext*, Dict&) = delete;
@@ -1315,10 +1301,6 @@ class TestInterface : public nsISupports, public nsWrapperCache {
   void PassSelf(OwningNonNull<TestInterface>&) = delete;
   void PassSelf(const NonNull<TestInterface>&) = delete;
   void PassSelf(const OwningNonNull<TestInterface>&) = delete;
-  void PassOther(NonNull<IndirectlyImplementedInterface>&) = delete;
-  void PassOther(const NonNull<IndirectlyImplementedInterface>&) = delete;
-  void PassOther(OwningNonNull<IndirectlyImplementedInterface>&) = delete;
-  void PassOther(const OwningNonNull<IndirectlyImplementedInterface>&) = delete;
   void PassCallbackInterface(OwningNonNull<TestCallbackInterface>&) = delete;
   void PassCallbackInterface(const OwningNonNull<TestCallbackInterface>&) =
       delete;
@@ -1506,7 +1488,7 @@ class TestDeprecatedInterface : public nsISupports, public nsWrapperCache {
   NS_DECL_ISUPPORTS
 
   static already_AddRefed<TestDeprecatedInterface> Constructor(
-      const GlobalObject&, ErrorResult&);
+      const GlobalObject&);
 
   static void AlsoDeprecated(const GlobalObject&);
 
@@ -1519,7 +1501,7 @@ class TestInterfaceWithPromiseConstructorArg : public nsISupports,
   NS_DECL_ISUPPORTS
 
   static already_AddRefed<TestInterfaceWithPromiseConstructorArg> Constructor(
-      const GlobalObject&, Promise&, ErrorResult&);
+      const GlobalObject&, Promise&);
 
   virtual nsISupports* GetParentObject();
 };
@@ -1570,6 +1552,35 @@ class TestHTMLConstructorInterface : public nsGenericHTMLElement {
   virtual nsISupports* GetParentObject();
 };
 
+class TestThrowingConstructorInterface : public nsISupports,
+                                         public nsWrapperCache {
+ public:
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, const nsAString&, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, uint32_t, const Nullable<bool>&, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, TestInterface*, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, uint32_t, TestInterface&, ErrorResult&);
+
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, Date&, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, const ArrayBuffer&, ErrorResult&);
+  static already_AddRefed<TestThrowingConstructorInterface> Constructor(
+      const GlobalObject&, const Uint8Array&, ErrorResult&);
+  /*  static
+  already_AddRefed<TestThrowingConstructorInterface>
+    Constructor(const GlobalObject&, uint32_t, uint32_t,
+                const TestInterfaceOrOnlyForUseInConstructor&, ErrorResult&);
+  */
+
+  virtual nsISupports* GetParentObject();
+};
+
 class TestCEReactionsInterface : public nsISupports, public nsWrapperCache {
  public:
   NS_DECL_ISUPPORTS
@@ -1601,6 +1612,114 @@ class TestAttributesOnTypes : public nsISupports, public nsWrapperCache {
   uint8_t SomeAttr();
   void SetSomeAttr(uint8_t);
   void ArgWithAttr(uint8_t arg1, const Optional<uint8_t>& arg2);
+};
+
+class TestPrefConstructorForInterface : public nsISupports,
+                                        public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since only the constructor is under a pref,
+  // the generated constructor should check for the pref.
+  static already_AddRefed<TestPrefConstructorForInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestConstructorForPrefInterface : public nsISupports,
+                                        public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the interface itself is under a Pref, there should be no
+  // check for the pref in the generated constructor.
+  static already_AddRefed<TestConstructorForPrefInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestPrefConstructorForDifferentPrefInterface : public nsISupports,
+                                                     public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the constructor's pref is different than the interface pref
+  // there should still be a check for the pref in the generated constructor.
+  static already_AddRefed<TestPrefConstructorForDifferentPrefInterface>
+  Constructor(const GlobalObject&);
+};
+
+class TestConstructorForSCInterface : public nsISupports,
+                                      public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the interface itself is SecureContext, there should be no
+  // check for SecureContext in the constructor.
+  static already_AddRefed<TestConstructorForSCInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestSCConstructorForInterface : public nsISupports,
+                                      public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the interface context is unspecified but the constructor is
+  // SecureContext, the generated constructor should check for SecureContext.
+  static already_AddRefed<TestSCConstructorForInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestConstructorForFuncInterface : public nsISupports,
+                                        public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the interface has a Func attribute, but the constructor does not,
+  // the generated constructor should not check for the Func.
+  static already_AddRefed<TestConstructorForFuncInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestFuncConstructorForInterface : public nsISupports,
+                                        public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the constructor has a Func attribute, but the interface does not,
+  // the generated constructor should check for the Func.
+  static already_AddRefed<TestFuncConstructorForInterface> Constructor(
+      const GlobalObject&);
+};
+
+class TestFuncConstructorForDifferentFuncInterface : public nsISupports,
+                                                     public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // Since the constructor has a different Func attribute from the interface,
+  // the generated constructor should still check for its conditional func.
+  static already_AddRefed<TestFuncConstructorForDifferentFuncInterface>
+  Constructor(const GlobalObject&);
+};
+
+class TestPrefChromeOnlySCFuncConstructorForInterface : public nsISupports,
+                                                        public nsWrapperCache {
+ public:
+  NS_DECL_ISUPPORTS
+  virtual nsISupports* GetParentObject();
+
+  // There should be checks for all Pref/ChromeOnly/SecureContext/Func
+  // in the generated constructor.
+  static already_AddRefed<TestPrefChromeOnlySCFuncConstructorForInterface>
+  Constructor(const GlobalObject&);
 };
 
 }  // namespace dom

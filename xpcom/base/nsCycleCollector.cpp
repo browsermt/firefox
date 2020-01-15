@@ -165,6 +165,7 @@
 #include "mozilla/Move.h"
 #include "mozilla/MruCache.h"
 #include "mozilla/SegmentedVector.h"
+#include "mozilla/UniquePtr.h"
 
 #include "nsCycleCollectionParticipant.h"
 #include "nsCycleCollectionNoteRootCallback.h"
@@ -1109,7 +1110,7 @@ class nsCycleCollector : public nsIMemoryReporter {
 
   ccPhase mIncrementalPhase;
   CCGraph mGraph;
-  nsAutoPtr<CCGraphBuilder> mBuilder;
+  UniquePtr<CCGraphBuilder> mBuilder;
   RefPtr<nsCycleCollectorLogger> mLogger;
 
 #ifdef DEBUG
@@ -1828,7 +1829,7 @@ class CCGraphBuilder final : public nsCycleCollectionTraversalCallback,
   nsCString mNextEdgeName;
   RefPtr<nsCycleCollectorLogger> mLogger;
   bool mMergeZones;
-  nsAutoPtr<NodePool::Enumerator> mCurrNode;
+  UniquePtr<NodePool::Enumerator> mCurrNode;
   uint32_t mNoteChildCount;
 
   struct PtrInfoCache : public MruCache<void*, PtrInfo*, PtrInfoCache, 491> {
@@ -2034,7 +2035,7 @@ void CCGraphBuilder::DoneAddingRoots() {
   // We've finished adding roots, and everything in the graph is a root.
   mGraph.mRootCount = mGraph.MapCount();
 
-  mCurrNode = new NodePool::Enumerator(mGraph.mNodes);
+  mCurrNode = MakeUnique<NodePool::Enumerator>(mGraph.mNodes);
 }
 
 MOZ_NEVER_INLINE bool CCGraphBuilder::BuildGraph(SliceBudget& aBudget) {
@@ -2490,9 +2491,9 @@ class SnowWhiteKiller : public TraceCallbacks {
     AppendJSObjectToPurpleBuffer(aObject->unbarrieredGet());
   }
 
-  virtual void Trace(JSObject** aObject, const char* aName,
+  virtual void Trace(nsWrapperCache* aWrapperCache, const char* aName,
                      void* aClosure) const override {
-    AppendJSObjectToPurpleBuffer(*aObject);
+    AppendJSObjectToPurpleBuffer(aWrapperCache->GetWrapperPreserveColor());
   }
 
   virtual void Trace(JS::TenuredHeap<JSObject*>* aObject, const char* aName,
@@ -3603,8 +3604,8 @@ void nsCycleCollector::BeginCollection(
   mResults.mMergedZones = mergeZones;
 
   MOZ_ASSERT(!mBuilder, "Forgot to clear mBuilder");
-  mBuilder =
-      new CCGraphBuilder(mGraph, mResults, mCCJSRuntime, mLogger, mergeZones);
+  mBuilder = MakeUnique<CCGraphBuilder>(mGraph, mResults, mCCJSRuntime, mLogger,
+                                        mergeZones);
   timeLog.Checkpoint("BeginCollection prepare graph builder");
 
   if (mCCJSRuntime) {
@@ -3815,8 +3816,6 @@ bool nsCycleCollector_init() {
   return sCollectorData.init();
 }
 
-static nsCycleCollector* gMainThreadCollector;
-
 void nsCycleCollector_startup() {
   if (sCollectorData.get()) {
     MOZ_CRASH();
@@ -3827,40 +3826,6 @@ void nsCycleCollector_startup() {
   data->mContext = nullptr;
 
   sCollectorData.set(data);
-
-  if (NS_IsMainThread()) {
-    MOZ_ASSERT(!gMainThreadCollector);
-    gMainThreadCollector = data->mCollector;
-  }
-}
-
-void nsCycleCollector_registerNonPrimaryContext(CycleCollectedJSContext* aCx) {
-  if (sCollectorData.get()) {
-    MOZ_CRASH();
-  }
-
-  MOZ_ASSERT(gMainThreadCollector);
-
-  CollectorData* data = new CollectorData;
-
-  data->mCollector = gMainThreadCollector;
-  data->mContext = aCx;
-
-  sCollectorData.set(data);
-}
-
-void nsCycleCollector_forgetNonPrimaryContext() {
-  CollectorData* data = sCollectorData.get();
-
-  // We should have started the cycle collector by now.
-  MOZ_ASSERT(data);
-  // And we shouldn't have already forgotten our context.
-  MOZ_ASSERT(data->mContext);
-  // We should not have shut down the cycle collector yet.
-  MOZ_ASSERT(data->mCollector);
-
-  delete data;
-  sCollectorData.set(nullptr);
 }
 
 void nsCycleCollector_setBeforeUnlinkCallback(CC_BeforeUnlinkCallback aCB) {
@@ -3993,9 +3958,6 @@ void nsCycleCollector_shutdown(bool aDoCollect) {
     MOZ_ASSERT(data->mCollector);
     AUTO_PROFILER_LABEL("nsCycleCollector_shutdown", OTHER);
 
-    if (gMainThreadCollector == data->mCollector) {
-      gMainThreadCollector = nullptr;
-    }
     data->mCollector->Shutdown(aDoCollect);
     data->mCollector = nullptr;
     if (data->mContext) {

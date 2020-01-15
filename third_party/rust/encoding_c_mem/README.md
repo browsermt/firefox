@@ -20,6 +20,25 @@ compiled with unwinding enabled.
 
 ## Release Notes
 
+### 0.2.5
+
+* Specify a `links` value in the Cargo manifest.
+* Emit an `include_dir` variable from build script so that other build scripts
+  depending on this crate can rely on it.
+
+### 0.2.4
+
+* Documentation-only fix.
+
+### 0.2.3
+
+* Documentation-only fix.
+
+### 0.2.2
+
+* Wrap `convert_utf8_to_utf16_without_replacement`, `utf8_latin1_up_to`,
+  and `str_latin1_up_to`.
+
 ### 0.2.1
 
 * Fix a typo in README.

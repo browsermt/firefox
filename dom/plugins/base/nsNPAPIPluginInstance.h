@@ -12,12 +12,10 @@
 #include "nsPIDOMWindow.h"
 #include "nsITimer.h"
 #include "nsIPluginInstanceOwner.h"
-#include "nsIURI.h"
-#include "nsIChannel.h"
 #include "nsHashKeys.h"
 #include <prinrval.h>
 #include "js/TypeDecls.h"
-#include "nsIAudioChannelAgent.h"
+#include "AudioChannelAgent.h"
 
 #include "mozilla/EventForwards.h"
 #include "mozilla/TimeStamp.h"
@@ -51,6 +49,10 @@ const NPDrawingModel kDefaultDrawingModel = NPDrawingModelCoreGraphics;
 #  endif
 #else
 const NPDrawingModel kDefaultDrawingModel = static_cast<NPDrawingModel>(0);
+#endif
+
+#if defined(OS_WIN)
+static const DWORD NPAPI_INVALID_WPARAM = 0xffffffff;
 #endif
 
 /**
@@ -244,6 +246,10 @@ class nsNPAPIPluginInstance final
 
   nsresult CreateAudioChannelAgentIfNeeded();
 
+  void NotifyAudibleStateChanged() const;
+
+  nsresult UpdateMutedIfNeeded();
+
   // The structure used to communicate between the plugin instance and
   // the browser.
   NPP_t mNPP;
@@ -297,8 +303,10 @@ class nsNPAPIPluginInstance final
   char** mCachedParamNames;
   char** mCachedParamValues;
 
-  nsCOMPtr<nsIAudioChannelAgent> mAudioChannelAgent;
-  bool mMuted;
+  RefPtr<mozilla::dom::AudioChannelAgent> mAudioChannelAgent;
+  bool mIsMuted = false;
+  bool mWindowMuted = false;
+  bool mWindowSuspended = false;
 };
 
 void NS_NotifyBeginPluginCall(NSPluginCallReentry aReentryState);

@@ -40,8 +40,8 @@ let whitelist = [
     isFromDevTools: false,
   },
   {
-    sourceName: /minimal-xul\.css$/i,
-    errorMessage: /Unknown property.*-moz-list-reversed/i,
+    sourceName: /(minimal-xul|xul)\.css$/i,
+    errorMessage: /Unknown pseudo-class.*-moz-/i,
     isFromDevTools: false,
   },
   // Reserved to UA sheets unless layout.css.overflow-clip-box.enabled flipped to true.
@@ -74,18 +74,6 @@ let whitelist = [
     errorMessage: /Property contained reference to invalid variable.*color/i,
     isFromDevTools: true,
   },
-  {
-    sourceName: /webide\/skin\/logs\.css$/i,
-    intermittent: true,
-    errorMessage: /Property contained reference to invalid variable.*color/i,
-    isFromDevTools: true,
-  },
-  {
-    sourceName: /webide\/skin\/logs\.css$/i,
-    intermittent: true,
-    errorMessage: /Property contained reference to invalid variable.*background/i,
-    isFromDevTools: true,
-  },
 ];
 
 if (
@@ -112,22 +100,6 @@ if (
     errorMessage: /Error in parsing value for \u2018line-height\u2019/iu,
     isFromDevTools: false,
   });
-}
-
-if (!Services.prefs.getBoolPref("full-screen-api.unprefix.enabled")) {
-  whitelist.push(
-    {
-      sourceName: /(?:res|gre-resources)\/(ua|html)\.css$/i,
-      errorMessage: /Unknown pseudo-class .*\bfullscreen\b/i,
-      isFromDevTools: false,
-    },
-    {
-      // PDFjs is futureproofing its pseudoselectors, and those rules are dropped.
-      sourceName: /web\/viewer\.css$/i,
-      errorMessage: /Unknown pseudo-class .*\bfullscreen\b/i,
-      isFromDevTools: false,
-    }
-  );
 }
 
 if (!Services.prefs.getBoolPref("layout.css.scrollbar-width.enabled")) {
@@ -429,7 +401,7 @@ add_task(async function checkAllTheCSS() {
 
   // filter out either the devtools paths or the non-devtools paths:
   let isDevtools = SimpleTest.harnessParameters.subsuite == "devtools";
-  let devtoolsPathBits = ["webide", "devtools"];
+  let devtoolsPathBits = ["devtools"];
   uris = uris.filter(
     uri => isDevtools == devtoolsPathBits.some(path => uri.spec.includes(path))
   );

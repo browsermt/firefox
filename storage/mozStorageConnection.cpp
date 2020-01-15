@@ -7,12 +7,11 @@
 #include <stdio.h>
 
 #include "nsError.h"
-#include "nsIMutableArray.h"
 #include "nsAutoPtr.h"
-#include "nsIMemoryReporter.h"
 #include "nsThreadUtils.h"
 #include "nsIFile.h"
 #include "nsIFileURL.h"
+#include "nsIXPConnect.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/Mutex.h"
 #include "mozilla/CondVar.h"
@@ -1939,6 +1938,19 @@ NS_IMETHODIMP
 Connection::SetDefaultTransactionType(int32_t aType) {
   NS_ENSURE_ARG_RANGE(aType, TRANSACTION_DEFERRED, TRANSACTION_EXCLUSIVE);
   mDefaultTransactionType = aType;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+Connection::GetVariableLimit(int32_t* _limit) {
+  if (!connectionReady()) {
+    return NS_ERROR_NOT_INITIALIZED;
+  }
+  int limit = ::sqlite3_limit(mDBConn, SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+  if (limit < 0) {
+    return NS_ERROR_UNEXPECTED;
+  }
+  *_limit = limit;
   return NS_OK;
 }
 

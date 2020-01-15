@@ -59,42 +59,6 @@ body {
 <script>
 'use strict';
 
-function getDocShellForObservingRestylesForWindow(aWindow) {
-  const docShell = SpecialPowers.wrap(aWindow).docShell;
-
-  docShell.recordProfileTimelineMarkers = true;
-  docShell.popProfileTimelineMarkers();
-
-  return docShell;
-}
-
-// Returns the animation restyle markers observed during |frameCount| refresh
-// driver ticks in this `window`.  This function is typically used to count the
-// number of restyles that take place as part of the style update that happens
-// on each refresh driver tick, as opposed to synchronous restyles triggered by
-// script.
-//
-// For the latter observeAnimSyncStyling (below) should be used.
-function observeStyling(frameCount, onFrame) {
-  return observeStylingInTargetWindow(window, frameCount, onFrame);
-}
-
-// As with observeStyling but applied to target window |aWindow|.
-function observeStylingInTargetWindow(aWindow, aFrameCount, aOnFrame) {
-  const docShell = getDocShellForObservingRestylesForWindow(aWindow);
-
-  return new Promise(resolve => {
-    return waitForAnimationFrames(aFrameCount, aOnFrame, aWindow).then(() => {
-      const markers = docShell.popProfileTimelineMarkers();
-      docShell.recordProfileTimelineMarkers = false;
-      const stylingMarkers = markers.filter((marker, index) => {
-        return marker.name == 'Styles' && marker.isAnimationOnly;
-      });
-      resolve(stylingMarkers);
-    });
-  });
-}
-
 // Returns observed animation restyle markers when |funcToMakeRestyleHappen|
 // is called.
 // NOTE: This function is synchronous version of the above observeStyling().
@@ -365,8 +329,6 @@ waitForAllPaints(() => {
 
   add_task(
     async function restyling_transform_animations_in_scrolled_out_element() {
-      await SpecialPowers.pushPrefEnv({ set: [["ui.showHideScrollbars", 1]] });
-
       // Make sure we start from the state right after requestAnimationFrame.
       await waitForFrame();
 
@@ -1578,8 +1540,6 @@ waitForAllPaints(() => {
 
   add_task(
     async function no_overflow_transform_animations_in_scrollable_element() {
-      await SpecialPowers.pushPrefEnv({ set: [["ui.showHideScrollbars", 1]] });
-
       const parentElement = addDiv(null,
         { style: 'overflow-y: scroll; height: 100px;' });
       const div = addDiv(null);
@@ -1923,11 +1883,9 @@ waitForAllPaints(() => {
     await ensureElementRemoval(div);
   });
 
-  // Tests that transform animations on a large size frame doesn't flush layout at all.
-  //
-  // With WebRender, the large size frame could run on compositor.
-  // Without WebRender, the large size frame is not able to run on the compositor
-  // due to layout restrictions.
+  // Tests that transform animations are not able to run on the compositor due
+  // to layout restrictions (e.g. animations on a large size frame) doesn't
+  // flush layout at all.
   add_task(async function flush_layout_for_transform_animations() {
     // Set layout.animation.prerender.partial to disallow transform animations
     // on large frames to be sent to the compositor.
@@ -1947,11 +1905,7 @@ waitForAllPaints(() => {
        'Flush layout is needed for the appended div');
     await waitForAnimationReadyToRestyle(animation);
 
-    if (isWebRender) {
-      ok(SpecialPowers.wrap(animation).isRunningOnCompositor);
-    } else {
-      ok(!SpecialPowers.wrap(animation).isRunningOnCompositor);
-    }
+    ok(!SpecialPowers.wrap(animation).isRunningOnCompositor);
     ok(!SpecialPowers.DOMWindowUtils.needsFlush(FLUSH_LAYOUT),
        'No further flush layout needed');
 

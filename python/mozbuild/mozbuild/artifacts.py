@@ -64,6 +64,7 @@ from mozbuild.util import (
     ensureParentDir,
     FileAvoidWrite,
     mkdir,
+    ensure_subprocess_env,
 )
 import mozinstall
 from mozpack.files import (
@@ -101,7 +102,6 @@ class ArtifactJob(object):
     candidate_trees = [
         'mozilla-central',
         'integration/autoland',
-        'integration/mozilla-inbound',
         'releases/mozilla-beta',
         'releases/mozilla-release',
     ]
@@ -114,6 +114,7 @@ class ArtifactJob(object):
     # to dist/.
     test_artifact_patterns = {
         ('bin/BadCertAndPinningServer', ('bin', 'bin')),
+        ('bin/DelegatedCredentialsServer', ('bin', 'bin')),
         ('bin/GenerateOCSPResponse', ('bin', 'bin')),
         ('bin/OCSPStaplingServer', ('bin', 'bin')),
         ('bin/SanctionsTestServer', ('bin', 'bin')),
@@ -232,6 +233,15 @@ class ArtifactJob(object):
                     writer.add(destpath.encode('utf-8'), reader[filename], mode=mode)
                     added_entry = True
                     break
+
+                if filename.endswith('.ini'):
+                    # The artifact build writes test .ini files into the object
+                    # directory; they don't come from the upstream test archive.
+                    self.log(logging.INFO, 'artifact',
+                             {'filename': filename},
+                             'Skipping test INI file {filename}')
+                    continue
+
                 for files_entry in OBJDIR_TEST_FILES.values():
                     origin_pattern = files_entry['pattern']
                     leaf_filename = filename
@@ -269,6 +279,15 @@ class ArtifactJob(object):
                         writer.add(destpath.encode('utf-8'), entry.open(), mode=mode)
                         added_entry = True
                         break
+
+                    if filename.endswith('.ini'):
+                        # The artifact build writes test .ini files into the object
+                        # directory; they don't come from the upstream test archive.
+                        self.log(logging.INFO, 'artifact',
+                                 {'filename': filename},
+                                 'Skipping test INI file {filename}')
+                        continue
+
                     for files_entry in OBJDIR_TEST_FILES.values():
                         origin_pattern = files_entry['pattern']
                         leaf_filename = filename
@@ -310,14 +329,26 @@ class ArtifactJob(object):
             destpath = mozpath.join('host/bin', orig_basename)
             writer.add(destpath.encode('utf-8'), open(filename, 'rb'))
 
+    @staticmethod
+    def transform_job(job, tree):
+        # PGO builds are now known as "shippable" for all platforms but Android.
+        # For macOS and linux32 shippable builds are equivalent to opt builds and
+        # replace them on some trees. Additionally, we no longer produce win64
+        # opt builds on integration branches.
+        if job.endswith('-pgo') or job in ('macosx64-opt', 'linux-opt',
+                                           'win64-opt'):
+            tree += '.shippable'
+        if job.endswith('-pgo'):
+            job = job.replace('-pgo', '-opt')
+
+        return job, tree
+
 
 class AndroidArtifactJob(ArtifactJob):
-    package_re = r'public/build/target\.apk'
+    package_re = r'public/build/geckoview_example\.apk'
     product = 'mobile'
 
     package_artifact_patterns = {
-        'application.ini',
-        'platform.ini',
         '**/*.so',
     }
 
@@ -372,20 +403,22 @@ class AndroidArtifactJob(ArtifactJob):
                 writer.add(destpath.encode('utf-8'),
                            gzip.GzipFile(fileobj=reader[filename].uncompressed_data))
 
+    @staticmethod
+    def transform_job(job, tree):
+        return job, tree
+
 
 class LinuxArtifactJob(ArtifactJob):
     package_re = r'public/build/target\.tar\.bz2'
     product = 'firefox'
 
     _package_artifact_patterns = {
-        '{product}/application.ini',
         '{product}/crashreporter',
         '{product}/dependentlibs.list',
         '{product}/{product}',
         '{product}/{product}-bin',
         '{product}/minidump-analyzer',
         '{product}/pingsender',
-        '{product}/platform.ini',
         '{product}/plugin-container',
         '{product}/updater',
         '{product}/**/*.so',
@@ -437,13 +470,13 @@ class MacArtifactJob(ArtifactJob):
         'libmozglue.dylib',
         'libnss3.dylib',
         'libnssckbi.dylib',
-        'libnssdbm3.dylib',
         'libplugin_child_interpose.dylib',
         # 'libreplace_jemalloc.dylib',
         # 'libreplace_malloc.dylib',
         'libmozavutil.dylib',
         'libmozavcodec.dylib',
         'libsoftokn3.dylib',
+        'minidump-analyzer',
         'pingsender',
         'plugin-container.app/Contents/MacOS/plugin-container',
         'updater.app/Contents/MacOS/org.mozilla.updater',
@@ -488,9 +521,6 @@ class MacArtifactJob(ArtifactJob):
 
             # These get copied into dist/bin with the path, so "root/a/b/c" -> "dist/bin/a/b/c".
             paths_keep_path = [
-                ('Contents/MacOS', [
-                    'crashreporter.app/Contents/MacOS/minidump-analyzer',
-                ]),
                 ('Contents/Resources', [
                     'browser/components/libbrowsercomps.dylib',
                     'dependentlibs.list',
@@ -539,8 +569,6 @@ class WinArtifactJob(ArtifactJob):
 
     _package_artifact_patterns = {
         '{product}/dependentlibs.list',
-        '{product}/platform.ini',
-        '{product}/application.ini',
         '{product}/**/*.dll',
         '{product}/*.exe',
         '{product}/*.tlb',
@@ -555,6 +583,7 @@ class WinArtifactJob(ArtifactJob):
     # These are a subset of TEST_HARNESS_BINS in testing/mochitest/Makefile.in.
     test_artifact_patterns = {
         ('bin/BadCertAndPinningServer.exe', ('bin', 'bin')),
+        ('bin/DelegatedCredentialsServer.exe', ('bin', 'bin')),
         ('bin/GenerateOCSPResponse.exe', ('bin', 'bin')),
         ('bin/OCSPStaplingServer.exe', ('bin', 'bin')),
         ('bin/SanctionsTestServer.exe', ('bin', 'bin')),
@@ -600,6 +629,10 @@ class ThunderbirdMixin(object):
         'comm-central',
     ]
     try_tree = 'try-comm-central'
+
+    @staticmethod
+    def transform_job(job, tree):
+        return job, tree
 
 
 class LinuxThunderbirdArtifactJob(ThunderbirdMixin, LinuxArtifactJob):
@@ -779,20 +812,11 @@ class TaskCache(CacheManager):
     @cachedmethod(operator.attrgetter('_cache'))
     def artifacts(self, tree, job, artifact_job_class, rev):
         # Grab the second part of the repo name, which is generally how things
-        # are indexed. Eg: 'integration/mozilla-inbound' is indexed as
-        # 'mozilla-inbound'
+        # are indexed. Eg: 'integration/autoland' is indexed as
+        # 'autoland'
         tree = tree.split('/')[1] if '/' in tree else tree
 
-        # PGO builds are now known as "shippable" for all platforms but Android.
-        # For macOS and linux32 shippable builds are equivalent to opt builds and
-        # replace them on some trees. Additionally, we no longer produce win64
-        # opt builds on integration branches.
-        if not job.startswith('android-'):
-            if job.endswith('-pgo') or job in ('macosx64-opt', 'linux-opt',
-                                               'win64-opt'):
-                tree += '.shippable'
-            if job.endswith('-pgo'):
-                job = job.replace('-pgo', '-opt')
+        job, tree = artifact_job_class.transform_job(job, tree)
 
         namespace = '{trust_domain}.v2.{tree}.revision.{rev}.{product}.{job}'.format(
             trust_domain=artifact_job_class.trust_domain,
@@ -864,6 +888,13 @@ class Artifacts(object):
     def log(self, *args, **kwargs):
         if self._log:
             self._log(*args, **kwargs)
+
+    def run_hg(self, *args, **kwargs):
+        env = kwargs.get('env', {})
+        env['HGPLAIN'] = '1'
+        kwargs['env'] = ensure_subprocess_env(env)
+        return subprocess.check_output([self._hg] + list(args),
+                                       **kwargs)
 
     def _guess_artifact_job(self):
         # Add the "-debug" suffix to the guessed artifact job name
@@ -971,12 +1002,10 @@ class Artifacts(object):
 
         # Mercurial updated the ordering of "last" in 4.3. We use revision
         # numbers to order here to accommodate multiple versions of hg.
-        last_revs = subprocess.check_output([
-            self._hg, 'log',
-            '--template', '{rev}:{node}\n',
-            '-r', 'last(public() and ::., {num})'.format(
-                num=NUM_REVISIONS_TO_QUERY)
-        ], cwd=self._topsrcdir).splitlines()
+        last_revs = self.run_hg('log', '--template', '{rev}:{node}\n',
+                                '-r', 'last(public() and ::., {num})'.format(
+                                    num=NUM_REVISIONS_TO_QUERY),
+                                cwd=self._topsrcdir).splitlines()
 
         if len(last_revs) == 0:
             raise Exception("""\
@@ -1044,9 +1073,6 @@ see https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide/Source_Code
 
         urls = []
         for artifact_name in self._artifact_job.find_candidate_artifacts(artifacts):
-            # We can easily extract the task ID from the URL.  We can't easily
-            # extract the build ID; we use the .ini files embedded in the
-            # downloaded artifact for this.
             url = get_artifact_url(taskId, artifact_name)
             urls.append(url)
         if urls:
@@ -1106,8 +1132,6 @@ see https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide/Source_Code
 
         with zipfile.ZipFile(processed_filename) as zf:
             for info in zf.infolist():
-                if info.filename.endswith('.ini'):
-                    continue
                 n = mozpath.join(distdir, info.filename)
                 fh = FileAvoidWrite(n, readmode='rb')
                 shutil.copyfileobj(zf.open(info), fh)
@@ -1168,8 +1192,8 @@ see https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide/Source_Code
         revision = None
         try:
             if self._hg:
-                revision = subprocess.check_output([self._hg, 'log', '--template', '{node}\n',
-                                                    '-r', revset], cwd=self._topsrcdir).strip()
+                revision = self.run_hg('log', '--template', '{node}\n', '-r', revset,
+                                       cwd=self._topsrcdir).strip()
             elif self._git:
                 revset = subprocess.check_output([
                     self._git, 'rev-parse', '%s^{commit}' % revset],
@@ -1211,9 +1235,6 @@ see https://developer.mozilla.org/en-US/docs/Mozilla/Developer_guide/Source_Code
 
         urls = []
         for artifact_name in self._artifact_job.find_candidate_artifacts(artifacts):
-            # We can easily extract the task ID from the URL.  We can't easily
-            # extract the build ID; we use the .ini files embedded in the
-            # downloaded artifact for this.
             url = get_artifact_url(taskId, artifact_name)
             urls.append(url)
         if not urls:

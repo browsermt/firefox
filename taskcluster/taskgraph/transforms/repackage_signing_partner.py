@@ -13,7 +13,6 @@ from taskgraph.util.attributes import copy_attributes_from_dependent_job
 from taskgraph.util.partners import check_if_partners_enabled, get_partner_config_by_kind
 from taskgraph.util.scriptworker import (
     get_signing_cert_scope_per_platform,
-    get_worker_type_for_scope,
 )
 from taskgraph.util.taskcluster import get_artifact_path
 from taskgraph.transforms.task import task_description_schema
@@ -81,7 +80,7 @@ def make_repackage_signing_description(config, jobs):
                 "paths": [
                     get_artifact_path(dep_job, "{}/target.installer.exe".format(repack_id)),
                 ],
-                "formats": ["sha2signcode", "autograph_gpg"]
+                "formats": ["autograph_authenticode", "autograph_gpg"]
             }]
 
             partner_config = get_partner_config_by_kind(config, config.kind)
@@ -96,7 +95,7 @@ def make_repackage_signing_description(config, jobs):
                         get_artifact_path(dep_job, "{}/target.stub-installer.exe".format(
                             repack_id)),
                     ],
-                    "formats": ["sha2signcode", "autograph_gpg"]
+                    "formats": ["autograph_authenticode", "autograph_gpg"]
                 })
         elif 'mac' in build_platform:
             upstream_artifacts = [{
@@ -120,7 +119,7 @@ def make_repackage_signing_description(config, jobs):
         task = {
             'label': label,
             'description': description,
-            'worker-type': get_worker_type_for_scope(config, signing_cert_scope),
+            'worker-type': 'linux-signing',
             'worker': {'implementation': 'scriptworker-signing',
                        'upstream-artifacts': upstream_artifacts,
                        'max-run-time': 3600},

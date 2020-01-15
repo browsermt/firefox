@@ -158,21 +158,41 @@ void MacroAssembler::mulDoublePtr(ImmPtr imm, Register temp,
 void MacroAssembler::quotient32(Register rhs, Register srcDest,
                                 bool isUnsigned) {
   if (isUnsigned) {
+#ifdef MIPSR6
+    as_divu(srcDest, srcDest, rhs);
+#else
     as_divu(srcDest, rhs);
+#endif
   } else {
+#ifdef MIPSR6
+    as_div(srcDest, srcDest, rhs);
+#else
     as_div(srcDest, rhs);
+#endif
   }
+#ifndef MIPSR6
   as_mflo(srcDest);
+#endif
 }
 
 void MacroAssembler::remainder32(Register rhs, Register srcDest,
                                  bool isUnsigned) {
   if (isUnsigned) {
+#ifdef MIPSR6
+    as_modu(srcDest, srcDest, rhs);
+#else
     as_divu(srcDest, rhs);
+#endif
   } else {
+#ifdef MIPSR6
+    as_mod(srcDest, srcDest, rhs);
+#else
     as_div(srcDest, rhs);
+#endif
   }
+#ifndef MIPSR6
   as_mfhi(srcDest);
+#endif
 }
 
 void MacroAssembler::divFloat32(FloatRegister src, FloatRegister dest) {
@@ -452,7 +472,7 @@ void MacroAssembler::branchFloat(DoubleCondition cond, FloatRegister lhs,
 
 void MacroAssembler::branchTruncateFloat32ToInt32(FloatRegister src,
                                                   Register dest, Label* fail) {
-  MOZ_CRASH();
+  convertFloat32ToInt32(src, dest, fail, false);
 }
 
 void MacroAssembler::branchDouble(DoubleCondition cond, FloatRegister lhs,
@@ -462,7 +482,7 @@ void MacroAssembler::branchDouble(DoubleCondition cond, FloatRegister lhs,
 
 void MacroAssembler::branchTruncateDoubleToInt32(FloatRegister src,
                                                  Register dest, Label* fail) {
-  MOZ_CRASH();
+  convertDoubleToInt32(src, dest, fail, false);
 }
 
 template <typename T>
@@ -490,6 +510,8 @@ void MacroAssembler::branchSub32(Condition cond, T src, Register dest,
       break;
     case NonZero:
     case Zero:
+    case Signed:
+    case NotSigned:
       ma_subu(dest, src);
       ma_b(dest, dest, overflow, cond);
       break;
@@ -694,6 +716,13 @@ void MacroAssembler::branchTestSymbol(Condition cond, const BaseIndex& address,
   branchTestSymbol(cond, scratch2, label);
 }
 
+void MacroAssembler::branchTestBigInt(Condition cond, const Address& address,
+                                      Label* label) {
+  SecondScratchRegisterScope scratch2(*this);
+  extractTag(address, scratch2);
+  branchTestBigInt(cond, scratch2, label);
+}
+
 void MacroAssembler::branchTestNull(Condition cond, Register tag,
                                     Label* label) {
   MOZ_ASSERT(cond == Equal || cond == NotEqual);
@@ -788,7 +817,13 @@ void MacroAssembler::cmp32Move32(Condition cond, Register lhs, Register rhs,
   Register scratch = ScratchRegister;
   MOZ_ASSERT(src != scratch && dest != scratch);
   cmp32Set(cond, lhs, rhs, scratch);
+#ifdef MIPSR6
+  as_selnez(src, src, scratch);
+  as_seleqz(dest, dest, scratch);
+  as_or(dest, dest, src);
+#else
   as_movn(dest, src, scratch);
+#endif
 }
 
 void MacroAssembler::cmp32MovePtr(Condition cond, Register lhs, Imm32 rhs,
@@ -796,7 +831,13 @@ void MacroAssembler::cmp32MovePtr(Condition cond, Register lhs, Imm32 rhs,
   Register scratch = ScratchRegister;
   MOZ_ASSERT(src != scratch && dest != scratch);
   cmp32Set(cond, lhs, rhs, scratch);
+#ifdef MIPSR6
+  as_selnez(src, src, scratch);
+  as_seleqz(dest, dest, scratch);
+  as_or(dest, dest, src);
+#else
   as_movn(dest, src, scratch);
+#endif
 }
 
 void MacroAssembler::cmp32Move32(Condition cond, Register lhs,
@@ -811,14 +852,26 @@ void MacroAssembler::cmp32Move32(Condition cond, Register lhs,
 void MacroAssembler::cmp32Load32(Condition cond, Register lhs,
                                  const Address& rhs, const Address& src,
                                  Register dest) {
-  // This is never used, but must be present to facilitate linking on mips(64).
-  MOZ_CRASH("No known use cases");
+  Label skip;
+  branch32(cond, rhs, lhs, &skip);
+  load32(src, dest);
+  bind(&skip);
 }
 
 void MacroAssembler::cmp32Load32(Condition cond, Register lhs, Register rhs,
                                  const Address& src, Register dest) {
-  // This is never used, but must be present to facilitate linking on mips(64).
-  MOZ_CRASH("No known use cases");
+  Label skip;
+  branch32(cond, rhs, lhs, &skip);
+  load32(src, dest);
+  bind(&skip);
+}
+
+void MacroAssembler::cmp32LoadPtr(Condition cond, const Address& lhs, Imm32 rhs,
+                                  const Address& src, Register dest) {
+  Label skip;
+  branch32(Assembler::InvertCondition(cond), lhs, rhs, &skip);
+  loadPtr(src, dest);
+  bind(&skip);
 }
 
 void MacroAssembler::test32LoadPtr(Condition cond, const Address& addr,
@@ -899,12 +952,21 @@ void MacroAssembler::memoryBarrier(MemoryBarrierBits barrier) {
 void MacroAssembler::clampIntToUint8(Register reg) {
   // If reg is < 0, then we want to clamp to 0.
   as_slti(ScratchRegister, reg, 0);
+#ifdef MIPSR6
+  as_seleqz(reg, reg, ScratchRegister);
+#else
   as_movn(reg, zero, ScratchRegister);
-
+#endif
   // If reg is >= 255, then we want to clamp to 255.
   ma_li(SecondScratchReg, Imm32(255));
   as_slti(ScratchRegister, reg, 255);
+#ifdef MIPSR6
+  as_seleqz(SecondScratchReg, SecondScratchReg, ScratchRegister);
+  as_selnez(reg, reg, ScratchRegister);
+  as_or(reg, reg, SecondScratchReg);
+#else
   as_movz(reg, SecondScratchReg, ScratchRegister);
+#endif
 }
 
 //}}} check_macroassembler_style

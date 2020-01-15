@@ -2,8 +2,6 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-from __future__ import absolute_import, print_function
-
 import os
 
 from mozlint import result
@@ -37,7 +35,7 @@ def load_valid_license():
     with open(license_list) as f:
         l = f.readlines()
         # Remove the empty lines
-        return filter(bool, [x.replace('\n', '') for x in l])
+        return list(filter(bool, [x.replace('\n', '') for x in l]))
 
 
 def is_valid_license(licenses, filename):
@@ -45,15 +43,14 @@ def is_valid_license(licenses, filename):
     From a given file, check if we can find the license patterns
     in the X first lines of the file
     """
-    nb_lines = 10
-    with open(filename) as myfile:
-        head = myfile.readlines(nb_lines)
+    with open(filename, 'r', errors='replace') as myfile:
+        contents = myfile.read()
         # Empty files don't need a license.
-        if not head:
+        if not contents:
             return True
 
         for l in licenses:
-            if l.lower().strip() in ''.join(head).lower():
+            if l.lower().strip() in contents.lower():
                 return True
     return False
 
@@ -85,6 +82,9 @@ def is_test(f):
     """
     is the file a test or not?
     """
+    if "lint/test/" in f:
+        # For the unit tests
+        return False
     return ("/test" in f or "/gtest" in f or "/crashtest" in f or "/mochitest" in f
             or "/reftest" in f or "/imptest" in f or "/androidTest" in f
             or "/jit-test/" in f or "jsapi-tests/" in f)
@@ -104,7 +104,7 @@ def fix_me(filename):
         license_template = TEMPLATES['public_domain_license']
         test = True
 
-    if ext in ['.cpp', '.c', '.cc', '.h', '.m', '.mm', '.rs', '.js', '.jsm', '.jsx']:
+    if ext in ['.cpp', '.c', '.cc', '.h', '.m', '.mm', '.rs', '.js', '.jsm', '.jsx', '.css']:
         for i, l in enumerate(license_template):
             start = " "
             end = ""
@@ -119,13 +119,13 @@ def fix_me(filename):
         add_header(filename, license)
         return
 
-    if ext in ['.py'] or filename.endswith(".inc.xul"):
+    if ext in ['.py', '.ftl', '.properties'] or filename.endswith(".inc.xul"):
         for l in license_template:
             license.append("# " + l.strip() + "\n")
         add_header(filename, license)
         return
 
-    if ext in ['.xml', '.xul', '.html', '.xhtml']:
+    if ext in ['.xml', '.xul', '.html', '.xhtml', '.dtd', '.svg']:
         for i, l in enumerate(license_template):
             start = "   - "
             end = ""
@@ -135,7 +135,11 @@ def fix_me(filename):
             if i == 2 or (i == 1 and test):
                 # Last line, we end by -->
                 end = " -->"
-            license.append(start + l.strip() + end + "\n")
+            license.append(start + l.strip() + end)
+            if ext != '.svg' or end == "":
+                # When dealing with an svg, we should not have a space between
+                # the license and the content
+                license.append("\n")
         add_header(filename, license)
         return
 

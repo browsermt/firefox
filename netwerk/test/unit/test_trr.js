@@ -1,5 +1,8 @@
 "use strict";
 
+const { NodeServer, HttpServer } = ChromeUtils.import(
+  "resource://testing-common/httpd.js"
+);
 const dns = Cc["@mozilla.org/network/dns-service;1"].getService(
   Ci.nsIDNSService
 );
@@ -24,7 +27,7 @@ async function SetParentalControlEnabled(aEnabled) {
   MockRegistrar.unregister(cid);
 }
 
-add_task(function setup() {
+function setup() {
   dump("start!\n");
 
   let env = Cc["@mozilla.org/process/environment;1"].getService(
@@ -57,6 +60,9 @@ add_task(function setup() {
   Services.prefs.setBoolPref("network.trr.wait-for-A-and-AAAA", true);
   // don't confirm that TRR is working, just go!
   Services.prefs.setCharPref("network.trr.confirmationNS", "skip");
+  // some tests rely on the cache not being cleared on pref change.
+  // we specifically test that this works
+  Services.prefs.setBoolPref("network.trr.clear-cache-on-pref-change", false);
 
   // The moz-http2 cert is for foo.example.com and is signed by http2-ca.pem
   // so add that cert to the trust list as a signing cert.  // the foo.example.com domain name.
@@ -66,8 +72,9 @@ add_task(function setup() {
   addCertFromFile(certdb, "http2-ca.pem", "CTu,u,u");
 
   SetParentalControlEnabled(false);
-});
+}
 
+setup();
 registerCleanupFunction(() => {
   Services.prefs.clearUserPref("network.trr.mode");
   Services.prefs.clearUserPref("network.trr.uri");
@@ -78,12 +85,15 @@ registerCleanupFunction(() => {
   Services.prefs.clearUserPref("network.trr.confirmationNS");
   Services.prefs.clearUserPref("network.trr.bootstrapAddress");
   Services.prefs.clearUserPref("network.trr.blacklist-duration");
-  Services.prefs.clearUserPref("network.trr.request-timeout");
+  Services.prefs.clearUserPref("network.trr.request_timeout_ms");
+  Services.prefs.clearUserPref("network.trr.request_timeout_mode_trronly_ms");
   Services.prefs.clearUserPref("network.trr.disable-ECS");
   Services.prefs.clearUserPref("network.trr.early-AAAA");
   Services.prefs.clearUserPref("network.trr.skip-AAAA-when-not-supported");
   Services.prefs.clearUserPref("network.trr.wait-for-A-and-AAAA");
   Services.prefs.clearUserPref("network.trr.excluded-domains");
+  Services.prefs.clearUserPref("network.trr.builtin-excluded-domains");
+  Services.prefs.clearUserPref("network.trr.clear-cache-on-pref-change");
   Services.prefs.clearUserPref("captivedetect.canonicalURL");
 
   Services.prefs.clearUserPref("network.http.spdy.enabled");
@@ -91,6 +101,15 @@ registerCleanupFunction(() => {
   Services.prefs.clearUserPref("network.dns.localDomains");
   Services.prefs.clearUserPref("network.dns.native-is-localhost");
 });
+
+// This is an IP that is local, so we don't crash when connecting to it,
+// but also connecting to it fails, so we attempt to retry with regular DNS.
+const BAD_IP = (() => {
+  if (mozinfo.os == "linux") {
+    return "127.9.9.9";
+  }
+  return "0.0.0.0";
+})();
 
 class DNSListener {
   constructor(name, expectedAnswer, expectedSuccess = true) {
@@ -110,7 +129,10 @@ class DNSListener {
   }
 
   onLookupComplete(inRequest, inRecord, inStatus) {
-    Assert.ok(inRequest == this.request);
+    Assert.ok(
+      inRequest == this.request,
+      "Checking that this is the correct callback"
+    );
 
     // If we don't expect success here, just resolve and the caller will
     // decide what to do with the results.
@@ -119,9 +141,13 @@ class DNSListener {
       return;
     }
 
-    Assert.equal(inStatus, Cr.NS_OK);
+    Assert.equal(inStatus, Cr.NS_OK, "Checking status");
     let answer = inRecord.getNextAddrAsString();
-    Assert.equal(answer, this.expectedAnswer);
+    Assert.equal(
+      answer,
+      this.expectedAnswer,
+      `Checking result for ${this.name}`
+    );
     this.resolve([inRequest, inRecord, inStatus]);
   }
 
@@ -137,6 +163,138 @@ class DNSListener {
     return this.promise.then.apply(this.promise, arguments);
   }
 }
+add_task(async function test0_nodeExecute() {
+  // This test checks that moz-http2.js running in node is working.
+  // This should always be the first test in this file (except for setup)
+  // otherwise we may encounter random failures when the http2 server is down.
+
+  await NodeServer.execute("bad_id", `"hello"`)
+    .then(() => ok(false, "expecting to throw"))
+    .catch(e => equal(e.message, "Error: could not find id"));
+});
+
+function makeChan(url, mode) {
+  let chan = NetUtil.newChannel({
+    uri: url,
+    loadUsingSystemPrincipal: true,
+  }).QueryInterface(Ci.nsIHttpChannel);
+  chan.setTRRMode(mode);
+  return chan;
+}
+
+add_task(
+  { skip_if: () => mozinfo.os == "mac" },
+  async function test_trr_flags() {
+    let httpserv = new HttpServer();
+    httpserv.registerPathHandler("/", function handler(metadata, response) {
+      let content = "ok";
+      response.setHeader("Content-Length", `${content.length}`);
+      response.bodyOutputStream.write(content, content.length);
+    });
+    httpserv.start(-1);
+    const URL = `http://example.com:${httpserv.identity.primaryPort}/`;
+
+    dns.clearCache(true);
+    Services.prefs.setCharPref(
+      "network.trr.uri",
+      `https://localhost:${h2Port}/doh?responseIP=${BAD_IP}`
+    );
+
+    Services.prefs.setIntPref("network.trr.mode", 0);
+    dns.clearCache(true);
+    let chan = makeChan(URL, Ci.nsIRequest.TRR_DEFAULT_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    equal(chan.getTRRMode(), Ci.nsIRequest.TRR_DEFAULT_MODE);
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DISABLED_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    equal(chan.getTRRMode(), Ci.nsIRequest.TRR_DISABLED_MODE);
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_FIRST_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    equal(chan.getTRRMode(), Ci.nsIRequest.TRR_FIRST_MODE);
+    dns.clearCache(true);
+    chan = makeChan(
+      `http://example.com:${httpserv.identity.primaryPort}/`,
+      Ci.nsIRequest.TRR_ONLY_MODE
+    );
+    // Should fail as it tries to connect to local but unavailable IP
+    await new Promise(resolve =>
+      chan.asyncOpen(new ChannelListener(resolve, null, CL_EXPECT_FAILURE))
+    );
+    equal(chan.getTRRMode(), Ci.nsIRequest.TRR_ONLY_MODE);
+
+    dns.clearCache(true);
+    Services.prefs.setCharPref(
+      "network.trr.uri",
+      `https://localhost:${h2Port}/doh?responseIP=${BAD_IP}`
+    );
+    Services.prefs.setIntPref("network.trr.mode", 2);
+
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DEFAULT_MODE);
+    // Does get the IP from TRR, but failure means it falls back to DNS.
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DISABLED_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    // Does get the IP from TRR, but failure means it falls back to DNS.
+    chan = makeChan(URL, Ci.nsIRequest.TRR_FIRST_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_ONLY_MODE);
+    await new Promise(resolve =>
+      chan.asyncOpen(new ChannelListener(resolve, null, CL_EXPECT_FAILURE))
+    );
+
+    dns.clearCache(true);
+    Services.prefs.setCharPref(
+      "network.trr.uri",
+      `https://localhost:${h2Port}/doh?responseIP=${BAD_IP}`
+    );
+    Services.prefs.setIntPref("network.trr.mode", 3);
+
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DEFAULT_MODE);
+    await new Promise(resolve =>
+      chan.asyncOpen(new ChannelListener(resolve, null, CL_EXPECT_FAILURE))
+    );
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DISABLED_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_FIRST_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_ONLY_MODE);
+    await new Promise(resolve =>
+      chan.asyncOpen(new ChannelListener(resolve, null, CL_EXPECT_FAILURE))
+    );
+
+    dns.clearCache(true);
+    Services.prefs.setIntPref("network.trr.mode", 5);
+    Services.prefs.setCharPref(
+      "network.trr.uri",
+      `https://localhost:${h2Port}/doh?responseIP=1.1.1.1`
+    );
+
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DEFAULT_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_DISABLED_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_FIRST_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+    dns.clearCache(true);
+    chan = makeChan(URL, Ci.nsIRequest.TRR_ONLY_MODE);
+    await new Promise(resolve => chan.asyncOpen(new ChannelListener(resolve)));
+
+    await new Promise(resolve => httpserv.stop(resolve));
+  }
+);
 
 // verify basic A record
 add_task(async function test1() {
@@ -233,9 +391,9 @@ add_task(async function test5b() {
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/404`
   );
-  dump("test5b - resolve push.example.now please\n");
+  dump("test5b - resolve push.example.org please\n");
 
-  await new DNSListener("push.example.com", "2018::2018");
+  await new DNSListener("push.example.org", "2018::2018");
 });
 
 // verify AAAA entry
@@ -478,7 +636,7 @@ add_task(async function test11() {
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/dns-750ms`
   );
-  Services.prefs.setIntPref("network.trr.request-timeout", 10);
+  Services.prefs.setIntPref("network.trr.request_timeout_mode_trronly_ms", 10);
   let [, , inStatus] = await new DNSListener(
     "test11.example.com",
     undefined,
@@ -494,11 +652,13 @@ add_task(async function test11() {
 add_task(async function test12() {
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 2); // TRR-first
+  Services.prefs.setIntPref("network.trr.request_timeout_ms", 10);
   Services.prefs.setCharPref(
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/doh?responseIP=none`
   );
-  Services.prefs.clearUserPref("network.trr.request-timeout");
+  Services.prefs.clearUserPref("network.trr.request_timeout_ms");
+  Services.prefs.clearUserPref("network.trr.request_timeout_mode_trronly_ms");
   await new DNSListener("confirm.example.com", "127.0.0.1");
 });
 
@@ -539,7 +699,8 @@ add_task(async function test15() {
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/dns-750ms`
   );
-  Services.prefs.setIntPref("network.trr.request-timeout", 10);
+  Services.prefs.setIntPref("network.trr.request_timeout_ms", 10);
+  Services.prefs.setIntPref("network.trr.request_timeout_mode_trronly_ms", 10);
   await new DNSListener("test15.example.com", "127.0.0.1");
 
   Services.prefs.setIntPref("network.trr.mode", 4); // MODE_RESERVED4. Interpreted as TRR off.
@@ -558,7 +719,8 @@ add_task(async function test16() {
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/dns-750ms`
   );
-  Services.prefs.setIntPref("network.trr.request-timeout", 10);
+  Services.prefs.setIntPref("network.trr.request_timeout_ms", 10);
+  Services.prefs.setIntPref("network.trr.request_timeout_mode_trronly_ms", 10);
   await new DNSListener("test16.example.com", "127.0.0.1");
 });
 
@@ -570,7 +732,8 @@ add_task(async function test17() {
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/dns-cname`
   );
-  Services.prefs.clearUserPref("network.trr.request-timeout");
+  Services.prefs.clearUserPref("network.trr.request_timeout_ms");
+  Services.prefs.clearUserPref("network.trr.request_timeout_mode_trronly_ms");
   await new DNSListener("cname.example.com", "99.88.77.66");
 });
 
@@ -676,6 +839,7 @@ add_task(async function test24() {
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 2); // TRR-first
   Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  Services.prefs.setCharPref("network.trr.builtin-excluded-domains", "");
   Services.prefs.setCharPref(
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
@@ -717,15 +881,61 @@ add_task(async function test24e() {
   await new DNSListener("bar.example.com", "127.0.0.1");
 });
 
+function observerPromise(topic) {
+  return new Promise(resolve => {
+    let observer = {
+      QueryInterface: ChromeUtils.generateQI([Ci.nsIObserver]),
+      observe(aSubject, aTopic, aData) {
+        dump(`observe: ${aSubject}, ${aTopic}, ${aData} \n`);
+        if (aTopic == topic) {
+          Services.obs.removeObserver(observer, topic);
+          resolve(aData);
+        }
+      },
+    };
+    Services.obs.addObserver(observer, topic);
+  });
+}
+
 // TRR-first check that captivedetect.canonicalURL is resolved via native DNS
 add_task(async function test24f() {
   dns.clearCache(true);
+
+  const cpServer = new HttpServer();
+  cpServer.registerPathHandler("/cp", function handleRawData(
+    request,
+    response
+  ) {
+    response.setHeader("Content-Type", "text/plain", false);
+    response.setHeader("Cache-Control", "no-cache", false);
+    response.bodyOutputStream.write("data", 4);
+  });
+  cpServer.start(-1);
+  cpServer.identity.setPrimary(
+    "http",
+    "detectportal.firefox.com",
+    cpServer.identity.primaryPort
+  );
+  let cpPromise = observerPromise("captive-portal-login");
+
   Services.prefs.setCharPref(
     "captivedetect.canonicalURL",
-    "http://test.detectportal.com/success.txt"
+    `http://detectportal.firefox.com:${cpServer.identity.primaryPort}/cp`
   );
+  Services.prefs.setBoolPref("network.captive-portal-service.testMode", true);
+  Services.prefs.setBoolPref("network.captive-portal-service.enabled", true);
 
-  await new DNSListener("test.detectportal.com", "127.0.0.1");
+  // The captive portal has to have used native DNS, otherwise creating
+  // a socket to a non-local IP would trigger a crash.
+  await cpPromise;
+  // Simply resolving the captive portal domain should still use TRR
+  await new DNSListener("detectportal.firefox.com", "192.192.192.192");
+
+  Services.prefs.clearUserPref("network.captive-portal-service.enabled");
+  Services.prefs.clearUserPref("network.captive-portal-service.testMode");
+  Services.prefs.clearUserPref("captivedetect.canonicalURL");
+
+  await new Promise(resolve => cpServer.stop(resolve));
 });
 
 // TRR-first check that a domain is resolved via native DNS when parental control is enabled.
@@ -736,12 +946,54 @@ add_task(async function test24g() {
   await SetParentalControlEnabled(false);
 });
 
+// TRR-first check that DNS result is used if domain is part of the builtin-excluded-domains pref
+add_task(async function test24h() {
+  dns.clearCache(true);
+  Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "bar.example.com"
+  );
+  await new DNSListener("bar.example.com", "127.0.0.1");
+});
+
+// TRR-first check that DNS result is used if domain is part of the builtin-excluded-domains pref
+add_task(async function test24i() {
+  dns.clearCache(true);
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "example.com"
+  );
+  await new DNSListener("bar.example.com", "127.0.0.1");
+});
+
+// TRR-first check that DNS result is used if domain is part of the builtin-excluded-domains pref that contains things before it.
+add_task(async function test24j() {
+  dns.clearCache(true);
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "foo.test.com, bar.example.com"
+  );
+  await new DNSListener("bar.example.com", "127.0.0.1");
+});
+
+// TRR-first check that DNS result is used if domain is part of the builtin-excluded-domains pref that contains things after it.
+add_task(async function test24k() {
+  dns.clearCache(true);
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "bar.example.com, foo.test.com"
+  );
+  await new DNSListener("bar.example.com", "127.0.0.1");
+});
+
 // TRR-only that resolving localhost with TRR-only mode will use the remote
 // resolver if it's not in the excluded domains
 add_task(async function test25() {
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
   Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  Services.prefs.setCharPref("network.trr.builtin-excluded-domains", "");
   Services.prefs.setCharPref(
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
@@ -797,15 +1049,45 @@ add_task(async function test25e() {
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
   Services.prefs.setCharPref(
-    "captivedetect.canonicalURL",
-    "http://test.detectportal.com/success.txt"
-  );
-  Services.prefs.setCharPref(
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
   );
 
-  await new DNSListener("test.detectportal.com", "127.0.0.1");
+  const cpServer = new HttpServer();
+  cpServer.registerPathHandler("/cp", function handleRawData(
+    request,
+    response
+  ) {
+    response.setHeader("Content-Type", "text/plain", false);
+    response.setHeader("Cache-Control", "no-cache", false);
+    response.bodyOutputStream.write("data", 4);
+  });
+  cpServer.start(-1);
+  cpServer.identity.setPrimary(
+    "http",
+    "detectportal.firefox.com",
+    cpServer.identity.primaryPort
+  );
+  let cpPromise = observerPromise("captive-portal-login");
+
+  Services.prefs.setCharPref(
+    "captivedetect.canonicalURL",
+    `http://detectportal.firefox.com:${cpServer.identity.primaryPort}/cp`
+  );
+  Services.prefs.setBoolPref("network.captive-portal-service.testMode", true);
+  Services.prefs.setBoolPref("network.captive-portal-service.enabled", true);
+
+  // The captive portal has to have used native DNS, otherwise creating
+  // a socket to a non-local IP would trigger a crash.
+  await cpPromise;
+  // // Simply resolving the captive portal domain should still use TRR
+  await new DNSListener("detectportal.firefox.com", "192.192.192.192");
+
+  Services.prefs.clearUserPref("network.captive-portal-service.enabled");
+  Services.prefs.clearUserPref("network.captive-portal-service.testMode");
+  Services.prefs.clearUserPref("captivedetect.canonicalURL");
+
+  await new Promise(resolve => cpServer.stop(resolve));
 });
 
 // TRR-only check that a domain is resolved via native DNS when parental control is enabled.
@@ -815,6 +1097,55 @@ add_task(async function test25f() {
   await SetParentalControlEnabled(true);
   await new DNSListener("www.example.com", "127.0.0.1");
   await SetParentalControlEnabled(false);
+});
+
+// TRR-only check that localhost goes directly to native lookup when in the builtin-excluded-domains
+add_task(async function test25g() {
+  dns.clearCache(true);
+  Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
+  Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "localhost"
+  );
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
+  );
+
+  await new DNSListener("localhost", "127.0.0.1");
+});
+
+// TRR-only check that test.local is resolved via native DNS
+add_task(async function test25h() {
+  dns.clearCache(true);
+  Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "localhost,local"
+  );
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
+  );
+
+  await new DNSListener("test.local", "127.0.0.1");
+});
+
+// TRR-only check that .other is resolved via native DNS when the pref is set
+add_task(async function test25i() {
+  dns.clearCache(true);
+  Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
+  Services.prefs.setCharPref(
+    "network.trr.builtin-excluded-domains",
+    "localhost,local,other"
+  );
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://foo.example.com:${h2Port}/doh?responseIP=192.192.192.192`
+  );
+
+  await new DNSListener("domain.other", "127.0.0.1");
 });
 
 // Check that none of the requests have set any cookies.
@@ -828,6 +1159,8 @@ add_task(async function test_connection_closed() {
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
   Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  // We don't need to wait for 30 seconds for the request to fail
+  Services.prefs.setIntPref("network.trr.request_timeout_mode_trronly_ms", 500);
   Services.prefs.setCharPref(
     "network.trr.uri",
     `https://foo.example.com:${h2Port}/doh?responseIP=2.2.2.2`
@@ -892,12 +1225,13 @@ add_task(async function test_connection_closed_no_bootstrap_localhost() {
 });
 
 add_task(async function test_connection_closed_no_bootstrap_no_excluded() {
-  // This test exists to document what happens when we're in TRR only mode
-  // and we don't set a bootstrap address. We use DNS to resolve the
-  // initial URI, but if the connection fails, we don't fallback to DNS
+  // This test makes sure that even in mode 3 without a bootstrap address
+  // we are able to restart the TRR connection if it drops - the TRR service
+  // channel will use regular DNS to resolve the TRR address.
   dns.clearCache(true);
   Services.prefs.setIntPref("network.trr.mode", 3); // TRR-only
   Services.prefs.setCharPref("network.trr.excluded-domains", "");
+  Services.prefs.setCharPref("network.trr.builtin-excluded-domains", "");
   Services.prefs.setCharPref(
     "network.trr.uri",
     `https://localhost:${h2Port}/doh?responseIP=3.3.3.3`
@@ -913,11 +1247,8 @@ add_task(async function test_connection_closed_no_bootstrap_no_excluded() {
     !Components.isSuccessCode(inStatus),
     `${inStatus} should be an error code`
   );
-  [, , inStatus] = await new DNSListener("bar2.example.com", undefined, false);
-  Assert.ok(
-    !Components.isSuccessCode(inStatus),
-    `${inStatus} should be an error code`
-  );
+  dns.clearCache(true);
+  await new DNSListener("bar2.example.com", "3.3.3.3");
 });
 
 add_task(async function test_connection_closed_trr_first() {
@@ -939,4 +1270,110 @@ add_task(async function test_connection_closed_trr_first() {
   await new DNSListener("closeme.com", "127.0.0.1");
   // TRR should be back up again
   await new DNSListener("bar2.example.com", "9.9.9.9");
+});
+
+add_task(async function test_clearCacheOnURIChange() {
+  dns.clearCache(true);
+  Services.prefs.setBoolPref("network.trr.clear-cache-on-pref-change", true);
+  Services.prefs.setIntPref("network.trr.mode", 2); // TRR-first
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://localhost:${h2Port}/doh?responseIP=7.7.7.7`
+  );
+
+  await new DNSListener("bar.example.com", "7.7.7.7");
+
+  // The TRR cache should be cleared by this pref change.
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://localhost:${h2Port}/doh?responseIP=8.8.8.8`
+  );
+
+  await new DNSListener("bar.example.com", "8.8.8.8");
+  Services.prefs.setBoolPref("network.trr.clear-cache-on-pref-change", false);
+});
+
+add_task(async function test_dnsSuffix() {
+  async function checkDnsSuffixInMode(mode) {
+    dns.clearCache(true);
+    Services.prefs.setIntPref("network.trr.mode", mode);
+    Services.prefs.setCharPref(
+      "network.trr.uri",
+      `https://foo.example.com:${h2Port}/doh?responseIP=1.2.3.4&push=true`
+    );
+    await new DNSListener("example.org", "1.2.3.4");
+    await new DNSListener("push.example.org", "2018::2018");
+    await new DNSListener("test.com", "1.2.3.4");
+
+    let networkLinkService = {
+      dnsSuffixList: ["example.org"],
+      QueryInterface: ChromeUtils.generateQI([Ci.nsINetworkLinkService]),
+    };
+    Services.obs.notifyObservers(
+      networkLinkService,
+      "network:dns-suffix-list-updated"
+    );
+    await new DNSListener("test.com", "1.2.3.4");
+    await new DNSListener("example.org", "127.0.0.1");
+    // Also test that we don't use the pushed entry.
+    await new DNSListener("push.example.org", "127.0.0.1");
+
+    // Attempt to clean up, just in case
+    networkLinkService.dnsSuffixList = [];
+    Services.obs.notifyObservers(
+      networkLinkService,
+      "network:dns-suffix-list-updated"
+    );
+  }
+
+  await checkDnsSuffixInMode(2);
+  Services.prefs.setCharPref("network.trr.bootstrapAddress", "127.0.0.1");
+  await checkDnsSuffixInMode(3);
+  Services.prefs.clearUserPref("network.trr.bootstrapAddress");
+});
+
+add_task(async function test_vpnDetection() {
+  Services.prefs.setIntPref("network.trr.mode", 2);
+  Services.prefs.setCharPref(
+    "network.trr.uri",
+    `https://foo.example.com:${h2Port}/doh?responseIP=1.2.3.4&push=true`
+  );
+  dns.clearCache(true);
+  await new DNSListener("example.org", "1.2.3.4");
+  await new DNSListener("push.example.org", "2018::2018");
+
+  let networkLinkService = {
+    platformDNSIndications: Ci.nsINetworkLinkService.VPN_DETECTED,
+    QueryInterface: ChromeUtils.generateQI([Ci.nsINetworkLinkService]),
+  };
+
+  Services.obs.notifyObservers(
+    networkLinkService,
+    "network:link-status-changed",
+    "changed"
+  );
+  await new DNSListener("example.org", "127.0.0.1");
+  await new DNSListener("test.com", "127.0.0.1");
+  // Also test that we don't use the pushed entry.
+  await new DNSListener("push.example.org", "127.0.0.1");
+
+  Services.prefs.setCharPref("network.trr.bootstrapAddress", "127.0.0.1");
+  Services.prefs.setIntPref("network.trr.mode", 3);
+  dns.clearCache(true);
+
+  await new DNSListener("example.org", "127.0.0.1");
+  await new DNSListener("test.com", "127.0.0.1");
+  // Also test that we don't use the pushed entry.
+  await new DNSListener("push.example.org", "127.0.0.1");
+
+  Services.prefs.clearUserPref("network.trr.bootstrapAddress");
+
+  // Attempt to clean up, just in case
+  networkLinkService.platformDNSIndications =
+    Ci.nsINetworkLinkService.NONE_DETECTED;
+  Services.obs.notifyObservers(
+    networkLinkService,
+    "network:link-status-changed",
+    "changed"
+  );
 });

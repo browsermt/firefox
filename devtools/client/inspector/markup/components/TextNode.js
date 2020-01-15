@@ -14,7 +14,10 @@ const dom = require("devtools/client/shared/vendor/react-dom-factories");
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const { editableItem } = require("devtools/client/shared/inplace-editor");
 
-const { getFormatStr } = require("../utils/l10n");
+const {
+  getStr,
+  getFormatStr,
+} = require("devtools/client/inspector/markup/utils/l10n");
 
 class TextNode extends PureComponent {
   static get propTypes() {
@@ -74,6 +77,7 @@ class TextNode extends PureComponent {
                   .replace(/ /g, "◦")
               )
             : "",
+          "data-label": getStr("markupView.whitespaceOnly.label"),
         },
         value
       ),

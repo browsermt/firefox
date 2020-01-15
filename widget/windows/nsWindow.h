@@ -23,7 +23,6 @@
 #include "gfxWindowsSurface.h"
 #include "nsWindowDbg.h"
 #include "cairo.h"
-#include "nsITimer.h"
 #include "nsRegion.h"
 #include "mozilla/EventForwards.h"
 #include "mozilla/Maybe.h"
@@ -61,7 +60,7 @@ class imgIContainer;
 namespace mozilla {
 namespace widget {
 class NativeKey;
-class WinCompositorWidget;
+class InProcessWinCompositorWidget;
 struct MSGResult;
 }  // namespace widget
 }  // namespace mozilla
@@ -130,6 +129,7 @@ class nsWindow final : public nsWindowBase {
   virtual void SetSizeConstraints(const SizeConstraints& aConstraints) override;
   virtual void LockAspectRatio(bool aShouldLock) override;
   virtual const SizeConstraints GetSizeConstraints() override;
+  virtual void SetWindowMouseTransparent(bool aIsTransparent) override;
   virtual void Move(double aX, double aY) override;
   virtual void Resize(double aWidth, double aHeight, bool aRepaint) override;
   virtual void Resize(double aX, double aY, double aWidth, double aHeight,
@@ -277,6 +277,9 @@ class nsWindow final : public nsWindowBase {
   bool TouchEventShouldStartDrag(mozilla::EventMessage aEventMessage,
                                  LayoutDeviceIntPoint aEventPoint);
 
+  void SetSmallIcon(HICON aIcon);
+  void SetBigIcon(HICON aIcon);
+
   /**
    * AssociateDefaultIMC() associates or disassociates the default IMC for
    * the window.
@@ -330,6 +333,7 @@ class nsWindow final : public nsWindowBase {
   virtual nsresult OnWindowedPluginKeyEvent(
       const mozilla::NativeEventData& aKeyEventData,
       nsIKeyEventInPluginCallback* aCallback) override;
+  void DispatchPluginSettingEvents();
 
   void GetCompositorWidgetInitData(
       mozilla::widget::CompositorWidgetInitData* aInitData) override;
@@ -404,6 +408,7 @@ class nsWindow final : public nsWindowBase {
   /**
    * Event processing helpers
    */
+  HWND GetTopLevelForFocus(HWND aCurWnd);
   void DispatchFocusToTopLevelWindow(bool aIsActivate);
   bool DispatchStandardEvent(mozilla::EventMessage aMsg);
   void RelayMouseEvent(UINT aMsg, WPARAM wParam, LPARAM lParam);
@@ -411,7 +416,7 @@ class nsWindow final : public nsWindowBase {
                               LRESULT* aRetValue);
   bool ExternalHandlerProcessMessage(UINT aMessage, WPARAM& aWParam,
                                      LPARAM& aLParam, MSGResult& aResult);
-  bool ProcessMessageForPlugin(const MSG& aMsg, MSGResult& aResult);
+  bool ProcessMessageForPlugin(MSG aMsg, MSGResult& aResult);
   LRESULT ProcessCharMessage(const MSG& aMsg, bool* aEventDispatched);
   LRESULT ProcessKeyUpMessage(const MSG& aMsg, bool* aEventDispatched);
   LRESULT ProcessKeyDownMessage(const MSG& aMsg, bool* aEventDispatched);
@@ -434,6 +439,7 @@ class nsWindow final : public nsWindowBase {
    */
   virtual void OnDestroy() override;
   bool OnResize(const LayoutDeviceIntSize& aSize);
+  void OnSizeModeChange(nsSizeMode aSizeMode);
   bool OnGesture(WPARAM wParam, LPARAM lParam);
   bool OnTouch(WPARAM wParam, LPARAM lParam);
   bool OnHotKey(WPARAM wParam, LPARAM lParam);
@@ -573,6 +579,7 @@ class nsWindow final : public nsWindowBase {
   uint32_t mPickerDisplayCount;
   HICON mIconSmall;
   HICON mIconBig;
+  HWND mLastKillFocusWindow;
   static bool sDropShadowEnabled;
   static uint32_t sInstanceCount;
   static TriStateBool sCanQuit;
@@ -684,7 +691,7 @@ class nsWindow final : public nsWindowBase {
   POINT mCachedHitTestPoint;
   TimeStamp mCachedHitTestTime;
 
-  RefPtr<mozilla::widget::WinCompositorWidget> mBasicLayersSurface;
+  RefPtr<mozilla::widget::InProcessWinCompositorWidget> mBasicLayersSurface;
 
   static bool sNeedsToInitMouseWheelSettings;
   static void InitMouseWheelScrollData();

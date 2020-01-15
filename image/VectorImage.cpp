@@ -39,6 +39,7 @@
 #include "nsIDOMEventListener.h"
 #include "SurfaceCache.h"
 #include "mozilla/dom/Document.h"
+#include "mozilla/dom/DocumentInlines.h"
 
 namespace mozilla {
 
@@ -564,7 +565,6 @@ void VectorImage::SendInvalidationNotifications() {
   // we would miss the subsequent invalidations if we didn't send out the
   // notifications indirectly in |InvalidateObservers...|.
 
-  MOZ_ASSERT(mHasPendingInvalidation);
   mHasPendingInvalidation = false;
   SurfaceCache::RemoveImage(ImageKey(this));
 
@@ -890,7 +890,7 @@ bool VectorImage::MaybeRestrictSVGContext(
 
     if (overridePAR) {
       // The SVGImageContext must take account of the preserveAspectRatio
-      // overide:
+      // override:
       MOZ_ASSERT(!aSVGContext->GetPreserveAspectRatio(),
                  "FLAG_FORCE_PRESERVEASPECTRATIO_NONE is not expected if a "
                  "preserveAspectRatio override is supplied");
@@ -1101,8 +1101,8 @@ already_AddRefed<SourceSurface> VectorImage::CreateSurface(
   // our gfxDrawable into it. (We use FILTER_NEAREST since we never scale here.)
   auto frame = MakeNotNull<RefPtr<imgFrame>>();
   nsresult rv = frame->InitWithDrawable(
-      aSVGDrawable, aParams.size, SurfaceFormat::B8G8R8A8,
-      SamplingFilter::POINT, aParams.flags, backend);
+      aSVGDrawable, aParams.size, SurfaceFormat::OS_RGBA, SamplingFilter::POINT,
+      aParams.flags, backend);
 
   // If we couldn't create the frame, it was probably because it would end
   // up way too big. Generally it also wouldn't fit in the cache, but the prefs
@@ -1182,7 +1182,7 @@ void VectorImage::Show(gfxDrawable* aDrawable,
   MOZ_ASSERT(aDrawable, "Should have a gfxDrawable by now");
   gfxUtils::DrawPixelSnapped(aParams.context, aDrawable,
                              SizeDouble(aParams.size), region,
-                             SurfaceFormat::B8G8R8A8, aParams.samplingFilter,
+                             SurfaceFormat::OS_RGBA, aParams.samplingFilter,
                              aParams.flags, aParams.opacity, false);
 
 #ifdef DEBUG
@@ -1525,6 +1525,36 @@ nsIntSize VectorImage::OptimalImageSizeForDest(const gfxSize& aDest,
 already_AddRefed<imgIContainer> VectorImage::Unwrap() {
   nsCOMPtr<imgIContainer> self(this);
   return self.forget();
+}
+
+void VectorImage::MediaFeatureValuesChangedAllDocuments(
+    const MediaFeatureChange& aChange) {
+  if (!mSVGDocumentWrapper) {
+    return;
+  }
+
+  // Don't bother if the document hasn't loaded yet.
+  if (!mIsFullyLoaded) {
+    return;
+  }
+
+  if (Document* doc = mSVGDocumentWrapper->GetDocument()) {
+    if (nsPresContext* presContext = doc->GetPresContext()) {
+      presContext->MediaFeatureValuesChangedAllDocuments(aChange);
+      // Media feature value changes don't happen in the middle of layout,
+      // so we don't need to call InvalidateObserversOnNextRefreshDriverTick
+      // to invalidate asynchronously.
+      //
+      // Ideally we would not invalidate images if the media feature value
+      // change did not cause any updates to the document, but since non-
+      // animated SVG images do not have their refresh driver ticked, it
+      // is the invalidation (and then the painting) which is what causes
+      // the document to be flushed. Theme and system metrics changes are
+      // rare, though, so it's not a big deal to invalidate even if it
+      // doesn't cause any change.
+      SendInvalidationNotifications();
+    }
+  }
 }
 
 }  // namespace image

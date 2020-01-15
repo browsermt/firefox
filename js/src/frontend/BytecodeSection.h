@@ -14,13 +14,20 @@
 #include <stddef.h>  // ptrdiff_t, size_t
 #include <stdint.h>  // uint16_t, int32_t, uint32_t
 
-#include "NamespaceImports.h"          // ValueVector
+#include "jstypes.h"           // JS_PUBLIC_API
+#include "NamespaceImports.h"  // ValueVector
+
+#include "frontend/AbstractScope.h"    // AbstractScope
 #include "frontend/BytecodeOffset.h"   // BytecodeOffset
 #include "frontend/JumpList.h"         // JumpTarget
 #include "frontend/NameCollections.h"  // AtomIndexMap, PooledMapPtr
+#include "frontend/ObjLiteral.h"       // ObjLiteralCreationData
+#include "frontend/ParseNode.h"        // BigIntLiteral
 #include "frontend/SourceNotes.h"      // jssrcnote
+#include "frontend/Stencil.h"          // Stencils
 #include "gc/Barrier.h"                // GCPtrObject, GCPtrScope, GCPtrValue
 #include "gc/Rooting.h"                // JS::Rooted
+#include "js/GCVariant.h"              // GCPolicy<mozilla::Variant>
 #include "js/GCVector.h"               // GCVector
 #include "js/TypeDecls.h"              // jsbytecode, JSContext
 #include "js/Value.h"                  // JS::Vector
@@ -36,10 +43,15 @@ using BigIntVector = JS::GCVector<js::BigInt*>;
 
 namespace frontend {
 
+class BigIntLiteral;
 class ObjectBox;
 
 struct MOZ_STACK_CLASS GCThingList {
-  JS::RootedVector<StackGCCellPtr> vector;
+  using ListType =
+      mozilla::Variant<JS::GCCellPtr, BigIntIndex, ObjLiteralCreationData,
+                       RegExpIndex, ScopeIndex>;
+  ParseInfo& parseInfo;
+  JS::RootedVector<ListType> vector;
 
   // Last emitted object.
   ObjectBox* lastbox = nullptr;
@@ -47,11 +59,12 @@ struct MOZ_STACK_CLASS GCThingList {
   // Index of the first scope in the vector.
   mozilla::Maybe<uint32_t> firstScopeIndex;
 
-  explicit GCThingList(JSContext* cx) : vector(cx) {}
+  explicit GCThingList(JSContext* cx, ParseInfo& parseInfo)
+      : parseInfo(parseInfo), vector(cx) {}
 
-  MOZ_MUST_USE bool append(Scope* scope, uint32_t* index) {
+  MOZ_MUST_USE bool append(ScopeIndex scope, uint32_t* index) {
     *index = vector.length();
-    if (!vector.append(JS::GCCellPtr(scope))) {
+    if (!vector.append(mozilla::AsVariant(scope))) {
       return false;
     }
     if (!firstScopeIndex) {
@@ -59,21 +72,51 @@ struct MOZ_STACK_CLASS GCThingList {
     }
     return true;
   }
-  MOZ_MUST_USE bool append(BigInt* bi, uint32_t* index) {
+  MOZ_MUST_USE bool append(Scope* scope, uint32_t* index) {
     *index = vector.length();
-    return vector.append(JS::GCCellPtr(bi));
+    if (!vector.append(mozilla::AsVariant(JS::GCCellPtr(scope)))) {
+      return false;
+    }
+    if (!firstScopeIndex) {
+      firstScopeIndex.emplace(*index);
+    }
+    return true;
+  }
+  MOZ_MUST_USE bool append(BigIntLiteral* literal, uint32_t* index) {
+    *index = vector.length();
+    if (literal->isDeferred()) {
+      return vector.append(mozilla::AsVariant(literal->index()));
+    }
+    return vector.append(mozilla::AsVariant(JS::GCCellPtr(literal->value())));
+  }
+  MOZ_MUST_USE bool append(RegExpLiteral* literal, uint32_t* index) {
+    *index = vector.length();
+    if (literal->isDeferred()) {
+      return vector.append(mozilla::AsVariant(literal->index()));
+    }
+    return vector.append(
+        mozilla::AsVariant(JS::GCCellPtr(literal->objbox()->object())));
+  }
+  MOZ_MUST_USE bool append(ObjLiteralCreationData&& objlit, uint32_t* index) {
+    *index = vector.length();
+    return vector.append(mozilla::AsVariant(std::move(objlit)));
   }
   MOZ_MUST_USE bool append(ObjectBox* obj, uint32_t* index);
 
   uint32_t length() const { return vector.length(); }
-  void finish(mozilla::Span<JS::GCCellPtr> array);
+  MOZ_MUST_USE bool finish(JSContext* cx, ParseInfo& parseInfo,
+                           mozilla::Span<JS::GCCellPtr> array);
   void finishInnerFunctions();
 
-  Scope* getScope(size_t index) const {
-    return &vector[index].get().get().as<Scope>();
+  AbstractScope getScope(size_t index) const {
+    auto& elem = vector[index].get();
+    if (elem.is<JS::GCCellPtr>()) {
+      return AbstractScope(&elem.as<JS::GCCellPtr>().as<Scope>());
+    }
+    return AbstractScope(parseInfo, elem.as<ScopeIndex>());
   }
 
-  Scope* firstScope() const {
+  AbstractScope firstScope() const {
     MOZ_ASSERT(firstScopeIndex.isSome());
     return getScope(*firstScopeIndex);
   }
@@ -345,7 +388,7 @@ class BytecodeSection {
 // bytecode, but referred from bytecode is stored in this class.
 class PerScriptData {
  public:
-  explicit PerScriptData(JSContext* cx);
+  explicit PerScriptData(JSContext* cx, frontend::ParseInfo& parseInfo);
 
   MOZ_MUST_USE bool init(JSContext* cx);
 
@@ -365,5 +408,11 @@ class PerScriptData {
 
 } /* namespace frontend */
 } /* namespace js */
+
+namespace JS {
+template <typename T>
+struct GCPolicy<js::frontend::TypedIndex<T>>
+    : JS::IgnoreGCPolicy<js::frontend::TypedIndex<T>> {};
+}  // namespace JS
 
 #endif /* frontend_BytecodeSection_h */

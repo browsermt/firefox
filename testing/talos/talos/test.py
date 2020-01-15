@@ -39,6 +39,7 @@ class Test(object):
     alert_threshold = 2.0
     perfherder_framework = 'talos'
     subtest_alerts = False
+    suite_should_alert = True
 
     @classmethod
     def name(cls):
@@ -266,7 +267,8 @@ class PageloaderTest(Test):
             'profile_path', 'xperf_providers', 'xperf_user_providers', 'xperf_stackwalk',
             'format_pagename', 'filters', 'preferences', 'extensions', 'setup', 'cleanup',
             'lower_is_better', 'alert_threshold', 'unit', 'webextensions', 'profile',
-            'subtest_alerts', 'perfherder_framework', 'pdfpaint', 'webextensions_folder']
+            'suite_should_alert', 'subtest_alerts', 'perfherder_framework', 'pdfpaint',
+            'webextensions_folder', 'a11y']
 
 
 class QuantumPageloadTest(PageloaderTest):
@@ -455,11 +457,10 @@ class damp(PageloaderTest):
     tploadnocache = True
     tpmozafterpaint = False
     gecko_profile_interval = 10
-    gecko_profile_entries = 2000000
+    gecko_profile_entries = 10000000
     win_counters = w7_counters = linux_counters = mac_counters = None
     filters = filter.ignore_first.prepare(1) + filter.median.prepare()
-    preferences = {'devtools.memory.enabled': True,
-                   'addon.test.damp.webserver': '${webserver}'}
+    preferences = {'devtools.memory.enabled': True}
     unit = 'ms'
     subtest_alerts = True
     perfherder_framework = 'devtools'
@@ -839,6 +840,7 @@ class a11yr(PageloaderTest):
     preferences = {'dom.send_after_paint_to_content': False}
     unit = 'ms'
     alert_threshold = 5.0
+    a11y = True
 
 
 class WebkitBenchmark(PageloaderTest):
@@ -919,6 +921,7 @@ class perf_reftest_singletons(PageloaderTest):
     lower_is_better = True
     alert_threshold = 5.0
     subtest_alerts = True
+    suite_should_alert = False
 
 
 @register_test()

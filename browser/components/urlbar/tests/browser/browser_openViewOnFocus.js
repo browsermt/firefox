@@ -4,10 +4,7 @@
 "use strict";
 
 async function checkOpensOnFocus(win = window) {
-  Assert.ok(
-    win.gURLBar.openViewOnFocusForCurrentTab,
-    "openViewOnFocusForCurrentTab should be true"
-  );
+  Assert.ok(win.gURLBar.openViewOnFocus, "openViewOnFocus should be true");
   // Even with openViewOnFocus = true, the view should not open when the input
   // is focused programmatically.
   win.gURLBar.blur();
@@ -16,23 +13,26 @@ async function checkOpensOnFocus(win = window) {
   Assert.ok(win.gURLBar.dropmarker.hidden, "The dropmarker should be hidden");
   win.gURLBar.blur();
   Assert.ok(win.gURLBar.dropmarker.hidden, "The dropmarker should be hidden");
+
   // Check the keyboard shortcut.
   await UrlbarTestUtils.promisePopupOpen(win, () => {
     win.document.getElementById("Browser:OpenLocation").doCommand();
   });
-  win.gURLBar.blur();
+  await UrlbarTestUtils.promisePopupClose(win, () => {
+    win.gURLBar.blur();
+  });
+
   // Focus with the mouse.
   await UrlbarTestUtils.promisePopupOpen(win, () => {
     EventUtils.synthesizeMouseAtCenter(win.gURLBar.inputField, {});
   });
-  win.gURLBar.blur();
+  await UrlbarTestUtils.promisePopupClose(win, () => {
+    win.gURLBar.blur();
+  });
 }
 
-function checkDoesNotOpenOnFocus(win = window) {
-  Assert.ok(
-    !win.gURLBar.openViewOnFocusForCurrentTab,
-    "openViewOnFocusForCurrentTab should be false"
-  );
+async function checkDoesNotOpenOnFocus(win = window) {
+  Assert.ok(!win.gURLBar.openViewOnFocus, "openViewOnFocus should be false");
   // The view should not open when the input is focused programmatically.
   win.gURLBar.blur();
   win.gURLBar.focus();
@@ -40,12 +40,20 @@ function checkDoesNotOpenOnFocus(win = window) {
   Assert.ok(win.gURLBar.dropmarker.hidden, "The dropmarker should be hidden");
   win.gURLBar.blur();
   Assert.ok(win.gURLBar.dropmarker.hidden, "The dropmarker should be hidden");
+
   // Check the keyboard shortcut.
   win.document.getElementById("Browser:OpenLocation").doCommand();
+  // Because the panel opening may not be immediate, we must wait a bit.
+  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+  await new Promise(resolve => setTimeout(resolve, 500));
   Assert.ok(!win.gURLBar.view.isOpen, "check urlbar panel is not open");
   win.gURLBar.blur();
+
   // Focus with the mouse.
   EventUtils.synthesizeMouseAtCenter(win.gURLBar.inputField, {});
+  // Because the panel opening may not be immediate, we must wait a bit.
+  // eslint-disable-next-line mozilla/no-arbitrary-setTimeout
+  await new Promise(resolve => setTimeout(resolve, 500));
   Assert.ok(!win.gURLBar.view.isOpen, "check urlbar panel is not open");
   win.gURLBar.blur();
 }
@@ -80,23 +88,23 @@ add_task(async function newtabAndHome() {
     await BrowserTestUtils.withNewTab(
       { gBrowser, url, waitForLoad: false },
       async browser => {
-        // openViewOnFocus should be disabled for these pages even though the
-        // pref is true.
-        checkDoesNotOpenOnFocus();
-        // Open a new tab where openViewOnFocus should be enabled.
+        // We don't wait for load, but we must ensure to be on the expected url.
+        await TestUtils.waitForCondition(
+          () => window.gBrowser.currentURI.spec == url,
+          "Ensure we're on the expected page"
+        );
+        await checkOpensOnFocus();
         await BrowserTestUtils.withNewTab(
           { gBrowser, url: "http://example.com/" },
           async otherBrowser => {
-            // openViewOnFocus should be enabled.
             await checkOpensOnFocus();
-            // Switch back to about:newtab/home.  openViewOnFocus should be
-            // disabled.
+            // Switch back to about:newtab/home.
             await BrowserTestUtils.switchTab(
               gBrowser,
               gBrowser.getTabForBrowser(browser)
             );
-            checkDoesNotOpenOnFocus();
-            // Switch back to example.com.  openViewOnFocus should be enabled.
+            await checkOpensOnFocus();
+            // Switch back to example.com.
             await BrowserTestUtils.switchTab(
               gBrowser,
               gBrowser.getTabForBrowser(otherBrowser)
@@ -104,11 +112,9 @@ add_task(async function newtabAndHome() {
             await checkOpensOnFocus();
           }
         );
-        // After example.com closes, about:newtab/home should be selected again,
-        // and openViewOnFocus should be disabled.
-        checkDoesNotOpenOnFocus();
-        // Load example.com in the same tab.  openViewOnFocus should become
-        // enabled.
+        // After example.com closes, about:newtab/home is selected again.
+        await checkOpensOnFocus();
+        // Load example.com in the same tab.
         await BrowserTestUtils.loadURI(
           gBrowser.selectedBrowser,
           "http://example.com/"
@@ -124,6 +130,6 @@ add_task(async function privateWindow() {
   let privateWin = await BrowserTestUtils.openNewBrowserWindow({
     private: true,
   });
-  checkDoesNotOpenOnFocus(privateWin);
+  await checkDoesNotOpenOnFocus(privateWin);
   await BrowserTestUtils.closeWindow(privateWin);
 });

@@ -613,7 +613,7 @@ class Messenger {
             "Extension:Message",
             listener
           );
-          if (childManager) {
+          if (childManager && !this.context.unloaded) {
             childManager.callParentFunctionNoReturn(
               "runtime.removeMessagingListener",
               ["onMessage"]
@@ -775,7 +775,7 @@ class Messenger {
             "Extension:Connect",
             listener
           );
-          if (childManager) {
+          if (childManager && !this.context.unloaded) {
             childManager.callParentFunctionNoReturn(
               "runtime.removeMessagingListener",
               ["onConnect"]
@@ -839,7 +839,7 @@ class BrowserExtensionContent extends EventEmitter {
 
     /* eslint-disable mozilla/balanced-listeners */
     this.on("add-permissions", (ignoreEvent, permissions) => {
-      if (permissions.permissions.length > 0) {
+      if (permissions.permissions.length) {
         let perms = new Set(this.policy.permissions);
         for (let perm of permissions.permissions) {
           perms.add(perm);
@@ -847,7 +847,7 @@ class BrowserExtensionContent extends EventEmitter {
         this.policy.permissions = perms;
       }
 
-      if (permissions.origins.length > 0) {
+      if (permissions.origins.length) {
         let patterns = this.whiteListedHosts.patterns.map(host => host.pattern);
 
         this.policy.allowedOrigins = new MatchPatternSet(
@@ -858,7 +858,7 @@ class BrowserExtensionContent extends EventEmitter {
     });
 
     this.on("remove-permissions", (ignoreEvent, permissions) => {
-      if (permissions.permissions.length > 0) {
+      if (permissions.permissions.length) {
         let perms = new Set(this.policy.permissions);
         for (let perm of permissions.permissions) {
           perms.delete(perm);
@@ -866,7 +866,7 @@ class BrowserExtensionContent extends EventEmitter {
         this.policy.permissions = perms;
       }
 
-      if (permissions.origins.length > 0) {
+      if (permissions.origins.length) {
         let origins = permissions.origins.map(
           origin => new MatchPattern(origin, { ignorePath: true }).pattern
         );
@@ -1072,7 +1072,7 @@ class ProxyAPIImplementation extends SchemaAPIInterface {
     map.ids.set(id, listener);
     map.listeners.set(listener, id);
 
-    this.childApiManager.messageManager.sendAsyncMessage("API:AddListener", {
+    this.childApiManager.conduit.sendAddListener({
       childId: this.childApiManager.id,
       listenerId: id,
       path: this.path,
@@ -1092,7 +1092,7 @@ class ProxyAPIImplementation extends SchemaAPIInterface {
     map.ids.delete(id);
     map.removedIds.add(id);
 
-    this.childApiManager.messageManager.sendAsyncMessage("API:RemoveListener", {
+    this.childApiManager.conduit.sendRemoveListener({
       childId: this.childApiManager.id,
       listenerId: id,
       path: this.path,
@@ -1173,10 +1173,18 @@ class ChildAPIManager {
 
     this.id = `${context.extension.id}.${context.contextId}`;
 
-    MessageChannel.addListener(messageManager, "API:RunListener", this);
-    messageManager.addMessageListener("API:CallResult", this);
+    this.conduit = context.openConduit(this, {
+      id: this.id,
+      send: ["CreateProxyContext", "APICall", "AddListener", "RemoveListener"],
+      recv: ["CallResult", "RunListener"],
+    });
 
-    this.messageFilterStrict = { childId: this.id };
+    this.conduit.sendCreateProxyContext({
+      childId: this.id,
+      extensionId: context.extension.id,
+      principal: context.principal,
+      ...contextData,
+    });
 
     this.listeners = new DefaultMap(() => ({
       ids: new Map(),
@@ -1187,18 +1195,9 @@ class ChildAPIManager {
     // Map[callId -> Deferred]
     this.callPromises = new Map();
 
-    let params = {
-      childId: this.id,
-      extensionId: context.extension.id,
-      principal: context.principal,
-    };
-    Object.assign(params, contextData);
-
-    this.messageManager.sendAsyncMessage("API:CreateProxyContext", params);
-
     this.permissionsChangedCallbacks = new Set();
     this.updatePermissions = null;
-    if (this.context.extension.optionalPermissions.length > 0) {
+    if (this.context.extension.optionalPermissions.length) {
       this.updatePermissions = () => {
         for (let callback of this.permissionsChangedCallbacks) {
           try {
@@ -1217,50 +1216,42 @@ class ChildAPIManager {
     this.schema.inject(obj, this);
   }
 
-  receiveMessage({ name, messageName, data }) {
-    if (data.childId != this.id) {
-      return;
+  recvCallResult(data) {
+    let deferred = this.callPromises.get(data.callId);
+    this.callPromises.delete(data.callId);
+    if ("error" in data) {
+      deferred.reject(data.error);
+    } else {
+      let result = data.result.deserialize(this.context.cloneScope);
+
+      deferred.resolve(new NoCloneSpreadArgs(result));
     }
+  }
 
-    switch (name || messageName) {
-      case "API:RunListener":
-        let map = this.listeners.get(data.path);
-        let listener = map.ids.get(data.listenerId);
+  recvRunListener(data) {
+    let map = this.listeners.get(data.path);
+    let listener = map.ids.get(data.listenerId);
 
-        if (listener) {
-          let args = data.args.deserialize(this.context.cloneScope);
-          let fire = () => this.context.applySafeWithoutClone(listener, args);
-          return Promise.resolve(
-            data.handlingUserInput
-              ? withHandlingUserInput(this.context.contentWindow, fire)
-              : fire()
-          ).then(result => {
-            if (result !== undefined) {
-              return new StructuredCloneHolder(result, this.context.cloneScope);
-            }
-            return result;
-          });
+    if (listener) {
+      let args = data.args.deserialize(this.context.cloneScope);
+      let fire = () => this.context.applySafeWithoutClone(listener, args);
+      return Promise.resolve(
+        data.handlingUserInput
+          ? withHandlingUserInput(this.context.contentWindow, fire)
+          : fire()
+      ).then(result => {
+        if (result !== undefined) {
+          return new StructuredCloneHolder(result, this.context.cloneScope);
         }
-        if (!map.removedIds.has(data.listenerId)) {
-          Services.console.logStringMessage(
-            `Unknown listener at childId=${data.childId} path=${
-              data.path
-            } listenerId=${data.listenerId}\n`
-          );
-        }
-        break;
-
-      case "API:CallResult":
-        let deferred = this.callPromises.get(data.callId);
-        if ("error" in data) {
-          deferred.reject(data.error);
-        } else {
-          let result = data.result.deserialize(this.context.cloneScope);
-
-          deferred.resolve(new NoCloneSpreadArgs(result));
-        }
-        this.callPromises.delete(data.callId);
-        break;
+        return result;
+      });
+    }
+    if (!map.removedIds.has(data.listenerId)) {
+      Services.console.logStringMessage(
+        `Unknown listener at childId=${data.childId} path=${
+          data.path
+        } listenerId=${data.listenerId}\n`
+      );
     }
   }
 
@@ -1271,11 +1262,7 @@ class ChildAPIManager {
    * @param {Array} args The parameters for the function.
    */
   callParentFunctionNoReturn(path, args) {
-    this.messageManager.sendAsyncMessage("API:Call", {
-      childId: this.id,
-      path,
-      args,
-    });
+    this.conduit.sendAPICall({ childId: this.id, path, args });
   }
 
   /**
@@ -1299,14 +1286,14 @@ class ChildAPIManager {
     // logged the api_call.  Flag it so the parent doesn't log again.
     let { alreadyLogged = true } = options;
 
-    this.messageManager.sendAsyncMessage("API:Call", {
+    // TODO: conduit.queryAPICall()
+    this.conduit.sendAPICall({
       childId: this.id,
       callId,
       path,
       args,
       options: { alreadyLogged },
     });
-
     return this.context.wrapPromise(deferred.promise, callback);
   }
 
@@ -1335,11 +1322,8 @@ class ChildAPIManager {
   }
 
   close() {
-    this.messageManager.sendAsyncMessage("API:CloseProxyContext", {
-      childId: this.id,
-    });
-    this.messageManager.removeMessageListener("API:CallResult", this);
-    MessageChannel.removeListener(this.messageManager, "API:RunListener", this);
+    // Reports CONDUIT_CLOSED on the parent side.
+    this.conduit.close();
 
     if (this.updatePermissions) {
       this.context.extension.off("add-permissions", this.updatePermissions);

@@ -22,8 +22,6 @@ module.exports = {
     }
   }, {
     "files": [
-      "client/scratchpad/scratchpad-manager.jsm",
-      "client/scratchpad/scratchpad.js",
       "client/shared/*.jsm",
     ],
     "rules": {
@@ -32,10 +30,9 @@ module.exports = {
   }, {
     "files": [
       "client/framework/**",
-      "client/scratchpad/**",
       "client/shared/*.jsm",
       "client/shared/widgets/*.jsm",
-      "client/webide/**",
+      "client/storage/VariablesView.jsm",
     ],
     "rules": {
       "consistent-return": "off",
@@ -43,27 +40,17 @@ module.exports = {
   }, {
     "files": [
       "client/framework/**",
-      "client/scratchpad/**",
-      "client/webide/**",
     ],
     "rules": {
       "max-nested-callbacks": "off",
     }
   }, {
     "files": [
-      "client/scratchpad/test/browser_scratchpad_inspect.js",
-      "client/scratchpad/test/browser_scratchpad_inspect_primitives.js",
-    ],
-    "rules": {
-      "no-labels": "off",
-    }
-  }, {
-    "files": [
       "client/framework/**",
-      "client/scratchpad/**",
       "client/shared/*.jsm",
       "client/shared/widgets/*.jsm",
-      "client/webide/**",
+      "client/storage/VariablesView.jsm",
+      "shared/webconsole/test/*.html",
     ],
     "rules": {
       "mozilla/no-aArgs": "off",
@@ -71,7 +58,6 @@ module.exports = {
   }, {
     "files": [
       "client/framework/test/**",
-      "client/scratchpad/**",
     ],
     "rules": {
       "mozilla/var-only-at-top-level": "off",
@@ -79,9 +65,8 @@ module.exports = {
   }, {
     "files": [
       "client/framework/**",
-      "client/scratchpad/**",
       "client/shared/widgets/*.jsm",
-      "client/webide/**",
+      "client/storage/VariablesView.jsm",
     ],
     "rules": {
       "no-shadow": "off",
@@ -89,8 +74,6 @@ module.exports = {
   }, {
     "files": [
       "client/framework/**",
-      "client/scratchpad/**",
-      "client/webide/**",
     ],
     "rules": {
       "strict": "off",
@@ -102,6 +85,20 @@ module.exports = {
     ],
     "rules": {
       "no-unused-vars": ["error", {"args": "none", "vars": "local"}],
+    }
+  }, {
+    // For all server files, prevent requiring devtools/client modules.
+    "files": [
+      "server/**",
+      // The rule also applies to all `shared` files, with the exception of
+      // shared/fronts.
+      // This first pattern matches files in a shared subfolder other than "fronts".
+      "shared/!(fronts)/**",
+      // This second pattern matches files directly under shared.
+      "shared/*.**",
+    ],
+    "rules": {
+      "mozilla/reject-some-requires": ["error", "^(resource\://)?devtools/client"],
     }
   }, {
     // Cu, Cc etc... are not available in most devtools modules loaded by require.
@@ -136,7 +133,23 @@ module.exports = {
     "rules": {
       "mozilla/no-define-cc-etc": "off",
     }
-  }, ],
+  }, {
+    // All DevTools files should avoid relative paths.
+    "files": [
+      "**"
+    ],
+    "excludedFiles": [
+      // Debugger modules have a custom bundling logic which relies on relative
+      // paths.
+      "client/debugger/**",
+      // `client/shared/build` contains node helpers to build the debugger and
+      // not devtools modules.
+      "client/shared/build/**",
+    ],
+    "rules": {
+      "mozilla/reject-relative-requires": "error",
+    }
+  }],
   "rules": {
     // These are the rules that have been configured so far to match the
     // devtools coding style.
@@ -354,8 +367,6 @@ module.exports = {
     "no-invalid-regexp": "off",
     // disallow irregular whitespace outside of strings and comments
     "no-irregular-whitespace": "off",
-    // disallow usage of __iterator__ property
-    "no-iterator": "off",
     // disallow labels that share a name with a variable
     "no-label-var": "off",
     // disallow unnecessary nested blocks

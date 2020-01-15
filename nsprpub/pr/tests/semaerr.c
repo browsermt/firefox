@@ -8,8 +8,19 @@
 
 #include <stdio.h>
 
-#define NO_SUCH_SEM_NAME "/tmp/nosuchsem.sem"
-#define SEM_NAME1 "/tmp/foo.sem"
+#ifdef DEBUG
+#define SEM_D "D"
+#else
+#define SEM_D
+#endif
+#ifdef IS_64
+#define SEM_64 "64"
+#else
+#define SEM_64
+#endif
+
+#define NO_SUCH_SEM_NAME "/tmp/nosuchsem.sem" SEM_D SEM_64
+#define SEM_NAME1 "/tmp/foo.sem" SEM_D SEM_64
 #define EXE_NAME "semaerr1"
 #define SEM_MODE  0666
 
@@ -33,7 +44,9 @@ int main(int argc, char **argv)
     PRInt32 exit_code;
 
     while (PL_OPT_EOL != (os = PL_GetNextOpt(opt))) {
-        if (PL_OPT_BAD == os) continue;
+        if (PL_OPT_BAD == os) {
+            continue;
+        }
         switch (opt->option) {
             case 'd':  /* debug mode */
                 debug_mode = PR_TRUE;

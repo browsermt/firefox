@@ -5,7 +5,12 @@
 "use strict";
 
 const { Utils: WebConsoleUtils } = require("devtools/client/webconsole/utils");
-const { EVALUATE_EXPRESSION } = require("devtools/client/webconsole/constants");
+const {
+  EVALUATE_EXPRESSION,
+  SET_TERMINAL_INPUT,
+  SET_TERMINAL_EAGER_RESULT,
+} = require("devtools/client/webconsole/constants");
+const { getAllPrefs } = require("devtools/client/webconsole/selectors/prefs");
 
 loader.lazyServiceGetter(
   this,
@@ -36,10 +41,25 @@ loader.lazyRequireGetter(
 );
 const HELP_URL = "https://developer.mozilla.org/docs/Tools/Web_Console/Helpers";
 
+async function getMappedExpression(hud, expression) {
+  let mapResult;
+  try {
+    mapResult = await hud.getMappedExpression(expression);
+  } catch (e) {
+    console.warn("Error when calling getMappedExpression", e);
+  }
+
+  let mapped = null;
+  if (mapResult) {
+    ({ expression, mapped } = mapResult);
+  }
+  return { expression, mapped };
+}
+
 function evaluateExpression(expression) {
-  return async ({ dispatch, services }) => {
+  return async ({ dispatch, webConsoleUI, hud, client }) => {
     if (!expression) {
-      expression = services.getInputSelection() || services.getInputValue();
+      expression = hud.getInputSelection() || hud.getInputValue();
     }
     if (!expression) {
       return null;
@@ -61,35 +81,25 @@ function evaluateExpression(expression) {
 
     WebConsoleUtils.usageCount++;
 
-    let mappedExpressionRes;
-    try {
-      mappedExpressionRes = await services.getMappedExpression(expression);
-    } catch (e) {
-      console.warn("Error when calling getMappedExpression", e);
-    }
+    let mapped;
+    ({ expression, mapped } = await getMappedExpression(hud, expression));
 
-    expression = mappedExpressionRes
-      ? mappedExpressionRes.expression
-      : expression;
+    const { frameActor, webConsoleFront } = await webConsoleUI.getFrameActor();
 
-    const { frameActor, client } = services.getFrameActor();
-
-    // Even if requestEvaluation rejects (because of webConsoleClient.evaluateJSAsync),
+    // Even if the evaluation fails,
     // we still need to pass the error response to onExpressionEvaluated.
     const onSettled = res => res;
 
     const response = await client
       .evaluateJSAsync(expression, {
         frameActor,
-        selectedNodeActor: services.getSelectedNodeActor(),
-        mapped: mappedExpressionRes ? mappedExpressionRes.mapped : null,
+        selectedNodeFront: webConsoleUI.getSelectedNodeFront(),
+        webConsoleFront,
+        mapped,
       })
       .then(onSettled, onSettled);
 
-    return onExpressionEvaluated(response, {
-      dispatch,
-      services,
-    });
+    return dispatch(onExpressionEvaluated(response));
   };
 }
 
@@ -100,81 +110,163 @@ function evaluateExpression(expression) {
  * @param {Object} response
  *        The message received from the server.
  */
-async function onExpressionEvaluated(response, { dispatch, services } = {}) {
-  if (response.error) {
-    console.error(`Evaluation error`, response.error, ": ", response.message);
-    return;
-  }
+function onExpressionEvaluated(response) {
+  return async ({ dispatch, webConsoleUI }) => {
+    if (response.error) {
+      console.error(`Evaluation error`, response.error, ": ", response.message);
+      return;
+    }
 
-  // If the evaluation was a top-level await expression that was rejected, there will
-  // be an uncaught exception reported, so we don't need to do anything.
-  if (response.topLevelAwaitRejected === true) {
-    return;
-  }
+    // If the evaluation was a top-level await expression that was rejected, there will
+    // be an uncaught exception reported, so we don't need to do anything.
+    if (response.topLevelAwaitRejected === true) {
+      return;
+    }
 
-  if (!response.helperResult) {
-    dispatch(messagesActions.messagesAdd([response]));
-    return;
-  }
+    if (!response.helperResult) {
+      dispatch(messagesActions.messagesAdd([response]));
+      return;
+    }
 
-  await handleHelperResult(response, { dispatch, services });
+    await dispatch(handleHelperResult(response));
+  };
 }
 
-async function handleHelperResult(response, { dispatch, services }) {
-  const result = response.result;
-  const helperResult = response.helperResult;
-  const helperHasRawOutput = !!(helperResult || {}).rawOutput;
+function handleHelperResult(response) {
+  return async ({ dispatch, hud, webConsoleUI }) => {
+    const result = response.result;
+    const helperResult = response.helperResult;
+    const helperHasRawOutput = !!(helperResult || {}).rawOutput;
 
-  if (helperResult && helperResult.type) {
-    switch (helperResult.type) {
-      case "clearOutput":
-        dispatch(messagesActions.messagesClear());
-        break;
-      case "clearHistory":
-        dispatch(historyActions.clearHistory());
-        break;
-      case "inspectObject":
-        services.inspectObjectActor(helperResult.object);
-        break;
-      case "help":
-        services.openLink(HELP_URL);
-        break;
-      case "copyValueToClipboard":
-        clipboardHelper.copyString(helperResult.value);
-        break;
-      case "screenshotOutput":
-        const { args, value } = helperResult;
-        const screenshotMessages = await saveScreenshot(
-          services.getPanelWindow(),
-          args,
-          value
-        );
-        dispatch(
-          messagesActions.messagesAdd(
-            screenshotMessages.map(message => ({
-              message,
-              type: "logMessage",
-            }))
-          )
-        );
-        // early return as we already dispatched necessary messages.
-        return;
+    if (helperResult && helperResult.type) {
+      switch (helperResult.type) {
+        case "clearOutput":
+          dispatch(messagesActions.messagesClear());
+          break;
+        case "clearHistory":
+          dispatch(historyActions.clearHistory());
+          break;
+        case "inspectObject": {
+          const objectActor = helperResult.object;
+          if (hud.toolbox) {
+            hud.toolbox.inspectObjectActor(objectActor);
+          } else {
+            webConsoleUI.inspectObjectActor(objectActor);
+          }
+          break;
+        }
+        case "help":
+          hud.openLink(HELP_URL);
+          break;
+        case "copyValueToClipboard":
+          clipboardHelper.copyString(helperResult.value);
+          break;
+        case "screenshotOutput":
+          const { args, value } = helperResult;
+          const screenshotMessages = await saveScreenshot(
+            webConsoleUI.getPanelWindow(),
+            args,
+            value
+          );
+          dispatch(
+            messagesActions.messagesAdd(
+              screenshotMessages.map(message => ({
+                message,
+                type: "logMessage",
+              }))
+            )
+          );
+          // early return as we already dispatched necessary messages.
+          return;
+      }
     }
-  }
 
-  const hasErrorMessage =
-    response.exceptionMessage ||
-    (helperResult && helperResult.type === "error");
+    const hasErrorMessage =
+      response.exceptionMessage ||
+      (helperResult && helperResult.type === "error");
 
-  // Hide undefined results coming from helper functions.
-  const hasUndefinedResult =
-    result && typeof result == "object" && result.type == "undefined";
+    // Hide undefined results coming from helper functions.
+    const hasUndefinedResult =
+      result && typeof result == "object" && result.type == "undefined";
 
-  if (hasErrorMessage || helperHasRawOutput || !hasUndefinedResult) {
-    dispatch(messagesActions.messagesAdd([response]));
-  }
+    if (hasErrorMessage || helperHasRawOutput || !hasUndefinedResult) {
+      dispatch(messagesActions.messagesAdd([response]));
+    }
+  };
+}
+
+function focusInput() {
+  return ({ hud }) => {
+    return hud.focusInput();
+  };
+}
+
+function setInputValue(value) {
+  return ({ hud }) => {
+    return hud.setInputValue(value);
+  };
+}
+
+function terminalInputChanged(expression) {
+  return async ({ dispatch, webConsoleUI, hud, client, getState }) => {
+    const prefs = getAllPrefs(getState());
+    if (!prefs.eagerEvaluation) {
+      return;
+    }
+
+    // The server does not support eager evaluation when replaying.
+    if (hud.currentTarget.isReplayEnabled()) {
+      return;
+    }
+
+    const { terminalInput = "" } = getState().history;
+    // Only re-evaluate if the expression did change.
+    if (
+      terminalInput &&
+      expression &&
+      expression.trim() === terminalInput.trim()
+    ) {
+      return;
+    }
+
+    const originalExpression = expression;
+    dispatch({
+      type: SET_TERMINAL_INPUT,
+      expression: expression.trim(),
+    });
+
+    let mapped;
+    ({ expression, mapped } = await getMappedExpression(hud, expression));
+
+    const { frameActor, webConsoleFront } = webConsoleUI.getFrameActor();
+
+    const response = await client.evaluateJSAsync(expression, {
+      frameActor,
+      selectedNodeFront: webConsoleUI.getSelectedNodeFront(),
+      webConsoleFront,
+      mapped,
+      eager: true,
+    });
+
+    const result = response.exception || response.result;
+
+    // Don't show syntax errors or undefined results to the user.
+    if (result.isSyntaxError || result.type == "undefined") {
+      return;
+    }
+
+    // eslint-disable-next-line consistent-return
+    return dispatch({
+      type: SET_TERMINAL_EAGER_RESULT,
+      expression: originalExpression,
+      result,
+    });
+  };
 }
 
 module.exports = {
   evaluateExpression,
+  focusInput,
+  setInputValue,
+  terminalInputChanged,
 };

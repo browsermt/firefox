@@ -11,6 +11,9 @@ const { Services } = ChromeUtils.import("resource://gre/modules/Services.jsm");
 const { AppConstants } = ChromeUtils.import(
   "resource://gre/modules/AppConstants.jsm"
 );
+const { E10SUtils } = ChromeUtils.import(
+  "resource://gre/modules/E10SUtils.jsm"
+);
 const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
@@ -24,6 +27,7 @@ const PREFS_WHITELIST = [
   "accessibility.",
   "apz.",
   "browser.cache.",
+  "browser.contentblocking.category",
   "browser.display.",
   "browser.download.folderList",
   "browser.download.hide_plugins_without_extensions",
@@ -55,6 +59,7 @@ const PREFS_WHITELIST = [
   "extensions.checkCompatibility",
   "extensions.formautofill.",
   "extensions.lastAppVersion",
+  "fission.autostart",
   "font.",
   "general.autoScroll",
   "general.useragent.",
@@ -77,6 +82,7 @@ const PREFS_WHITELIST = [
   "plugins.",
   "print.",
   "privacy.",
+  "remote.enabled",
   "security.",
   "services.sync.declinedEngines",
   "services.sync.lastPing",
@@ -96,6 +102,7 @@ const PREFS_WHITELIST = [
 
 // The blacklist, unlike the whitelist, is a list of regular expressions.
 const PREFS_BLACKLIST = [
+  /^browser[.]fixup[.]domainwhitelist[.]/,
   /^media[.]webrtc[.]debug[.]aec_log_dir/,
   /^media[.]webrtc[.]debug[.]log_file/,
   /^network[.]proxy[.]/,
@@ -114,7 +121,12 @@ PREFS_GETTERS[Ci.nsIPrefBranch.PREF_INT] = (prefs, name) =>
 PREFS_GETTERS[Ci.nsIPrefBranch.PREF_BOOL] = (prefs, name) =>
   prefs.getBoolPref(name);
 
-const kURLDecorationPref = "privacy.restrict3rdpartystorage.url_decorations";
+// List of unimportant locked prefs (won't be shown on the troubleshooting
+// session)
+const PREFS_UNIMPORTANT_LOCKED = [
+  "dom.postMessage.sharedArrayBuffer.bypassCOOP_COEP.insecure.enabled",
+  "privacy.restrict3rdpartystorage.url_decorations",
+];
 
 // Return the preferences filtered by PREFS_BLACKLIST and PREFS_WHITELIST lists
 // and also by the custom 'filter'-ing function.
@@ -244,20 +256,20 @@ var dataProviders = {
       .trim();
     data.keyLocationServiceGoogleFound =
       keyLocationServiceGoogle != "no-google-location-service-api-key" &&
-      keyLocationServiceGoogle.length > 0;
+      !!keyLocationServiceGoogle.length;
 
     const keySafebrowsingGoogle = Services.urlFormatter
       .formatURL("%GOOGLE_SAFEBROWSING_API_KEY%")
       .trim();
     data.keySafebrowsingGoogleFound =
       keySafebrowsingGoogle != "no-google-safebrowsing-api-key" &&
-      keySafebrowsingGoogle.length > 0;
+      !!keySafebrowsingGoogle.length;
 
     const keyMozilla = Services.urlFormatter
       .formatURL("%MOZILLA_API_KEY%")
       .trim();
     data.keyMozillaFound =
-      keyMozilla != "no-mozilla-api-key" && keyMozilla.length > 0;
+      keyMozilla != "no-mozilla-api-key" && !!keyMozilla.length;
 
     done(data);
   },
@@ -359,6 +371,8 @@ var dataProviders = {
         continue;
       }
 
+      remoteType = E10SUtils.remoteTypePrefix(remoteType);
+
       if (remoteTypes[remoteType]) {
         remoteTypes[remoteType]++;
       } else {
@@ -386,11 +400,11 @@ var dataProviders = {
   },
 
   lockedPreferences: function lockedPreferences(done) {
-    // The URL Decoration pref isn't an important locked pref, so there is no
-    // good reason to report it.
     done(
       getPrefList(
-        name => name != kURLDecorationPref && Services.prefs.prefIsLocked(name)
+        name =>
+          !PREFS_UNIMPORTANT_LOCKED.includes(name) &&
+          Services.prefs.prefIsLocked(name)
       )
     );
   },
@@ -762,7 +776,7 @@ if (AppConstants.MOZ_CRASHREPORTER) {
 if (AppConstants.MOZ_SANDBOX) {
   dataProviders.sandbox = function sandbox(done) {
     let data = {};
-    if (AppConstants.platform == "linux") {
+    if (AppConstants.unixstyle == "linux") {
       const keys = [
         "hasSeccompBPF",
         "hasSeccompTSync",
@@ -807,5 +821,19 @@ if (AppConstants.MOZ_SANDBOX) {
     }
 
     done(data);
+  };
+}
+
+if (AppConstants.ENABLE_REMOTE_AGENT) {
+  dataProviders.remoteAgent = function remoteAgent(done) {
+    const { RemoteAgent } = ChromeUtils.import(
+      "chrome://remote/content/RemoteAgent.jsm"
+    );
+    const { listening, scheme, host, port } = RemoteAgent;
+    let url = "";
+    if (listening) {
+      url = `${scheme}://${host}:${port}/`;
+    }
+    done({ listening, url });
   };
 }

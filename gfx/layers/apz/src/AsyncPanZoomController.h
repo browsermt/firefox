@@ -554,6 +554,10 @@ class AsyncPanZoomController {
   const FrameMetrics& Metrics() const;
   FrameMetrics& Metrics();
 
+  // Helper function to compare root frame metrics and update them
+  // Returns true when the metrics have changed and were updated.
+  bool UpdateRootFrameMetricsIfChanged(FrameMetrics& metrics);
+
  private:
   // Get whether the horizontal content of the honoured target of auto-dir
   // scrolling starts from right to left. If you don't know of auto-dir
@@ -839,6 +843,11 @@ class AsyncPanZoomController {
   void TrackTouch(const MultiTouchInput& aEvent);
 
   /**
+   * Register the start of a touch or pan gesture at the given position and time.
+   */
+  void StartTouch(const ParentLayerPoint& aPoint, uint32_t aTime);
+
+  /**
    * Utility function to send updated FrameMetrics to Gecko so that it can paint
    * the displayport area. Calls into GeckoContentController to do the actual
    * work. This call will use the current metrics. If this function is called
@@ -885,7 +894,7 @@ class AsyncPanZoomController {
    * NOTE: This must be converted to LayoutDevicePoint relative to the child
    * document before sending over IPC to a child process.
    */
-  bool ConvertToGecko(const ScreenIntPoint& aPoint, LayoutDevicePoint* aOut);
+  Maybe<LayoutDevicePoint> ConvertToGecko(const ScreenIntPoint& aPoint);
 
   enum AxisLockMode {
     FREE,     /* No locking at all */
@@ -1044,9 +1053,16 @@ class AsyncPanZoomController {
   // Position on screen where user first put their finger down.
   ExternalPoint mStartTouch;
 
+  Maybe<CompositionPayload> mCompositedScrollPayload;
+
+  // Accessing mScrollPayload needs to be protected by mRecursiveMutex
+  Maybe<CompositionPayload> mScrollPayload;
+
   friend class Axis;
 
  public:
+  Maybe<CompositionPayload> NotifyScrollSampling();
+
   /**
    * Invoke |callable|, passing |mLastContentPaintMetrics| as argument,
    * while holding the APZC lock required to access |mLastContentPaintMetrics|.
@@ -1132,13 +1148,6 @@ class AsyncPanZoomController {
       AsyncTransformComponents aComponents = LayoutAndVisual) const;
 
   /**
-   * Returns the incremental transformation corresponding to the async
-   * panning/zooming of the larger of the visual or layout viewport.
-   */
-  AsyncTransform GetCurrentAsyncTransformForFixedAdjustment(
-      AsyncTransformConsumer aMode) const;
-
-  /**
    * Returns the same transform as GetCurrentAsyncTransform(), but includes
    * any transform due to axis over-scroll.
    */
@@ -1154,6 +1163,11 @@ class AsyncPanZoomController {
   LayoutDeviceToParentLayerScale GetCurrentPinchZoomScale(
       AsyncTransformConsumer aMode) const;
 
+  ParentLayerRect GetCompositionBounds() const {
+    RecursiveMutexAutoLock lock(mRecursiveMutex);
+    return mScrollMetadata.GetMetrics().GetCompositionBounds();
+  }
+
  private:
   /**
    * Samples the composited async transform, making the result of
@@ -1168,16 +1182,6 @@ class AsyncPanZoomController {
    * in |Metrics()| immediately, without any delay.)
    */
   bool SampleCompositedAsyncTransform();
-
-  /**
-   * Returns the incremental transformation corresponding to the async
-   * panning/zooming of the layout viewport (unlike GetCurrentAsyncTransform,
-   * which deals with async movement of the visual viewport). That is, when
-   * this transform is multiplied with the layer's existing transform, it will
-   * make the layer appear with the desired pan/zoom amount.
-   */
-  AsyncTransform GetCurrentAsyncViewportTransform(
-      AsyncTransformConsumer aMode) const;
 
   /*
    * Helper functions to query the async layout viewport, scroll offset, and
@@ -1241,11 +1245,25 @@ class AsyncPanZoomController {
   // held whenever this is updated. In practice though... see bug 897017.
   PanZoomState mState;
 
+  static bool IsPanningState(PanZoomState aState);
+
   /**
    * Returns whether the specified PanZoomState does not need to be reset when
    * a scroll offset update is processed.
    */
   static bool CanHandleScrollOffsetUpdate(PanZoomState aState);
+
+  /**
+   * Determine whether a main-thread scroll offset update should result in
+   * a call to CancelAnimation() (which interrupts in-progress animations and
+   * gestures).
+   *
+   * If the update is a relative update, |aRelativeDelta| contains its amount.
+   * If the update is not a relative update, GetMetrics() should already reflect
+   * the new offset at the time of the call.
+   */
+  bool ShouldCancelAnimationForScrollUpdate(
+      const Maybe<CSSPoint>& aRelativeDelta);
 
  private:
   friend class StateChangeNotificationBlocker;
@@ -1271,6 +1289,7 @@ class AsyncPanZoomController {
   /**
    * Internal helpers for checking general state of this apzc.
    */
+  bool IsInTransformingState() const;
   static bool IsTransformingState(PanZoomState aState);
 
   /* ===================================================================
@@ -1500,6 +1519,8 @@ class AsyncPanZoomController {
                           ParentLayerPoint& aEndPoint,
                           OverscrollHandoffState& aOverscrollHandoffState);
 
+  void RecordScrollPayload(const TimeStamp& aTimeStamp);
+
   /**
    * A helper function for overscrolling during panning. This is a wrapper
    * around OverscrollBy() that also implements restrictions on entering
@@ -1611,7 +1632,9 @@ class AsyncPanZoomController {
 
   wr::RenderRoot GetRenderRoot() const { return mRenderRoot; }
 
-  bool IsPinchZooming() const { return mState == PINCHING; }
+  bool IsAsyncZooming() const {
+    return mState == PINCHING || mState == ANIMATING_ZOOM;
+  }
 
  private:
   // Extra offset to add to the async scroll position for testing

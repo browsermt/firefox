@@ -33,8 +33,13 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
 
   // Initialize this actor after performing startup.
   nsresult Init(const nsString& aPresentationURL, const nsString& aRemoteType,
-                const WindowGlobalInit& aWindowInit,
-                const uint32_t& aChromeFlags, TabId aTabId);
+                const WindowGlobalInit& aWindowInit, uint32_t aChromeFlags,
+                TabId aTabId);
+
+  nsresult InitWithProcess(ContentParent* aContentParent,
+                           const nsString& aPresentationURL,
+                           const WindowGlobalInit& aWindowInit,
+                           uint32_t aChromeFlags, TabId aTabId);
 
   BrowserParent* GetBrowserParent() { return mBrowserParent; }
 
@@ -61,16 +66,14 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
  protected:
   friend class PBrowserBridgeParent;
 
-  mozilla::ipc::IPCResult RecvShow(const ScreenIntSize& aSize,
-                                   const bool& aParentIsActive,
-                                   const nsSizeMode& aSizeMode);
+  mozilla::ipc::IPCResult RecvShow(const OwnerShowInfo&);
+  mozilla::ipc::IPCResult RecvScrollbarPreferenceChanged(ScrollbarPreference);
   mozilla::ipc::IPCResult RecvLoadURL(const nsCString& aUrl);
   mozilla::ipc::IPCResult RecvResumeLoad(uint64_t aPendingSwitchID);
   mozilla::ipc::IPCResult RecvUpdateDimensions(
       const DimensionInfo& aDimensions);
   mozilla::ipc::IPCResult RecvUpdateEffects(const EffectsInfo& aEffects);
   mozilla::ipc::IPCResult RecvRenderLayers(const bool& aEnabled,
-                                           const bool& aForceRepaint,
                                            const LayersObserverEpoch& aEpoch);
 
   mozilla::ipc::IPCResult RecvNavigateByKey(const bool& aForward,
@@ -88,8 +91,10 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
   mozilla::ipc::IPCResult RecvSetIsUnderHiddenEmbedderElement(
       const bool& aIsUnderHiddenEmbedderElement);
 
+#ifdef ACCESSIBILITY
   mozilla::ipc::IPCResult RecvSetEmbedderAccessible(PDocAccessibleParent* aDoc,
                                                     uint64_t aID);
+#endif
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
 
@@ -97,11 +102,10 @@ class BrowserBridgeParent : public PBrowserBridgeParent {
   ~BrowserBridgeParent();
 
   RefPtr<BrowserParent> mBrowserParent;
-#if defined(ACCESSIBILITY)
+#ifdef ACCESSIBILITY
   RefPtr<a11y::DocAccessibleParent> mEmbedderAccessibleDoc;
-  uint64_t mEmbedderAccessibleID;
-#endif  // defined(ACCESSIBILITY)
-  bool mIPCOpen;
+  uint64_t mEmbedderAccessibleID = 0;
+#endif  // ACCESSIBILITY
 };
 
 }  // namespace dom

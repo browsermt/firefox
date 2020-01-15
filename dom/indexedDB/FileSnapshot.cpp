@@ -135,7 +135,7 @@ class StreamWrapper::CloseRunnable final : public Runnable {
       : Runnable("StreamWrapper::CloseRunnable"),
         mStreamWrapper(aStreamWrapper) {}
 
-  ~CloseRunnable() {}
+  ~CloseRunnable() = default;
 
   NS_IMETHOD
   Run() override;
@@ -159,8 +159,6 @@ BlobImplSnapshot::BlobImplSnapshot(BlobImpl* aFileImpl,
   MOZ_ASSERT(aFileImpl);
   MOZ_ASSERT(aFileHandle);
 }
-
-BlobImplSnapshot::~BlobImplSnapshot() {}
 
 NS_IMPL_ISUPPORTS_INHERITED(BlobImplSnapshot, BlobImpl, PIBlobImplSnapshot)
 
@@ -273,23 +271,8 @@ StreamWrapper::IsNonBlocking(bool* _retval) {
 void StreamWrapper::Serialize(InputStreamParams& aParams,
                               FileDescriptorArray& aFileDescriptors,
                               bool aDelayedStart, uint32_t aMaxSize,
-                              uint32_t* aSizeUsed, ContentChild* aManager) {
-  SerializeInternal(aParams, aFileDescriptors, aDelayedStart, aMaxSize,
-                    aSizeUsed, aManager);
-}
-
-void StreamWrapper::Serialize(InputStreamParams& aParams,
-                              FileDescriptorArray& aFileDescriptors,
-                              bool aDelayedStart, uint32_t aMaxSize,
-                              uint32_t* aSizeUsed, PBackgroundChild* aManager) {
-  SerializeInternal(aParams, aFileDescriptors, aDelayedStart, aMaxSize,
-                    aSizeUsed, aManager);
-}
-
-void StreamWrapper::Serialize(InputStreamParams& aParams,
-                              FileDescriptorArray& aFileDescriptors,
-                              bool aDelayedStart, uint32_t aMaxSize,
-                              uint32_t* aSizeUsed, ContentParent* aManager) {
+                              uint32_t* aSizeUsed,
+                              ParentToChildStreamActorManager* aManager) {
   SerializeInternal(aParams, aFileDescriptors, aDelayedStart, aMaxSize,
                     aSizeUsed, aManager);
 }
@@ -298,7 +281,7 @@ void StreamWrapper::Serialize(InputStreamParams& aParams,
                               FileDescriptorArray& aFileDescriptors,
                               bool aDelayedStart, uint32_t aMaxSize,
                               uint32_t* aSizeUsed,
-                              PBackgroundParent* aManager) {
+                              ChildToParentStreamActorManager* aManager) {
   SerializeInternal(aParams, aFileDescriptors, aDelayedStart, aMaxSize,
                     aSizeUsed, aManager);
 }
@@ -382,7 +365,7 @@ StreamWrapper::OnInputStreamReady(nsIAsyncInputStream* aStream) {
       return NS_OK;
     }
 
-    callback.swap(mAsyncWaitCallback);
+    callback = std::move(mAsyncWaitCallback);
   }
 
   MOZ_ASSERT(callback);

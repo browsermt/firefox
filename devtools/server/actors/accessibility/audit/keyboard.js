@@ -23,6 +23,19 @@ loader.lazyRequireGetter(
   "nodeConstants",
   "devtools/shared/dom-node-constants"
 );
+loader.lazyRequireGetter(
+  this,
+  "isDefunct",
+  "devtools/server/actors/utils/accessibility",
+  true
+);
+
+loader.lazyRequireGetter(
+  this,
+  "getAriaRoles",
+  "devtools/server/actors/utils/accessibility",
+  true
+);
 
 const {
   accessibility: {
@@ -45,7 +58,7 @@ const {
 const STYLE_RULE = 1;
 
 // Accessible action for showing long description.
-const SHOW_LONG_DESC_ACTION = "showlongdesc";
+const CLICK_ACTION = "click";
 
 /**
  * Focus specific pseudo classes that the keyboard audit simulates to determine
@@ -54,29 +67,53 @@ const SHOW_LONG_DESC_ACTION = "showlongdesc";
 const FOCUS_PSEUDO_CLASS = ":focus";
 const MOZ_FOCUSRING_PSEUDO_CLASS = ":-moz-focusring";
 
-const INTERACTIVE_ROLES = new Set([
+const KEYBOARD_FOCUSABLE_ROLES = new Set([
   Ci.nsIAccessibleRole.ROLE_BUTTONMENU,
   Ci.nsIAccessibleRole.ROLE_CHECKBUTTON,
-  Ci.nsIAccessibleRole.ROLE_CHECK_MENU_ITEM,
-  Ci.nsIAccessibleRole.ROLE_CHECK_RICH_OPTION,
   Ci.nsIAccessibleRole.ROLE_COMBOBOX,
-  Ci.nsIAccessibleRole.ROLE_COMBOBOX_OPTION,
   Ci.nsIAccessibleRole.ROLE_EDITCOMBOBOX,
   Ci.nsIAccessibleRole.ROLE_ENTRY,
   Ci.nsIAccessibleRole.ROLE_LINK,
   Ci.nsIAccessibleRole.ROLE_LISTBOX,
-  Ci.nsIAccessibleRole.ROLE_MENUITEM,
-  Ci.nsIAccessibleRole.ROLE_OPTION,
-  Ci.nsIAccessibleRole.ROLE_PAGETAB,
   Ci.nsIAccessibleRole.ROLE_PASSWORD_TEXT,
   Ci.nsIAccessibleRole.ROLE_PUSHBUTTON,
   Ci.nsIAccessibleRole.ROLE_RADIOBUTTON,
-  Ci.nsIAccessibleRole.ROLE_RADIO_MENU_ITEM,
-  Ci.nsIAccessibleRole.ROLE_RICH_OPTION,
   Ci.nsIAccessibleRole.ROLE_SLIDER,
   Ci.nsIAccessibleRole.ROLE_SPINBUTTON,
+  Ci.nsIAccessibleRole.ROLE_SUMMARY,
   Ci.nsIAccessibleRole.ROLE_SWITCH,
   Ci.nsIAccessibleRole.ROLE_TOGGLE_BUTTON,
+]);
+
+const INTERACTIVE_ROLES = new Set([
+  ...KEYBOARD_FOCUSABLE_ROLES,
+  Ci.nsIAccessibleRole.ROLE_CHECK_MENU_ITEM,
+  Ci.nsIAccessibleRole.ROLE_CHECK_RICH_OPTION,
+  Ci.nsIAccessibleRole.ROLE_COMBOBOX_OPTION,
+  Ci.nsIAccessibleRole.ROLE_MENUITEM,
+  Ci.nsIAccessibleRole.ROLE_OPTION,
+  Ci.nsIAccessibleRole.ROLE_OUTLINE,
+  Ci.nsIAccessibleRole.ROLE_OUTLINEITEM,
+  Ci.nsIAccessibleRole.ROLE_PAGETAB,
+  Ci.nsIAccessibleRole.ROLE_PARENT_MENUITEM,
+  Ci.nsIAccessibleRole.ROLE_RADIO_MENU_ITEM,
+  Ci.nsIAccessibleRole.ROLE_RICH_OPTION,
+]);
+
+const INTERACTIVE_IF_FOCUSABLE_ROLES = new Set([
+  // If article is focusable, we can assume it is inside a feed.
+  Ci.nsIAccessibleRole.ROLE_ARTICLE,
+  // Column header can be focusable.
+  Ci.nsIAccessibleRole.ROLE_COLUMNHEADER,
+  Ci.nsIAccessibleRole.ROLE_GRID_CELL,
+  Ci.nsIAccessibleRole.ROLE_MENUBAR,
+  Ci.nsIAccessibleRole.ROLE_MENUPOPUP,
+  Ci.nsIAccessibleRole.ROLE_PAGETABLIST,
+  // Row header can be focusable.
+  Ci.nsIAccessibleRole.ROLE_ROWHEADER,
+  Ci.nsIAccessibleRole.ROLE_SCROLLBAR,
+  Ci.nsIAccessibleRole.ROLE_SEPARATOR,
+  Ci.nsIAccessibleRole.ROLE_TOOLBAR,
 ]);
 
 /**
@@ -94,6 +131,28 @@ function isInvalidNode(node) {
     Cu.isDeadWrapper(node) ||
     node.nodeType !== nodeConstants.ELEMENT_NODE ||
     !node.ownerGlobal
+  );
+}
+
+/**
+ * Determine if accessible is focusable with the keyboard.
+ *
+ * @param   {nsIAccessible} accessible
+ *          Accessible for which to determine if it is keyboard focusable.
+ *
+ * @returns {Boolean}
+ *          True if focusable with the keyboard.
+ */
+function isKeyboardFocusable(accessible) {
+  const state = {};
+  accessible.getState(state, {});
+  // State will be focusable even if the tabindex is negative.
+  return (
+    state.value & Ci.nsIAccessibleStates.STATE_FOCUSABLE &&
+    // Platform accessibility will still report STATE_FOCUSABLE even with the
+    // tabindex="-1" so we need to check that it is >= 0 to be considered
+    // keyboard focusable.
+    accessible.DOMNode.tabIndex > -1
   );
 }
 
@@ -237,9 +296,7 @@ function focusStyleRule(accessible) {
   }
 
   // Ignore non-focusable elements.
-  const state = {};
-  accessible.getState(state, {});
-  if (!(state.value & Ci.nsIAccessibleStates.STATE_FOCUSABLE)) {
+  if (!isKeyboardFocusable(accessible)) {
     return null;
   }
 
@@ -294,7 +351,7 @@ function interactiveRule(accessible) {
  *         when enabled, audit report object otherwise.
  */
 function focusableRule(accessible) {
-  if (!INTERACTIVE_ROLES.has(accessible.role)) {
+  if (!KEYBOARD_FOCUSABLE_ROLES.has(accessible.role)) {
     return null;
   }
 
@@ -306,11 +363,16 @@ function focusableRule(accessible) {
     return null;
   }
 
-  // State will be focusable even if the tabindex is negative.
+  if (isKeyboardFocusable(accessible)) {
+    return null;
+  }
+
+  const ariaRoles = getAriaRoles(accessible);
   if (
-    state.value & Ci.nsIAccessibleStates.STATE_FOCUSABLE &&
-    accessible.DOMNode.tabIndex > -1
+    ariaRoles &&
+    (ariaRoles.includes("combobox") || ariaRoles.includes("listbox"))
   ) {
+    // Do not force ARIA combobox or listbox to be focusable.
     return null;
   }
 
@@ -330,29 +392,52 @@ function focusableRule(accessible) {
  *         interactive role, audit report object otherwise.
  */
 function semanticsRule(accessible) {
-  if (INTERACTIVE_ROLES.has(accessible.role)) {
-    return null;
-  }
-
-  const state = {};
-  accessible.getState(state, {});
-  if (state.value & Ci.nsIAccessibleStates.STATE_FOCUSABLE) {
-    return { score: WARNING, issue: FOCUSABLE_NO_SEMANTICS };
-  }
-
   if (
-    // Ignore text leafs.
-    accessible.role === Ci.nsIAccessibleRole.ROLE_TEXT_LEAF ||
-    // Ignore accessibles with no accessible actions.
-    accessible.actionCount === 0
+    INTERACTIVE_ROLES.has(accessible.role) ||
+    // Visible listboxes will have focusable state when inside comboboxes.
+    accessible.role === Ci.nsIAccessibleRole.ROLE_COMBOBOX_LIST
   ) {
     return null;
   }
 
-  // Long desc action might be present for images, ignore it in the list of
-  // actions.
+  if (isKeyboardFocusable(accessible)) {
+    if (INTERACTIVE_IF_FOCUSABLE_ROLES.has(accessible.role)) {
+      return null;
+    }
+
+    // ROLE_TABLE is used for grids too which are considered interactive.
+    if (accessible.role === Ci.nsIAccessibleRole.ROLE_TABLE) {
+      const ariaRoles = getAriaRoles(accessible);
+      if (ariaRoles && ariaRoles.includes("grid")) {
+        return null;
+      }
+    }
+
+    return { score: WARNING, issue: FOCUSABLE_NO_SEMANTICS };
+  }
+
+  const state = {};
+  accessible.getState(state, {});
+  if (
+    // Ignore text leafs.
+    accessible.role === Ci.nsIAccessibleRole.ROLE_TEXT_LEAF ||
+    // Ignore accessibles with no accessible actions.
+    accessible.actionCount === 0 ||
+    // Ignore labels that have a label for relation with their target because
+    // they are clickable.
+    (accessible.role === Ci.nsIAccessibleRole.ROLE_LABEL &&
+      accessible.getRelationByType(Ci.nsIAccessibleRelation.RELATION_LABEL_FOR)
+        .targetsCount > 0) ||
+    // Ignore images that are inside an anchor (have linked state).
+    (accessible.role === Ci.nsIAccessibleRole.ROLE_GRAPHIC &&
+      state.value & Ci.nsIAccessibleStates.STATE_LINKED)
+  ) {
+    return null;
+  }
+
+  // Ignore anything but a click action in the list of actions.
   for (let i = 0; i < accessible.actionCount; i++) {
-    if (accessible.getActionName(i) !== SHOW_LONG_DESC_ACTION) {
+    if (accessible.getActionName(i) === CLICK_ACTION) {
       return { score: FAIL, issue: MOUSE_INTERACTIVE_ONLY };
     }
   }
@@ -378,9 +463,7 @@ function tabIndexRule(accessible) {
     return null;
   }
 
-  const state = {};
-  accessible.getState(state, {});
-  if (!(state.value & Ci.nsIAccessibleStates.STATE_FOCUSABLE)) {
+  if (!isKeyboardFocusable(accessible)) {
     return null;
   }
 
@@ -392,6 +475,9 @@ function tabIndexRule(accessible) {
 }
 
 function auditKeyboard(accessible) {
+  if (isDefunct(accessible)) {
+    return null;
+  }
   // Do not test anything on accessible objects for documents or frames.
   if (
     accessible.role === Ci.nsIAccessibleRole.ROLE_DOCUMENT ||

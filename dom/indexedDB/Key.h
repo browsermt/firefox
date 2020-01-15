@@ -9,6 +9,7 @@
 
 #include "mozilla/dom/indexedDB/IDBResult.h"
 
+#include "js/Array.h"  // JS::GetArrayLength
 #include "js/RootingAPI.h"
 #include "jsapi.h"
 #include "mozilla/ErrorResult.h"
@@ -49,7 +50,7 @@ class Key {
 
   Key() { Unset(); }
 
-  explicit Key(const nsACString& aBuffer) : mBuffer(aBuffer) {}
+  explicit Key(nsCString aBuffer) : mBuffer(std::move(aBuffer)) {}
 
   Key& operator=(int64_t aInt) {
     SetFromInteger(aInt);
@@ -57,37 +58,43 @@ class Key {
   }
 
   bool operator==(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return mBuffer.Equals(aOther.mBuffer);
   }
 
   bool operator!=(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return !mBuffer.Equals(aOther.mBuffer);
   }
 
   bool operator<(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return Compare(mBuffer, aOther.mBuffer) < 0;
   }
 
   bool operator>(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return Compare(mBuffer, aOther.mBuffer) > 0;
   }
 
   bool operator<=(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return Compare(mBuffer, aOther.mBuffer) <= 0;
   }
 
   bool operator>=(const Key& aOther) const {
-    Assert(!mBuffer.IsVoid() && !aOther.mBuffer.IsVoid());
+    MOZ_ASSERT(!mBuffer.IsVoid());
+    MOZ_ASSERT(!aOther.mBuffer.IsVoid());
 
     return Compare(mBuffer, aOther.mBuffer) >= 0;
   }
@@ -107,26 +114,26 @@ class Key {
   bool IsArray() const { return !IsUnset() && *BufferStart() >= eArray; }
 
   double ToFloat() const {
-    Assert(IsFloat());
+    MOZ_ASSERT(IsFloat());
     const EncodedDataType* pos = BufferStart();
     double res = DecodeNumber(pos, BufferEnd());
-    Assert(pos >= BufferEnd());
+    MOZ_ASSERT(pos >= BufferEnd());
     return res;
   }
 
   double ToDateMsec() const {
-    Assert(IsDate());
+    MOZ_ASSERT(IsDate());
     const EncodedDataType* pos = BufferStart();
     double res = DecodeNumber(pos, BufferEnd());
-    Assert(pos >= BufferEnd());
+    MOZ_ASSERT(pos >= BufferEnd());
     return res;
   }
 
   void ToString(nsString& aString) const {
-    Assert(IsString());
+    MOZ_ASSERT(IsString());
     const EncodedDataType* pos = BufferStart();
     DecodeString(pos, BufferEnd(), aString);
-    Assert(pos >= BufferEnd());
+    MOZ_ASSERT(pos >= BufferEnd());
   }
 
   IDBResult<void, IDBSpecialValue::Invalid> SetFromString(
@@ -153,7 +160,7 @@ class Key {
       JSContext* aCx, bool aFirstOfArray, JS::Handle<JS::Value> aVal,
       ErrorResult& aRv);
 
-  IDBResult<void, IDBSpecialValue::Invalid> ToLocaleBasedKey(
+  IDBResult<void, IDBSpecialValue::Invalid> ToLocaleAwareKey(
       Key& aTarget, const nsCString& aLocale, ErrorResult& aRv) const;
 
   void FinishArray() { TrimBuffer(); }
@@ -189,7 +196,7 @@ class Key {
       ArrayConversionPolicy&& aPolicy, ErrorResult& aRv) {
     // 1. Let `len` be ? ToLength( ? Get(`input`, "length")).
     uint32_t len;
-    if (!JS_GetArrayLength(aCx, aObject, &len)) {
+    if (!JS::GetArrayLength(aCx, aObject, &len)) {
       aRv.Throw(NS_ERROR_DOM_INDEXEDDB_UNKNOWN_ERR);
       return Exception;
     }
@@ -357,14 +364,6 @@ class Key {
 
   template <typename T>
   nsresult SetFromSource(T* aSource, uint32_t aIndex);
-
-  void Assert(bool aCondition) const
-#ifdef DEBUG
-      ;
-#else
-  {
-  }
-#endif
 };
 
 }  // namespace indexedDB

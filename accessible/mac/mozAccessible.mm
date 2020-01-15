@@ -10,8 +10,6 @@
 
 #include "Accessible-inl.h"
 #include "nsAccUtils.h"
-#include "nsIAccessibleRelation.h"
-#include "nsIAccessibleEditableText.h"
 #include "nsIPersistentProperties2.h"
 #include "DocAccessibleParent.h"
 #include "Relation.h"
@@ -90,9 +88,9 @@ static inline NSMutableArray* ConvertToNSArray(nsTArray<ProxyAccessible*>& aArra
   if ((self = [super init])) {
     mGeckoAccessible = aGeckoAccessible;
     if (aGeckoAccessible & IS_PROXY)
-      mRole = [self getProxyAccessible] -> Role();
+      mRole = [self getProxyAccessible]->Role();
     else
-      mRole = [self getGeckoAccessible] -> Role();
+      mRole = [self getGeckoAccessible]->Role();
   }
 
   return self;
@@ -870,6 +868,10 @@ struct RoleDescrComparator {
   if (mRole == roles::FIGURE) return utils::LocalizedString(NS_LITERAL_STRING("figure"));
 
   if (mRole == roles::HEADING) return utils::LocalizedString(NS_LITERAL_STRING("heading"));
+
+  if (mRole == roles::MARK) {
+    return utils::LocalizedString(NS_LITERAL_STRING("highlight"));
+  }
 
   NSString* subrole = [self subrole];
 

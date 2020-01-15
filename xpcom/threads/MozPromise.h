@@ -9,11 +9,12 @@
 
 #  include "mozilla/Logging.h"
 #  include "mozilla/Maybe.h"
-#  include "mozilla/Mutex.h"
 #  include "mozilla/Monitor.h"
+#  include "mozilla/Mutex.h"
 #  include "mozilla/RefPtr.h"
 #  include "mozilla/Tuple.h"
 #  include "mozilla/TypeTraits.h"
+#  include "mozilla/UniquePtr.h"
 #  include "mozilla/Variant.h"
 
 #  include "nsISerialEventTarget.h"
@@ -37,6 +38,10 @@
 #  endif
 
 namespace mozilla {
+
+namespace dom {
+class Promise;
+}
 
 extern LazyLogModule gMozPromiseLog;
 
@@ -954,6 +959,12 @@ class MozPromise : public MozPromiseBase {
   }
 #  endif
 
+  // Creates a C++ MozPromise from its JS counterpart, dom::Promise.
+  // FromDomPromise currently only supports primitive types (int8/16/32, float,
+  // double) And the reject value type must be a nsresult.
+  // To use, please include MozPromiseInlines.h
+  static RefPtr<MozPromise> FromDomPromise(dom::Promise* aDOMPromise);
+
   // Note we expose the function AssertIsDead() instead of IsDead() since
   // checking IsDead() is a data race in the situation where the request is not
   // dead. Therefore we enforce the form |Assert(IsDead())| by exposing
@@ -1340,7 +1351,7 @@ class ProxyRunnable : public CancelableRunnable {
 
  private:
   RefPtr<typename PromiseType::Private> mProxyPromise;
-  nsAutoPtr<MethodCall<PromiseType, MethodType, ThisType, Storages...>>
+  UniquePtr<MethodCall<PromiseType, MethodType, ThisType, Storages...>>
       mMethodCall;
 };
 
@@ -1490,7 +1501,7 @@ static auto InvokeAsync(nsISerialEventTarget* aTarget, const char* aCallerName,
 template <typename Function>
 static auto InvokeAsync(nsISerialEventTarget* aTarget, const char* aCallerName,
                         Function&& aFunction) -> decltype(aFunction()) {
-  static_assert(!IsLvalueReference<Function>::value,
+  static_assert(!std::is_lvalue_reference_v<Function>,
                 "Function object must not be passed by lvalue-ref (to avoid "
                 "unplanned copies); Consider move()ing the object.");
   return detail::InvokeAsync(aTarget, aCallerName,

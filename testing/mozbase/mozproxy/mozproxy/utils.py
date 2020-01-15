@@ -12,6 +12,7 @@ import gzip
 import os
 import signal
 import sys
+import socket
 from six.moves.urllib.request import urlretrieve
 
 try:
@@ -110,17 +111,17 @@ def tooltool_download(manifest, run_local, raptor_dir):
             _cache,
         ]
 
-    proc = ProcessHandler(
-        command, processOutputLine=outputHandler, storeOutput=False, cwd=raptor_dir
-    )
-
-    proc.run()
-
     try:
+        proc = ProcessHandler(
+            command, processOutputLine=outputHandler, storeOutput=False, cwd=raptor_dir
+        )
+        proc.run()
         proc.wait()
-    except Exception:
+    except Exception as e:
+        LOG.critical("Error while downloading the hostutils from tooltool: {}".format(str(e)))
         if proc.poll() is None:
             proc.kill(signal.SIGTERM)
+        raise
 
 
 def archive_type(path):
@@ -213,3 +214,12 @@ def download_file_from_url(url, local_dest, extract=False):
 
     extract_archive(local_dest, os.path.dirname(local_dest), typ)
     return True
+
+
+def get_available_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    s.close()
+    return port

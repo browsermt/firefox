@@ -30,12 +30,16 @@ import AccessibleImage from "../shared/AccessibleImage";
 import CommandBar from "../SecondaryPanes/CommandBar";
 
 import type { Source, Context } from "../../types";
+import type { TabsSources } from "../../reducers/types";
 
-type SourcesList = Source[];
-
+type OwnProps = {|
+  horizontal: boolean,
+  startPanelCollapsed: boolean,
+  endPanelCollapsed: boolean,
+|};
 type Props = {
   cx: Context,
-  tabSources: SourcesList,
+  tabSources: TabsSources,
   selectedSource: ?Source,
   horizontal: boolean,
   startPanelCollapsed: boolean,
@@ -50,8 +54,25 @@ type Props = {
 
 type State = {
   dropdownShown: boolean,
-  hiddenTabs: SourcesList,
+  hiddenTabs: TabsSources,
 };
+
+function haveTabSourcesChanged(
+  tabSources: TabsSources,
+  prevTabSources: TabsSources
+): boolean {
+  if (tabSources.length !== prevTabSources.length) {
+    return true;
+  }
+
+  for (let i = 0; i < tabSources.length; ++i) {
+    if (tabSources[i].id !== prevTabSources[i].id) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 class Tabs extends PureComponent<Props, State> {
   onTabContextMenu: Function;
@@ -65,7 +86,7 @@ class Tabs extends PureComponent<Props, State> {
   renderEndPanelToggleButton: Function;
   onResize: Function;
 
-  constructor(props) {
+  constructor(props: Props) {
     super(props);
     this.state = {
       dropdownShown: false,
@@ -77,8 +98,11 @@ class Tabs extends PureComponent<Props, State> {
     });
   }
 
-  componentDidUpdate(prevProps) {
-    if (!(prevProps === this.props)) {
+  componentDidUpdate(prevProps: Props) {
+    if (
+      this.props.selectedSource !== prevProps.selectedSource ||
+      haveTabSourcesChanged(this.props.tabSources, prevProps.tabSources)
+    ) {
       this.updateHiddenTabs();
     }
   }
@@ -121,7 +145,7 @@ class Tabs extends PureComponent<Props, State> {
     this.setState({ hiddenTabs });
   };
 
-  toggleSourcesDropdown(e) {
+  toggleSourcesDropdown() {
     this.setState(prevState => ({
       dropdownShown: !prevState.dropdownShown,
     }));
@@ -234,7 +258,7 @@ const mapStateToProps = state => ({
   isPaused: getIsPaused(state, getCurrentThread(state)),
 });
 
-export default connect(
+export default connect<Props, OwnProps, _, _, _, _>(
   mapStateToProps,
   {
     selectSource: actions.selectSource,

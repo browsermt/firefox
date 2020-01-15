@@ -7,9 +7,7 @@
 #include "mozilla/Module.h"
 #include "nsXULAppAPI.h"
 #include "nsIThread.h"
-#include "nsIComponentRegistrar.h"
 
-#include "nsAutoPtr.h"
 #include "nsThreadUtils.h"
 #include "nsXPCOMCIDInternal.h"
 #include "pratom.h"

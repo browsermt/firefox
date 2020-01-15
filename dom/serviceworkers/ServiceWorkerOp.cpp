@@ -252,13 +252,14 @@ bool DispatchFailed(nsresult aStatus) {
 
 }  // anonymous namespace
 
-class ServiceWorkerOp::ServiceWorkerOpRunnable : public WorkerRunnable {
+class ServiceWorkerOp::ServiceWorkerOpRunnable : public WorkerDebuggeeRunnable {
  public:
   NS_DECL_ISUPPORTS_INHERITED
 
   ServiceWorkerOpRunnable(RefPtr<ServiceWorkerOp> aOwner,
                           WorkerPrivate* aWorkerPrivate)
-      : WorkerRunnable(aWorkerPrivate), mOwner(std::move(aOwner)) {
+      : WorkerDebuggeeRunnable(aWorkerPrivate, WorkerThreadModifyBusyCount),
+        mOwner(std::move(aOwner)) {
     AssertIsOnMainThread();
     MOZ_ASSERT(mOwner);
     MOZ_ASSERT(aWorkerPrivate);
@@ -357,21 +358,6 @@ bool ServiceWorkerOp::MaybeStart(RemoteWorkerChild* aOwner,
           owner->CloseWorkerOnMainThread(state);
         } else {
           MOZ_ASSERT(state.is<Running>());
-
-          if (NS_WARN_IF(
-                  state.as<Running>().mWorkerPrivate->ParentStatusProtected() >
-                  Running)) {
-            owner->GetTerminationPromise()->Then(
-                GetCurrentThreadSerialEventTarget(), __func__,
-                [self = std::move(self)](
-                    const GenericNonExclusivePromise::ResolveOrRejectValue&) {
-                  MOZ_ASSERT(!self->mPromiseHolder.IsEmpty());
-                  self->RejectAll(NS_ERROR_DOM_ABORT_ERR);
-                });
-
-            owner->CloseWorkerOnMainThread(state);
-            return;
-          }
 
           RefPtr<WorkerRunnable> workerRunnable =
               self->GetRunnable(state.as<Running>().mWorkerPrivate);
@@ -881,11 +867,7 @@ class NotificationEventOp : public ExtendableEventOp,
     init.mCancelable = false;
 
     RefPtr<NotificationEvent> notificationEvent =
-        NotificationEvent::Constructor(target, args.eventName(), init, result);
-
-    if (NS_WARN_IF(result.Failed())) {
-      return false;
-    }
+        NotificationEvent::Constructor(target, args.eventName(), init);
 
     notificationEvent->SetTrusted(true);
 
@@ -974,6 +956,7 @@ class MessageEventOp final : public ExtendableEventOp {
     Sequence<OwningNonNull<MessagePort>> ports;
     if (!mData->TakeTransferredPortsAsSequence(ports)) {
       RejectAll(NS_ERROR_FAILURE);
+      rv.SuppressException();
       return true;
     }
 
@@ -992,18 +975,14 @@ class MessageEventOp final : public ExtendableEventOp {
     init.mSource.SetValue().SetAsClient() = new Client(
         sgo, mArgs.get_ServiceWorkerMessageEventOpArgs().clientInfoAndState());
 
-    rv = NS_OK;
+    rv.SuppressException();
     RefPtr<EventTarget> target = aWorkerPrivate->GlobalScope();
     RefPtr<ExtendableMessageEvent> extendableEvent =
         ExtendableMessageEvent::Constructor(
             target,
             deserializationFailed ? NS_LITERAL_STRING("messageerror")
                                   : NS_LITERAL_STRING("message"),
-            init, rv);
-    if (NS_WARN_IF(rv.Failed())) {
-      RejectAll(rv.StealNSResult());
-      return false;
-    }
+            init);
 
     extendableEvent->SetTrusted(true);
 
@@ -1372,9 +1351,8 @@ void FetchEventOp::ResolvedCallback(JSContext* aCx,
 
   if (response->Type() == ResponseType::Opaque &&
       requestMode != RequestMode::No_cors) {
-    uint32_t mode = static_cast<uint32_t>(requestMode);
-    NS_ConvertASCIItoUTF16 modeString(RequestModeValues::strings[mode].value,
-                                      RequestModeValues::strings[mode].length);
+    NS_ConvertASCIItoUTF16 modeString(
+        RequestModeValues::GetString(requestMode));
 
     nsAutoString requestURL;
     GetRequestURL(requestURL);
@@ -1577,12 +1555,8 @@ nsresult FetchEventOp::DispatchFetchEvent(JSContext* aCx,
   /**
    * Step 4b: create the FetchEvent
    */
-  ErrorResult result;
   RefPtr<FetchEvent> fetchEvent = FetchEvent::Constructor(
-      globalObject, NS_LITERAL_STRING("fetch"), fetchEventInit, result);
-  if (NS_WARN_IF(result.Failed())) {
-    return result.StealNSResult();
-  }
+      globalObject, NS_LITERAL_STRING("fetch"), fetchEventInit);
   fetchEvent->SetTrusted(true);
   fetchEvent->PostInit(args.workerScriptSpec(), this);
 

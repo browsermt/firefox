@@ -18,18 +18,16 @@
 #include "nsITheme.h"
 #include "nsITimer.h"
 #include "nsRegionFwd.h"
-#include "nsStyleConsts.h"
 #include "nsXULAppAPI.h"
 #include "mozilla/Maybe.h"
 #include "mozilla/EventForwards.h"
-#include "mozilla/layers/APZTypes.h"
-#include "mozilla/layers/LayersTypes.h"
 #include "mozilla/layers/ScrollableLayerGuid.h"
 #include "mozilla/layers/ZoomConstraints.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/TimeStamp.h"
 #include "mozilla/gfx/Point.h"
 #include "mozilla/widget/IMEData.h"
+#include "VsyncSource.h"
 #include "nsDataHashtable.h"
 #include "nsIObserver.h"
 #include "nsIWidgetListener.h"
@@ -46,6 +44,9 @@ class nsIRunnable;
 class nsIKeyEventInPluginCallback;
 
 namespace mozilla {
+
+enum class StyleWindowShadow : uint8_t;
+
 #if defined(MOZ_WIDGET_ANDROID)
 namespace ipc {
 class Shmem;
@@ -65,6 +66,7 @@ struct FrameMetrics;
 class LayerManager;
 class LayerManagerComposite;
 class PLayerTransactionChild;
+struct SLGuidAndRenderRoot;
 class WebRenderBridgeChild;
 }  // namespace layers
 namespace gfx {
@@ -260,6 +262,12 @@ enum nsTopLevelWidgetZPlacement {  // for PlaceBehind()
  * notified.
  */
 #define NS_WIDGET_RESUME_PROCESS_OBSERVER_TOPIC "resume_process_notification"
+
+/**
+ * When an app(-shell) is activated by the OS, this topic is notified.
+ * Currently, this only happens on Mac OSX.
+ */
+#define NS_WIDGET_MAC_APP_ACTIVATE_OBSERVER_TOPIC "mac_app_activate"
 
 namespace mozilla {
 namespace widget {
@@ -837,6 +845,11 @@ class nsIWidget : public nsISupports {
   virtual nsSizeMode SizeMode() = 0;
 
   /**
+   * Ask whether the window is tiled.
+   */
+  virtual bool IsTiled() const = 0;
+
+  /**
    * Ask wether the widget is fully occluded
    */
   virtual bool IsFullyOccluded() const = 0;
@@ -1106,7 +1119,7 @@ class nsIWidget : public nsISupports {
    *
    * Ignored on child widgets and on non-Mac platforms.
    */
-  virtual void SetWindowShadowStyle(int32_t aStyle) = 0;
+  virtual void SetWindowShadowStyle(mozilla::StyleWindowShadow aStyle) = 0;
 
   /**
    * Set the opacity of the window.
@@ -1123,6 +1136,13 @@ class nsIWidget : public nsISupports {
    * Ignored on child widgets and on non-Mac platforms.
    */
   virtual void SetWindowTransform(const mozilla::gfx::Matrix& aTransform) {}
+
+  /**
+   * Set whether the window should ignore mouse events or not.
+   *
+   * This is only used on popup windows.
+   */
+  virtual void SetWindowMouseTransparent(bool aIsTransparent) {}
 
   /*
    * On Mac OS X, this method shows or hides the pill button in the titlebar
@@ -1708,6 +1728,15 @@ class nsIWidget : public nsISupports {
     return NS_ERROR_NOT_IMPLEMENTED;
   }
 
+  // Get rectangle of the screen where the window is placed.
+  // It's used to detect popup overflow under Wayland because
+  // Screenmanager does not work under it.
+#ifdef MOZ_WAYLAND
+  virtual nsresult GetScreenRect(LayoutDeviceIntRect* aRect) {
+    return NS_ERROR_NOT_IMPLEMENTED;
+  }
+#endif
+
  private:
   class LongTapInfo {
    public:
@@ -1875,7 +1904,7 @@ class nsIWidget : public nsISupports {
     NativeKeyBindingsForMultiLineEditor,
     NativeKeyBindingsForRichTextEditor
   };
-  virtual void GetEditCommands(NativeKeyBindingsType aType,
+  virtual bool GetEditCommands(NativeKeyBindingsType aType,
                                const mozilla::WidgetKeyboardEvent& aEvent,
                                nsTArray<mozilla::CommandInt>& aCommands);
 
@@ -1998,6 +2027,12 @@ class nsIWidget : public nsISupports {
   virtual CompositorBridgeChild* GetRemoteRenderer() { return nullptr; }
 
   /**
+   * If this widget has its own vsync source, return it, otherwise return
+   * nullptr. An example of such local source would be Wayland frame callbacks.
+   */
+  virtual RefPtr<mozilla::gfx::VsyncSource> GetVsyncSource() { return nullptr; }
+
+  /**
    * Returns true if the widget requires synchronous repaints on resize,
    * false otherwise.
    */
@@ -2099,6 +2134,11 @@ class nsIWidget : public nsISupports {
    */
   virtual void RecvScreenPixels(mozilla::ipc::Shmem&& aMem,
                                 const ScreenIntSize& aSize) = 0;
+
+  virtual void UpdateDynamicToolbarMaxHeight(mozilla::ScreenIntCoord aHeight) {}
+  virtual mozilla::ScreenIntCoord GetDynamicToolbarMaxHeight() const {
+    return 0;
+  }
 #endif
 
   static already_AddRefed<nsIBidiKeyboard> CreateBidiKeyboard();

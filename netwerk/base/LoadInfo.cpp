@@ -6,6 +6,7 @@
 
 #include "mozilla/LoadInfo.h"
 
+#include "js/Array.h"  // JS::NewArrayObject
 #include "mozilla/Assertions.h"
 #include "mozilla/ExpandedPrincipal.h"
 #include "mozilla/dom/ClientIPCTypes.h"
@@ -25,7 +26,6 @@
 #include "nsIDocShell.h"
 #include "mozilla/dom/Document.h"
 #include "nsCookiePermission.h"
-#include "nsICookieService.h"
 #include "nsIInterfaceRequestorUtils.h"
 #include "nsISupportsImpl.h"
 #include "nsISupportsUtils.h"
@@ -69,6 +69,7 @@ LoadInfo::LoadInfo(
       mSecurityFlags(aSecurityFlags),
       mInternalContentPolicyType(aContentPolicyType),
       mTainting(LoadTainting::Basic),
+      mBlockAllMixedContent(false),
       mUpgradeInsecureRequests(false),
       mBrowserUpgradeInsecureRequests(false),
       mBrowserWouldUpgradeInsecureRequests(false),
@@ -176,7 +177,7 @@ LoadInfo::LoadInfo(
       nsGlobalWindowInner* innerWindow =
           nsGlobalWindowInner::Cast(contextOuter->GetCurrentInnerWindow());
       if (innerWindow) {
-        mTopLevelPrincipal = innerWindow->GetTopLevelPrincipal();
+        mTopLevelPrincipal = innerWindow->GetTopLevelAntiTrackingPrincipal();
 
         // The top-level-storage-area-principal is not null only for the first
         // level of iframes (null for top-level contexts, and null for
@@ -255,6 +256,13 @@ LoadInfo::LoadInfo(
       }
     }
 
+    // if the document forces all mixed content to be blocked, then we
+    // store that bit for all requests on the loadinfo.
+    mBlockAllMixedContent =
+        aLoadingContext->OwnerDoc()->GetBlockAllMixedContent(false) ||
+        (nsContentUtils::IsPreloadType(mInternalContentPolicyType) &&
+         aLoadingContext->OwnerDoc()->GetBlockAllMixedContent(true));
+
     // if the document forces all requests to be upgraded from http to https,
     // then we should do that for all requests. If it only forces preloads to be
     // upgraded then we should enforce upgrade insecure requests only for
@@ -265,17 +273,11 @@ LoadInfo::LoadInfo(
          aLoadingContext->OwnerDoc()->GetUpgradeInsecureRequests(true));
 
     if (nsContentUtils::IsUpgradableDisplayType(externalType)) {
-      nsCOMPtr<nsIURI> uri;
-      mLoadingPrincipal->GetURI(getter_AddRefs(uri));
-      if (uri) {
-        // Checking https not secure context as http://localhost can't be
-        // upgraded
-        if (uri->SchemeIs("https")) {
-          if (nsMixedContentBlocker::ShouldUpgradeMixedDisplayContent()) {
-            mBrowserUpgradeInsecureRequests = true;
-          } else {
-            mBrowserWouldUpgradeInsecureRequests = true;
-          }
+      if (mLoadingPrincipal->SchemeIs("https")) {
+        if (nsMixedContentBlocker::ShouldUpgradeMixedDisplayContent()) {
+          mBrowserUpgradeInsecureRequests = true;
+        } else {
+          mBrowserWouldUpgradeInsecureRequests = true;
         }
       }
     }
@@ -290,7 +292,7 @@ LoadInfo::LoadInfo(
         aLoadingContext->OwnerDoc()->GetLoadContext();
     nsCOMPtr<nsIDocShell> docShell = aLoadingContext->OwnerDoc()->GetDocShell();
     if (loadContext && docShell &&
-        docShell->ItemType() == nsIDocShellTreeItem::typeContent) {
+        docShell->GetBrowsingContext()->IsContent()) {
       bool usePrivateBrowsing;
       nsresult rv = loadContext->GetUsePrivateBrowsing(&usePrivateBrowsing);
       if (NS_SUCCEEDED(rv)) {
@@ -305,7 +307,7 @@ LoadInfo::LoadInfo(
   if (aLoadingContext) {
     nsCOMPtr<nsIDocShell> docShell = aLoadingContext->OwnerDoc()->GetDocShell();
     if (docShell) {
-      if (docShell->ItemType() == nsIDocShellTreeItem::typeChrome) {
+      if (docShell->GetBrowsingContext()->IsChrome()) {
         MOZ_ASSERT(mOriginAttributes.mPrivateBrowsingId == 0,
                    "chrome docshell shouldn't have mPrivateBrowsingId set.");
       }
@@ -328,6 +330,7 @@ LoadInfo::LoadInfo(nsPIDOMWindowOuter* aOuterWindow,
       mSecurityFlags(aSecurityFlags),
       mInternalContentPolicyType(nsIContentPolicy::TYPE_DOCUMENT),
       mTainting(LoadTainting::Basic),
+      mBlockAllMixedContent(false),
       mUpgradeInsecureRequests(false),
       mBrowserUpgradeInsecureRequests(false),
       mBrowserWouldUpgradeInsecureRequests(false),
@@ -385,7 +388,7 @@ LoadInfo::LoadInfo(nsPIDOMWindowOuter* aOuterWindow,
   nsGlobalWindowInner* innerWindow =
       nsGlobalWindowInner::Cast(aOuterWindow->GetCurrentInnerWindow());
   if (innerWindow) {
-    mTopLevelPrincipal = innerWindow->GetTopLevelPrincipal();
+    mTopLevelPrincipal = innerWindow->GetTopLevelAntiTrackingPrincipal();
     // mTopLevelStorageAreaPrincipal is always null for top-level document
     // loading.
   }
@@ -401,7 +404,7 @@ LoadInfo::LoadInfo(nsPIDOMWindowOuter* aOuterWindow,
                         mAncestorOuterWindowIDs.Length());
 
 #ifdef DEBUG
-  if (docShell->ItemType() == nsIDocShellTreeItem::typeChrome) {
+  if (docShell->GetBrowsingContext()->IsChrome()) {
     MOZ_ASSERT(mOriginAttributes.mPrivateBrowsingId == 0,
                "chrome docshell shouldn't have mPrivateBrowsingId set.");
   }
@@ -434,6 +437,7 @@ LoadInfo::LoadInfo(const LoadInfo& rhs)
       mSecurityFlags(rhs.mSecurityFlags),
       mInternalContentPolicyType(rhs.mInternalContentPolicyType),
       mTainting(rhs.mTainting),
+      mBlockAllMixedContent(rhs.mBlockAllMixedContent),
       mUpgradeInsecureRequests(rhs.mUpgradeInsecureRequests),
       mBrowserUpgradeInsecureRequests(rhs.mBrowserUpgradeInsecureRequests),
       mBrowserWouldUpgradeInsecureRequests(
@@ -488,8 +492,8 @@ LoadInfo::LoadInfo(
     const Maybe<ClientInfo>& aInitialClientInfo,
     const Maybe<ServiceWorkerDescriptor>& aController,
     nsSecurityFlags aSecurityFlags, nsContentPolicyType aContentPolicyType,
-    LoadTainting aTainting, bool aUpgradeInsecureRequests,
-    bool aBrowserUpgradeInsecureRequests,
+    LoadTainting aTainting, bool aBlockAllMixedContent,
+    bool aUpgradeInsecureRequests, bool aBrowserUpgradeInsecureRequests,
     bool aBrowserWouldUpgradeInsecureRequests, bool aForceAllowDataURI,
     bool aAllowInsecureRedirectToDataURI, bool aBypassCORSChecks,
     bool aSkipContentPolicyCheckForWebRequest,
@@ -526,6 +530,7 @@ LoadInfo::LoadInfo(
       mSecurityFlags(aSecurityFlags),
       mInternalContentPolicyType(aContentPolicyType),
       mTainting(aTainting),
+      mBlockAllMixedContent(aBlockAllMixedContent),
       mUpgradeInsecureRequests(aUpgradeInsecureRequests),
       mBrowserUpgradeInsecureRequests(aBrowserUpgradeInsecureRequests),
       mBrowserWouldUpgradeInsecureRequests(
@@ -911,6 +916,12 @@ nsContentPolicyType LoadInfo::InternalContentPolicyType() {
 }
 
 NS_IMETHODIMP
+LoadInfo::GetBlockAllMixedContent(bool* aResult) {
+  *aResult = mBlockAllMixedContent;
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 LoadInfo::GetUpgradeInsecureRequests(bool* aResult) {
   *aResult = mUpgradeInsecureRequests;
   return NS_OK;
@@ -1139,7 +1150,8 @@ LoadInfo::AppendRedirectHistoryEntry(nsIRedirectHistoryEntry* aEntry,
 NS_IMETHODIMP
 LoadInfo::GetRedirects(JSContext* aCx, JS::MutableHandle<JS::Value> aRedirects,
                        const RedirectHistoryArray& aArray) {
-  JS::Rooted<JSObject*> redirects(aCx, JS_NewArrayObject(aCx, aArray.Length()));
+  JS::Rooted<JSObject*> redirects(aCx,
+                                  JS::NewArrayObject(aCx, aArray.Length()));
   NS_ENSURE_TRUE(redirects, NS_ERROR_OUT_OF_MEMORY);
 
   JS::Rooted<JSObject*> global(aCx, JS::CurrentGlobalOrNull(aCx));

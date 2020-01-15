@@ -250,7 +250,21 @@ already_AddRefed<Promise> ExecuteOpOnMainOrWorkerThread(
     // Storage Standard 7. API
     // If origin is an opaque origin, then reject promise with a TypeError.
     if (principal->GetIsNullPrincipal()) {
-      promise->MaybeReject(NS_ERROR_DOM_TYPE_ERR);
+      switch (aType) {
+        case RequestResolver::Type::Persisted:
+          promise->MaybeRejectWithTypeError(
+              u"persisted() called for opaque origin");
+          break;
+        case RequestResolver::Type::Persist:
+          promise->MaybeRejectWithTypeError(
+              u"persist() called for opaque origin");
+          break;
+        case RequestResolver::Type::Estimate:
+          promise->MaybeRejectWithTypeError(
+              u"estimate() called for opaque origin");
+          break;
+      }
+
       return promise.forget();
     }
 
@@ -271,6 +285,8 @@ already_AddRefed<Promise> ExecuteOpOnMainOrWorkerThread(
 
         // In private browsing mode, no permission prompt.
         if (nsContentUtils::IsInPrivateBrowsing(doc)) {
+          aRv = request->Cancel();
+        } else if (!request->CheckPermissionDelegate()) {
           aRv = request->Cancel();
         } else {
           aRv = request->Start();
@@ -381,7 +397,8 @@ void RequestResolver::ResolveOrReject() {
     if (NS_SUCCEEDED(mResultCode)) {
       promise->MaybeResolve(mStorageEstimate);
     } else {
-      promise->MaybeReject(NS_ERROR_DOM_TYPE_ERR);
+      promise->MaybeRejectWithTypeError(
+          u"Internal error while estimating storage usage");
     }
 
     return;

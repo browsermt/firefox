@@ -1,3 +1,5 @@
+/* import-globals-from common.js */
+
 var { AppConstants } = ChromeUtils.import(
   "resource://gre/modules/AppConstants.jsm"
 );
@@ -119,7 +121,7 @@ function openBrowserWindowIntl() {
     }
   }
 
-  gBrowserContext.browserWnd = window.openDialog(
+  gBrowserContext.browserWnd = window.docShell.rootTreeItem.domWindow.openDialog(
     AppConstants.BROWSER_CHROME_URL,
     "_blank",
     params,

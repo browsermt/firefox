@@ -10,7 +10,9 @@ import json
 import logging
 import time
 import sys
+from collections import defaultdict
 
+from six import text_type
 from redo import retry
 import yaml
 
@@ -27,7 +29,7 @@ from .util.schema import validate_schema, Schema
 from .util.taskcluster import get_artifact
 from .util.taskgraph import find_decision_task, find_existing_tasks_from_previous_kinds
 from .util.yaml import load_yaml
-from voluptuous import Required, Optional, Url
+from voluptuous import Required, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ PER_PROJECT_PARAMETERS = {
     },
 
     'ash': {
-        'target_tasks_method': 'ash_tasks',
+        'target_tasks_method': 'default',
     },
 
     'cedar': {
@@ -77,11 +79,6 @@ PER_PROJECT_PARAMETERS = {
         'release_type': 'release',
     },
 
-    'mozilla-esr60': {
-        'target_tasks_method': 'mozilla_esr60_tasks',
-        'release_type': 'esr60',
-    },
-
     'mozilla-esr68': {
         'target_tasks_method': 'mozilla_esr68_tasks',
         'release_type': 'esr68',
@@ -95,11 +92,6 @@ PER_PROJECT_PARAMETERS = {
     'comm-beta': {
         'target_tasks_method': 'mozilla_beta_tasks',
         'release_type': 'beta',
-    },
-
-    'comm-esr60': {
-        'target_tasks_method': 'mozilla_esr60_tasks',
-        'release_type': 'release',
     },
 
     'comm-esr68': {
@@ -120,25 +112,36 @@ PER_PROJECT_PARAMETERS = {
 visual_metrics_jobs_schema = Schema({
         Required('jobs'): [
             {
-                Required('browsertime_json_url'): Url(),
-                Required('video_url'): Url(),
+                Required('test_name'): str,
+                Required('json_location'): str,
+                Required('video_location'): str,
             }
         ]
 })
 
 try_task_config_schema = Schema({
     Required('tasks'): [basestring],
-    Optional('templates'): {basestring: object},
-    Optional('disable-pgo'): bool,
     Optional('browsertime'): bool,
+    Optional('chemspill-prio'): bool,
+    Optional('disable-pgo'): bool,
+    Optional('env'): {basestring: basestring},
+    Optional('gecko-profile'): bool,
+    Optional('rebuild'): int,
+    Optional('use-artifact-builds'): bool,
     # Keep in sync with JOB_SCHEMA in taskcluster/docker/visual-metrics/run-visual-metrics.py.
     Optional('visual-metrics-jobs'): visual_metrics_jobs_schema,
     Optional(
-        "debian-tests",
-        description="Run linux desktop tests on debian 10 (buster)."
+        "ubuntu-bionic",
+        description="Run linux desktop tests on Ubuntu 18.04 (bionic)."
         ): bool,
+    Optional(
+        "worker-overrides",
+        description="Mapping of worker alias to worker pools to use for those aliases."
+    ): {text_type: text_type}
 })
-
+"""
+Schema for try_task_config.json files.
+"""
 
 try_task_config_schema_v2 = Schema({
     Optional('parameters'): {basestring: object},
@@ -164,6 +167,17 @@ def full_task_graph_to_runnable_jobs(full_task_json):
     return runnable_jobs
 
 
+def full_task_graph_to_manifests_by_task(full_task_json):
+    manifests_by_task = defaultdict(list)
+    for label, node in full_task_json.iteritems():
+        manifests = node['attributes'].get('test_manifests')
+        if not manifests:
+            continue
+
+        manifests_by_task[label].extend(manifests)
+    return manifests_by_task
+
+
 def try_syntax_from_message(message):
     """
     Parse the try syntax out of a commit message, returning '' if none is
@@ -187,7 +201,9 @@ def taskgraph_decision(options, parameters=None):
      * calling TaskCluster APIs to create the graph
     """
 
-    parameters = parameters or (lambda config: get_decision_parameters(config, options))
+    parameters = parameters or (
+        lambda graph_config: get_decision_parameters(graph_config, options)
+    )
 
     # create a TaskGraphGenerator instance
     tgg = TaskGraphGenerator(
@@ -207,6 +223,9 @@ def taskgraph_decision(options, parameters=None):
     # write out the public/runnable-jobs.json file
     write_artifact('runnable-jobs.json', full_task_graph_to_runnable_jobs(full_task_json))
 
+    # write out the public/manifests-by-task.json file
+    write_artifact('manifests-by-task.json', full_task_graph_to_manifests_by_task(full_task_json))
+
     # this is just a test to check whether the from_json() function is working
     _, _ = TaskGraph.from_json(full_task_json)
 
@@ -222,13 +241,13 @@ def taskgraph_decision(options, parameters=None):
     create_tasks(tgg.graph_config, tgg.morphed_task_graph, tgg.label_to_taskid, tgg.parameters)
 
 
-def get_decision_parameters(config, options):
+def get_decision_parameters(graph_config, options):
     """
     Load parameters from the command-line options for 'taskgraph decision'.
     This also applies per-project parameters, based on the given project.
 
     """
-    product_dir = config['product-dir']
+    product_dir = graph_config['product-dir']
 
     parameters = {n: options[n] for n in [
         'base_repository',
@@ -315,7 +334,7 @@ def get_decision_parameters(config, options):
         parameters['target_tasks_method'] = 'nothing'
 
     if options.get('include_push_tasks'):
-        get_existing_tasks(options.get('rebuild_kinds', []), parameters, config)
+        get_existing_tasks(options.get('rebuild_kinds', []), parameters, graph_config)
 
     # If the target method is nightly, we should build partials. This means
     # knowing what has been released previously.

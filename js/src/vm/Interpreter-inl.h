@@ -10,6 +10,7 @@
 #include "vm/Interpreter.h"
 
 #include "mozilla/Maybe.h"
+#include "mozilla/WrappingOperations.h"
 
 #include "jsnum.h"
 
@@ -380,7 +381,7 @@ static MOZ_ALWAYS_INLINE bool NegOperation(JSContext* cx,
   }
 
   if (val.isBigInt()) {
-    return BigInt::neg(cx, val, res);
+    return BigInt::negValue(cx, val, res);
   }
 
   res.setNumber(-val.toNumber());
@@ -402,7 +403,7 @@ static MOZ_ALWAYS_INLINE bool IncOperation(JSContext* cx,
   }
 
   MOZ_ASSERT(val.isBigInt(), "+1 only callable on result of JSOP_TONUMERIC");
-  return BigInt::inc(cx, val, res);
+  return BigInt::incValue(cx, val, res);
 }
 
 static MOZ_ALWAYS_INLINE bool DecOperation(JSContext* cx,
@@ -420,7 +421,7 @@ static MOZ_ALWAYS_INLINE bool DecOperation(JSContext* cx,
   }
 
   MOZ_ASSERT(val.isBigInt(), "-1 only callable on result of JSOP_TONUMERIC");
-  return BigInt::dec(cx, val, res);
+  return BigInt::decValue(cx, val, res);
 }
 
 static MOZ_ALWAYS_INLINE bool ToIdOperation(JSContext* cx, HandleValue idval,
@@ -497,7 +498,7 @@ static MOZ_ALWAYS_INLINE bool GetPrimitiveElementOperation(
   MOZ_ASSERT(op == JSOP_GETELEM || op == JSOP_CALLELEM);
 
   // FIXME: Bug 1234324 We shouldn't be boxing here.
-  RootedObject boxed(cx, ToObjectFromStack(cx, receiver));
+  RootedObject boxed(cx, ToObjectFromStackForPropertyAccess(cx, receiver, key));
   if (!boxed) {
     return false;
   }
@@ -853,7 +854,7 @@ static MOZ_ALWAYS_INLINE bool BitNot(JSContext* cx, MutableHandleValue in,
   }
 
   if (in.isBigInt()) {
-    return BigInt::bitNot(cx, in, out);
+    return BigInt::bitNotValue(cx, in, out);
   }
 
   out.setInt32(~in.toInt32());
@@ -868,7 +869,7 @@ static MOZ_ALWAYS_INLINE bool BitXor(JSContext* cx, MutableHandleValue lhs,
   }
 
   if (lhs.isBigInt() || rhs.isBigInt()) {
-    return BigInt::bitXor(cx, lhs, rhs, out);
+    return BigInt::bitXorValue(cx, lhs, rhs, out);
   }
 
   out.setInt32(lhs.toInt32() ^ rhs.toInt32());
@@ -883,7 +884,7 @@ static MOZ_ALWAYS_INLINE bool BitOr(JSContext* cx, MutableHandleValue lhs,
   }
 
   if (lhs.isBigInt() || rhs.isBigInt()) {
-    return BigInt::bitOr(cx, lhs, rhs, out);
+    return BigInt::bitOrValue(cx, lhs, rhs, out);
   }
 
   out.setInt32(lhs.toInt32() | rhs.toInt32());
@@ -898,7 +899,7 @@ static MOZ_ALWAYS_INLINE bool BitAnd(JSContext* cx, MutableHandleValue lhs,
   }
 
   if (lhs.isBigInt() || rhs.isBigInt()) {
-    return BigInt::bitAnd(cx, lhs, rhs, out);
+    return BigInt::bitAndValue(cx, lhs, rhs, out);
   }
 
   out.setInt32(lhs.toInt32() & rhs.toInt32());
@@ -913,10 +914,15 @@ static MOZ_ALWAYS_INLINE bool BitLsh(JSContext* cx, MutableHandleValue lhs,
   }
 
   if (lhs.isBigInt() || rhs.isBigInt()) {
-    return BigInt::lsh(cx, lhs, rhs, out);
+    return BigInt::lshValue(cx, lhs, rhs, out);
   }
 
-  out.setInt32(lhs.toInt32() << (rhs.toInt32() & 31));
+  // Signed left-shift is undefined on overflow, so |lhs << (rhs & 31)| won't
+  // work.  Instead, convert to unsigned space (where overflow is treated
+  // modularly), perform the operation there, then convert back.
+  uint32_t left = static_cast<uint32_t>(lhs.toInt32());
+  uint8_t right = rhs.toInt32() & 31;
+  out.setInt32(mozilla::WrapToSigned(left << right));
   return true;
 }
 
@@ -928,7 +934,7 @@ static MOZ_ALWAYS_INLINE bool BitRsh(JSContext* cx, MutableHandleValue lhs,
   }
 
   if (lhs.isBigInt() || rhs.isBigInt()) {
-    return BigInt::rsh(cx, lhs, rhs, out);
+    return BigInt::rshValue(cx, lhs, rhs, out);
   }
 
   out.setInt32(lhs.toInt32() >> (rhs.toInt32() & 31));

@@ -312,6 +312,22 @@
   background-image: url("chrome://devtools/skin/images/command-replay.svg");
 }
 
+#command-button-fission-prefs::before {
+  content: "FIS";
+  font-weight: bold;
+}
+
+.fission-pref-icon::before {
+  content: "";
+  background-image: url("chrome://devtools/skin/images/help.svg");
+  -moz-context-properties: fill;
+  fill: var(--theme-body-color);
+  display: block;
+  background-size: 12px;
+  width: 12px;
+  height: 12px;
+}
+
 #command-button-replay,
 #command-button-stop-replay {
   background-color: transparent;
@@ -320,10 +336,6 @@
 #command-button-replay:hover,
 #command-button-stop-replay:hover {
   background: var(--toolbarbutton-background);
-}
-
-#command-button-scratchpad::before {
-  background-image: url("chrome://devtools/skin/images/tool-scratchpad.svg");
 }
 
 #command-button-rulers::before {
@@ -426,10 +438,7 @@
   border-bottom: 1px solid var(--theme-splitter-color);
   box-sizing: border-box;
   min-height: 29px;
-
   --progressbar-transition: 200ms;
-  --command-button-size: 14px;
-  --command-button-primary-size: 20px;
 }
 
 .theme-light .webreplay-player {
@@ -445,12 +454,11 @@
   --progress-recording-line: #d0021b;
   --progressbar-background: #fff;
   --progressbar-line-color: var(--blue-40);
-  --proggressbar-border-color: #bfc9d2;
+  --proggressbar-border-color: var(--theme-splitter-color);
   --tick-future-background: #bfc9d2;
   --tick-background: var(--blue-50);
   --tick-recording-background: #d0021b;
   --replay-head-background: var(--purple-50);
-  --command-button-background: #6a6a6a;
 }
 
 .theme-dark .webreplay-player {
@@ -465,13 +473,12 @@
   --replaying-marker-location-background: #3084d0;
   --replaying-marker-background-hover: #3a8edb;
   --progressbar-background: #0c0c0d;
-  --proggressbar-border-color: #31313d;
+  --proggressbar-border-color: var(--theme-splitter-color);
   --progressbar-line-color: #0a4786;
   --tick-future-background: #bfc9d2;
   --tick-background: var(--blue-50);
   --tick-recording-background: #e77884;
   --replay-head-background: var(--theme-highlight-purple);
-  --command-button-background: var(--grey-20);
 }
 
 .webreplay-player .overlay-container {
@@ -520,6 +527,9 @@
   border-radius: 4.5px;
   top: calc(50% - 3.5px);
   background: var(--replaying-marker-background);
+}
+
+.webreplay-player .animate .message {
   transition-duration: 100ms;
 }
 
@@ -573,31 +583,31 @@
 
 .webreplay-player .commands {
   display: flex;
+  margin: 0 4px;
 }
 
 .webreplay-player .command-button {
   display: flex;
-  min-width: 17px;
-  opacity: 0.7;
+  min-width: 20px;
 }
 
 .webreplay-player .command-button.primary {
-  min-width: 24px;
+  min-width: 22px;
 }
 
 .webreplay-player .btn {
-  width: var(--command-button-size);
-  height: var(--command-button-size);
-  mask-size: var(--command-button-size);
-  background: var(--command-button-background);
+  width: 14px;
+  height: 14px;
+  mask-size: 14px;
+  background: var(--theme-icon-color);
   align-self: center;
   margin: 0 auto;
 }
 
 .webreplay-player .primary .btn {
-  width: var(--command-button-primary-size);
-  height: var(--command-button-primary-size);
-  mask-size: var(--command-button-primary-size);
+  width: 18px;
+  height: 18px;
+  mask-size: 18px;
 }
 
 .webreplay-player .command-button.active:hover {
@@ -687,8 +697,16 @@
   opacity: 0.5;
 }
 
-.webreplay-player #overlay .tick:hover ~ .tick {
+.webreplay-player #overlay .tick:hover ~ .tick,
+.webreplay-player #overlay .tick.highlight ~ .tick:not(.highlight) {
   opacity: 0.5;
+}
+
+.webreplay-player .untraversed {
+  position: absolute;
+  height: 100%;
+  background: #000000;
+  opacity: 0.2;
 }
 
 .webreplay-player .unscanned {

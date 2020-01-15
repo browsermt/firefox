@@ -54,6 +54,8 @@ jobs:
                 - linux64-node
                 - linux64-rust
                 - linux64-cbindgen
+                - linux64-lucetc
+                - wasi-sysroot
 
     macosx64-searchfox/debug:
         description: "MacOS X x64 Debug Cross-compile Searchfox"
@@ -119,6 +121,7 @@ jobs:
                 - builds/taskcluster_base_windows.py
                 - builds/taskcluster_base_win64.py
                 - builds/taskcluster_sub_win64/searchfox_debug.py
+            tooltool-downloads: internal
         fetches:
             toolchain:
                 - win64-clang-cl

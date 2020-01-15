@@ -6,21 +6,14 @@
 
 interface XULControllers;
 
-[HTMLConstructor, Func="IsChromeOrXBL"]
+[Func="IsChromeOrXBL",
+ Exposed=Window]
 interface XULElement : Element {
+  [HTMLConstructor] constructor();
+
   // Layout properties
   [SetterThrows]
-  attribute DOMString align;
-  [SetterThrows]
-  attribute DOMString dir;
-  [SetterThrows]
   attribute DOMString flex;
-  [SetterThrows]
-  attribute DOMString ordinal;
-  [SetterThrows]
-  attribute DOMString orient;
-  [SetterThrows]
-  attribute DOMString pack;
 
   // Properties for hiding elements.
   attribute boolean hidden;
@@ -93,5 +86,5 @@ interface XULElement : Element {
 XULElement includes GlobalEventHandlers;
 XULElement includes HTMLOrForeignElement;
 XULElement includes ElementCSSInlineStyle;
-XULElement implements TouchEventHandlers;
-XULElement implements OnErrorEventHandlerForNodes;
+XULElement includes TouchEventHandlers;
+XULElement includes OnErrorEventHandlerForNodes;

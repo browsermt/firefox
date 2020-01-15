@@ -8,6 +8,7 @@
 
 #include "mozilla/UniquePtr.h"
 #include "mozilla/ipc/CrashReporterHelper.h"
+#include "mozilla/ipc/InputStreamUtils.h"
 #include "mozilla/net/PSocketProcessParent.h"
 
 namespace mozilla {
@@ -29,7 +30,8 @@ class SocketProcessHost;
 // by SocketProcessHost.
 class SocketProcessParent final
     : public PSocketProcessParent,
-      public ipc::CrashReporterHelper<GeckoProcessType_Content> {
+      public ipc::CrashReporterHelper<GeckoProcessType_Socket>,
+      public ipc::ParentToChildStreamActorManager {
  public:
   friend class SocketProcessHost;
 
@@ -53,27 +55,36 @@ class SocketProcessParent final
   mozilla::ipc::IPCResult RecvRecordDiscardedData(
       const DiscardedData& aDiscardedData);
 
-  PWebrtcProxyChannelParent* AllocPWebrtcProxyChannelParent(
-      const TabId& aTabId);
-  bool DeallocPWebrtcProxyChannelParent(PWebrtcProxyChannelParent* aActor);
-  PDNSRequestParent* AllocPDNSRequestParent(
+  PWebrtcTCPSocketParent* AllocPWebrtcTCPSocketParent(
+      const Maybe<TabId>& aTabId);
+  bool DeallocPWebrtcTCPSocketParent(PWebrtcTCPSocketParent* aActor);
+  already_AddRefed<PDNSRequestParent> AllocPDNSRequestParent(
       const nsCString& aHost, const OriginAttributes& aOriginAttributes,
       const uint32_t& aFlags);
   virtual mozilla::ipc::IPCResult RecvPDNSRequestConstructor(
       PDNSRequestParent* actor, const nsCString& hostName,
       const OriginAttributes& aOriginAttributes,
       const uint32_t& flags) override;
-  bool DeallocPDNSRequestParent(PDNSRequestParent*);
-  PProxyConfigLookupParent* AllocPProxyConfigLookupParent();
-  virtual mozilla::ipc::IPCResult RecvPProxyConfigLookupConstructor(
-      PProxyConfigLookupParent* aActor) override;
-  bool DeallocPProxyConfigLookupParent(PProxyConfigLookupParent* aActor);
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
   bool SendRequestMemoryReport(const uint32_t& aGeneration,
                                const bool& aAnonymize,
                                const bool& aMinimizeMemoryUsage,
                                const Maybe<ipc::FileDescriptor>& aDMDFile);
+
+  PFileDescriptorSetParent* AllocPFileDescriptorSetParent(
+      const FileDescriptor& fd);
+  bool DeallocPFileDescriptorSetParent(PFileDescriptorSetParent* aActor);
+
+  PChildToParentStreamParent* AllocPChildToParentStreamParent();
+  bool DeallocPChildToParentStreamParent(PChildToParentStreamParent* aActor);
+  PParentToChildStreamParent* AllocPParentToChildStreamParent();
+  bool DeallocPParentToChildStreamParent(PParentToChildStreamParent* aActor);
+
+  PParentToChildStreamParent* SendPParentToChildStreamConstructor(
+      PParentToChildStreamParent* aActor) override;
+  PFileDescriptorSetParent* SendPFileDescriptorSetConstructor(
+      const FileDescriptor& aFD) override;
 
  private:
   SocketProcessHost* mHost;

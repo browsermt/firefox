@@ -1294,7 +1294,19 @@ static inline void pages_decommit(void* aAddr, size_t aSize) {
 #else
   if (mmap(aAddr, aSize, PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1,
            0) == MAP_FAILED) {
-    MOZ_CRASH();
+    // We'd like to report the OOM for our tooling, but we can't allocate
+    // memory at this point, so avoid the use of printf.
+    const char out_of_mappings[] =
+        "[unhandlable oom] Failed to mmap, likely no more mappings "
+        "available " __FILE__ " : " MOZ_STRINGIFY(__LINE__);
+    if (errno == ENOMEM) {
+#  ifndef ANDROID
+      fputs(out_of_mappings, stderr);
+      fflush(stderr);
+#  endif
+      MOZ_CRASH_ANNOTATE(out_of_mappings);
+    }
+    MOZ_REALLY_CRASH(__LINE__);
   }
   MozTagAnonymousMemory(aAddr, aSize, "jemalloc-decommitted");
 #endif
@@ -2798,8 +2810,12 @@ void* arena_t::MallocSmall(size_t aSize, bool aZero) {
       // arc4random.  So we temporarily disable mRandomizeSmallAllocations to
       // skip this case and then re-enable it
       mRandomizeSmallAllocations = false;
-      mozilla::Maybe<uint64_t> prngState1 = mozilla::RandomUint64();
-      mozilla::Maybe<uint64_t> prngState2 = mozilla::RandomUint64();
+      mozilla::Maybe<uint64_t> prngState1, prngState2;
+      {
+        mozilla::recordreplay::AutoEnsurePassThroughThreadEvents pt;
+        prngState1 = mozilla::RandomUint64();
+        prngState2 = mozilla::RandomUint64();
+      }
       void* backing =
           base_alloc(sizeof(mozilla::non_crypto::XorShift128PlusRNG));
       mPRNG = new (backing) mozilla::non_crypto::XorShift128PlusRNG(
@@ -3530,7 +3546,11 @@ arena_t* ArenaCollection::CreateArena(bool aIsPrivate,
   // arena, stopping them from getting data they may want
 
   while (true) {
-    mozilla::Maybe<uint64_t> maybeRandomId = mozilla::RandomUint64();
+    mozilla::Maybe<uint64_t> maybeRandomId;
+    {
+      mozilla::recordreplay::AutoEnsurePassThroughThreadEvents pt;
+      maybeRandomId = mozilla::RandomUint64();
+    }
     MOZ_RELEASE_ASSERT(maybeRandomId.isSome());
 
     // Keep looping until we ensure that the random number we just generated
@@ -4683,17 +4703,19 @@ static void replace_malloc_init_funcs(malloc_table_t* table) {
   return_type name(ARGS_HELPER(TYPED_ARGS, ##__VA_ARGS__))            \
       __attribute__((alias(MOZ_STRINGIFY(name_impl))));
 
-#define GENERIC_MALLOC_DECL2(attributes, name, name_impl, return_type, ...) \
+#define GENERIC_MALLOC_DECL2(attributes, name, name_impl, return_type, ...)  \
   return_type name_impl(ARGS_HELPER(TYPED_ARGS, ##__VA_ARGS__)) attributes { \
-    return DefaultMalloc::name(ARGS_HELPER(ARGS, ##__VA_ARGS__)); \
+    return DefaultMalloc::name(ARGS_HELPER(ARGS, ##__VA_ARGS__));            \
   }
 
 #ifndef __MINGW32__
-#  define GENERIC_MALLOC_DECL(attributes, name, return_type, ...)        \
-    GENERIC_MALLOC_DECL2(attributes, name, name##_impl, return_type, ##__VA_ARGS__)
+#  define GENERIC_MALLOC_DECL(attributes, name, return_type, ...)    \
+    GENERIC_MALLOC_DECL2(attributes, name, name##_impl, return_type, \
+                         ##__VA_ARGS__)
 #else
-#  define GENERIC_MALLOC_DECL(attributes, name, return_type, ...)        \
-    GENERIC_MALLOC_DECL2(attributes, name, name##_impl, return_type, ##__VA_ARGS__) \
+#  define GENERIC_MALLOC_DECL(attributes, name, return_type, ...)    \
+    GENERIC_MALLOC_DECL2(attributes, name, name##_impl, return_type, \
+                         ##__VA_ARGS__)                              \
     GENERIC_MALLOC_DECL2_MINGW(name, name##_impl, return_type, ##__VA_ARGS__)
 #endif
 
@@ -4705,7 +4727,7 @@ static void replace_malloc_init_funcs(malloc_table_t* table) {
 #include "malloc_decls.h"
 
 #undef GENERIC_MALLOC_DECL
-#define GENERIC_MALLOC_DECL(attributes, name, return_type, ...)  \
+#define GENERIC_MALLOC_DECL(attributes, name, return_type, ...) \
   GENERIC_MALLOC_DECL2(attributes, name, name, return_type, ##__VA_ARGS__)
 
 #define MALLOC_DECL(...) \

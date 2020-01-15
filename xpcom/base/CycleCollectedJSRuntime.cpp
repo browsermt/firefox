@@ -96,7 +96,6 @@
 #  include "nsMacUtilsImpl.h"
 #endif
 
-#include "nsIException.h"
 #include "nsThread.h"
 #include "nsThreadUtils.h"
 #include "xpcpublic.h"
@@ -473,7 +472,8 @@ static void MozCrashWarningReporter(JSContext*, JSErrorReport*) {
 }
 
 CycleCollectedJSRuntime::CycleCollectedJSRuntime(JSContext* aCx)
-    : mGCThingCycleCollectorGlobal(sGCThingCycleCollectorGlobal),
+    : mContext(nullptr),
+      mGCThingCycleCollectorGlobal(sGCThingCycleCollectorGlobal),
       mJSZoneCycleCollectorGlobal(sJSZoneCycleCollectorGlobal),
       mJSRuntime(JS_GetRuntime(aCx)),
       mHasPendingIdleGCTask(false),
@@ -518,7 +518,6 @@ CycleCollectedJSRuntime::CycleCollectedJSRuntime(JSContext* aCx)
 
   JS_SetObjectsTenuredCallback(aCx, JSObjectsTenuredCb, this);
   JS::SetOutOfMemoryCallback(aCx, OutOfMemoryCallback, this);
-  JS_SetExternalStringSizeofCallback(aCx, SizeofExternalStringCallback);
   JS::SetWarningReporter(aCx, MozCrashWarningReporter);
 
   js::AutoEnterOOMUnsafeRegion::setAnnotateOOMAllocationSizeCallback(
@@ -575,12 +574,9 @@ CycleCollectedJSRuntime::~CycleCollectedJSRuntime() {
   MOZ_ASSERT(mShutdownCalled);
 }
 
-void CycleCollectedJSRuntime::AddContext(CycleCollectedJSContext* aContext) {
-  mContexts.insertBack(aContext);
-}
-
-void CycleCollectedJSRuntime::RemoveContext(CycleCollectedJSContext* aContext) {
-  aContext->removeFrom(mContexts);
+void CycleCollectedJSRuntime::SetContext(CycleCollectedJSContext* aContext) {
+  MOZ_ASSERT(!mContext || !aContext, "Don't replace the context!");
+  mContext = aContext;
 }
 
 size_t CycleCollectedJSRuntime::SizeOfExcludingThis(
@@ -629,9 +625,9 @@ void CycleCollectedJSRuntime::DescribeGCThing(
       JSFunction* fun = JS_GetObjectFunction(obj);
       JSString* str = JS_GetFunctionDisplayId(fun);
       if (str) {
-        JSFlatString* flat = JS_ASSERT_STRING_IS_FLAT(str);
+        JSLinearString* linear = JS_ASSERT_STRING_IS_LINEAR(str);
         nsAutoString chars;
-        AssignJSFlatString(chars, flat);
+        AssignJSLinearString(chars, linear);
         NS_ConvertUTF16toUTF8 fname(chars);
         SprintfLiteral(name, "JS Object (Function - %s)", fname.get());
       } else {
@@ -660,7 +656,9 @@ void CycleCollectedJSRuntime::NoteGCThingXPCOMChildren(
   MOZ_ASSERT(aClasp);
   MOZ_ASSERT(aClasp == js::GetObjectClass(aObj));
 
-  if (NoteCustomGCThingXPCOMChildren(aClasp, aObj, aCb)) {
+  JS::Rooted<JSObject*> obj(RootingCx(), aObj);
+
+  if (NoteCustomGCThingXPCOMChildren(aClasp, obj, aCb)) {
     // Nothing else to do!
     return;
   }
@@ -670,7 +668,7 @@ void CycleCollectedJSRuntime::NoteGCThingXPCOMChildren(
   if (aClasp->flags & JSCLASS_HAS_PRIVATE &&
       aClasp->flags & JSCLASS_PRIVATE_IS_NSISUPPORTS) {
     NS_CYCLE_COLLECTION_NOTE_EDGE_NAME(aCb, "js::GetObjectPrivate(obj)");
-    aCb.NoteXPCOMChild(static_cast<nsISupports*>(js::GetObjectPrivate(aObj)));
+    aCb.NoteXPCOMChild(static_cast<nsISupports*>(js::GetObjectPrivate(obj)));
     return;
   }
 
@@ -683,21 +681,21 @@ void CycleCollectedJSRuntime::NoteGCThingXPCOMChildren(
     // that case, since NoteXPCOMChild/NoteNativeChild are null-safe.
     if (domClass->mDOMObjectIsISupports) {
       aCb.NoteXPCOMChild(
-          UnwrapPossiblyNotInitializedDOMObject<nsISupports>(aObj));
+          UnwrapPossiblyNotInitializedDOMObject<nsISupports>(obj));
     } else if (domClass->mParticipant) {
-      aCb.NoteNativeChild(UnwrapPossiblyNotInitializedDOMObject<void>(aObj),
+      aCb.NoteNativeChild(UnwrapPossiblyNotInitializedDOMObject<void>(obj),
                           domClass->mParticipant);
     }
     return;
   }
 
-  if (IsRemoteObjectProxy(aObj)) {
+  if (IsRemoteObjectProxy(obj)) {
     auto handler =
-        static_cast<const RemoteObjectProxyBase*>(js::GetProxyHandler(aObj));
-    return handler->NoteChildren(aObj, aCb);
+        static_cast<const RemoteObjectProxyBase*>(js::GetProxyHandler(obj));
+    return handler->NoteChildren(obj, aCb);
   }
 
-  JS::Value value = js::MaybeGetScriptPrivate(aObj);
+  JS::Value value = js::MaybeGetScriptPrivate(obj);
   if (!value.isUndefined()) {
     aCb.NoteXPCOMChild(static_cast<nsISupports*>(value.toPrivate()));
   }
@@ -951,25 +949,6 @@ void CycleCollectedJSRuntime::OutOfMemoryCallback(JSContext* aContext,
   self->OnOutOfMemory();
 }
 
-/* static */
-size_t CycleCollectedJSRuntime::SizeofExternalStringCallback(
-    JSString* aStr, MallocSizeOf aMallocSizeOf) {
-  // We promised the JS engine we would not GC.  Enforce that:
-  JS::AutoCheckCannotGC autoCannotGC;
-
-  if (!XPCStringConvert::IsDOMString(aStr)) {
-    // Might be a literal or something we don't understand.  Just claim 0.
-    return 0;
-  }
-
-  const char16_t* chars = JS_GetTwoByteExternalStringChars(aStr);
-  const nsStringBuffer* buf = nsStringBuffer::FromData((void*)chars);
-  // We want sizeof including this, because the entire string buffer is owned by
-  // the external string.  But only report here if we're unshared; if we're
-  // shared then we don't know who really owns this data.
-  return buf->SizeOfIncludingThisIfUnshared(aMallocSizeOf);
-}
-
 struct JsGcTracer : public TraceCallbacks {
   virtual void Trace(JS::Heap<JS::Value>* aPtr, const char* aName,
                      void* aClosure) const override {
@@ -983,10 +962,9 @@ struct JsGcTracer : public TraceCallbacks {
                      void* aClosure) const override {
     JS::TraceEdge(static_cast<JSTracer*>(aClosure), aPtr, aName);
   }
-  virtual void Trace(JSObject** aPtr, const char* aName,
+  virtual void Trace(nsWrapperCache* aPtr, const char* aName,
                      void* aClosure) const override {
-    js::UnsafeTraceManuallyBarrieredEdge(static_cast<JSTracer*>(aClosure), aPtr,
-                                         aName);
+    aPtr->TraceWrapper(static_cast<JSTracer*>(aClosure), aName);
   }
   virtual void Trace(JS::TenuredHeap<JSObject*>* aPtr, const char* aName,
                      void* aClosure) const override {
@@ -1053,9 +1031,9 @@ struct ClearJSHolder : public TraceCallbacks {
     *aPtr = nullptr;
   }
 
-  virtual void Trace(JSObject** aPtr, const char* aName,
+  virtual void Trace(nsWrapperCache* aPtr, const char* aName,
                      void* aClosure) const override {
-    *aPtr = nullptr;
+    aPtr->ClearWrapper();
   }
 
   virtual void Trace(JS::TenuredHeap<JSObject*>* aPtr, const char*,
@@ -1177,14 +1155,14 @@ void CycleCollectedJSRuntime::GarbageCollect(JS::GCReason aReason) const {
 }
 
 void CycleCollectedJSRuntime::JSObjectsTenured() {
+  JSContext* cx = CycleCollectedJSContext::Get()->Context();
   for (auto iter = mNurseryObjects.Iter(); !iter.Done(); iter.Next()) {
     nsWrapperCache* cache = iter.Get();
     JSObject* wrapper = cache->GetWrapperMaybeDead();
     MOZ_DIAGNOSTIC_ASSERT(wrapper || recordreplay::IsReplaying());
     if (!JS::ObjectIsTenured(wrapper)) {
       MOZ_ASSERT(!cache->PreservingWrapper());
-      const JSClass* jsClass = js::GetObjectClass(wrapper);
-      jsClass->doFinalize(nullptr, wrapper);
+      js::gc::FinalizeDeadNurseryObject(cx, wrapper);
     }
   }
 
@@ -1213,6 +1191,8 @@ void CycleCollectedJSRuntime::NurseryWrapperPreserved(JSObject* aWrapper) {
 void CycleCollectedJSRuntime::DeferredFinalize(
     DeferredFinalizeAppendFunction aAppendFunc, DeferredFinalizeFunction aFunc,
     void* aThing) {
+  // Tell the analysis that the function pointers will not GC.
+  JS::AutoSuppressGCAnalysis suppress;
   if (auto entry = mDeferredFinalizerTable.LookupForAdd(aFunc)) {
     aAppendFunc(entry.Data(), aThing);
   } else {
@@ -1408,7 +1388,7 @@ void CycleCollectedJSRuntime::OnGC(JSContext* aContext, JSGCStatus aStatus) {
   switch (aStatus) {
     case JSGC_BEGIN:
       nsCycleCollector_prepareForGarbageCollection();
-      mZonesWaitingForGC.Clear();
+      PrepareWaitingZonesForGC();
       break;
     case JSGC_END: {
       if (mOutOfMemoryState == OOMState::Reported) {

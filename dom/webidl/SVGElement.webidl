@@ -10,6 +10,7 @@
  * liability, trademark and document use rules apply.
  */
 
+[Exposed=Window]
 interface SVGElement : Element {
            attribute DOMString id;
 
@@ -24,5 +25,5 @@ SVGElement includes GlobalEventHandlers;
 SVGElement includes HTMLOrForeignElement;
 SVGElement includes DocumentAndElementEventHandlers;
 SVGElement includes ElementCSSInlineStyle;
-SVGElement implements TouchEventHandlers;
-SVGElement implements OnErrorEventHandlerForNodes;
+SVGElement includes TouchEventHandlers;
+SVGElement includes OnErrorEventHandlerForNodes;

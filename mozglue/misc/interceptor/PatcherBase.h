@@ -18,7 +18,7 @@ class WindowsDllPatcherBase {
   typedef typename VMPolicy::MMPolicyT MMPolicyT;
 
   template <typename... Args>
-  explicit WindowsDllPatcherBase(Args... aArgs)
+  explicit WindowsDllPatcherBase(Args&&... aArgs)
       : mVMPolicy(std::forward<Args>(aArgs)...) {}
 
   ReadOnlyTargetFunction<MMPolicyT> ResolveRedirectedAddress(
@@ -93,6 +93,11 @@ class WindowsDllPatcherBase {
     }
 
     return ReadOnlyTargetFunction<MMPolicyT>(mVMPolicy, aRedirAddress);
+  }
+
+ public:
+  FARPROC GetProcAddress(HMODULE aModule, const char* aName) const {
+    return mVMPolicy.GetProcAddress(aModule, aName);
   }
 
  protected:

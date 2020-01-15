@@ -14,6 +14,7 @@ This currently affects the following sections:
 
 - profile
 - add-ons
+- services
 
 
 Structure:
@@ -43,6 +44,10 @@ Structure:
           loadPath: <string>, // where the engine line is located; missing if no default
           origin: <string>, // 'default', 'verified', 'unverified', or 'invalid'; based on the presence and validity of the engine's loadPath verification hash.
           submissionURL: <string> // set for default engines or well known search domains
+        },
+        defaultPrivateSearchEngine: <string>, // e.g. "duckduckgo"
+        defaultPrivateSearchEngine: {,
+          // data about the current default engine for private browsing mode. Same as defaultSearchEngineData.
         },
         searchCohort: <string>, // optional, contains an identifier for any active search A/B experiments
         launcherProcessState: <integer>, // optional, values correspond to values of mozilla::LauncherRegistryInfo::EnabledState enum
@@ -77,10 +82,18 @@ Structure:
           content: <string>, // identifier to indicate the particular link within a campaign
           variation: <string>, // name/id of the variation cohort used in the enrolled funnel experiment
           experiment: <string>, // name/id of the enrolled funnel experiment
+          ua: <string>, // identifier derived from the user agent downloading the installer, e.g., chrome, Google Chrome 123
         },
         sandbox: {
           effectiveContentProcessLevel: <integer>,
         }
+      },
+      // Optional, missing if fetching the information failed or had not yet completed.
+      services: {
+        // True if the user has a firefox account
+        accountEnabled: <bool>,
+        // True if the user has sync enabled.
+        syncEnabled: <bool>
       },
       profile: {
         creationDate: <integer>, // integer days since UNIX epoch, e.g. 16446
@@ -159,6 +172,7 @@ Structure:
         gfx: {
             D2DEnabled: <bool>, // null on failure
             DWriteEnabled: <bool>, // null on failure
+            ContentBackend: <string> // One of "Cairo", "Skia", or "Direct2D 1.1"
             Headless: <bool>, // null on failure
             //DWriteVersion: <string>, // temporarily removed, pending bug 1154500
             adapters: [
@@ -340,6 +354,16 @@ The object contains:
 
 ``loadPath`` and ``submissionURL`` are not present if ``name`` is ``NONE``.
 
+defaultPrivateSearchEngineData
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This contains the data identifying the engine current set as the default for
+private browsing mode. This may be the same engine as set for normal browsing
+mode.
+
+This object contains the same information as ``defaultSearchEngineData``. It
+is only reported if the ``browser.search.separatePrivateDefault`` preference is
+set to ``true``.
+
 searchCohort
 ~~~~~~~~~~~~
 
@@ -358,11 +382,12 @@ The following is a partial list of collected preferences.
 
 - ``browser.urlbar.suggest.searches``: True if search suggestions are enabled in the urlbar. Defaults to false.
 
-- ``browser.urlbar.userMadeSearchSuggestionsChoice``: True if the user has clicked Yes or No in the urlbar's opt-in notification. Defaults to false.
-
 - ``browser.zoom.full`` (deprecated): True if zoom is enabled for both text and images, that is if "Zoom Text Only" is not enabled. Defaults to true. This preference was collected in Firefox 50 to 52 (`Bug 979323 <https://bugzilla.mozilla.org/show_bug.cgi?id=979323>`_).
 
 - ``fission.autostart``: True if fission is enabled at startup. Default to false. For more information please visit `the project wiki page <https://wiki.mozilla.org/Project_Fission>`_.
+
+- ``security.tls.version.enable-deprecated``: True if deprecated versions of TLS (1.0 and 1.1) have been enabled by the user. Defaults to false.
+
 attribution
 ~~~~~~~~~~~
 
@@ -491,4 +516,3 @@ Version History
 - Firefox 61:
 
   - Removed empty ``addons.activeExperiment`` (`bug 1452935 <https://bugzilla.mozilla.org/show_bug.cgi?id=1452935>`_).
-

@@ -116,7 +116,7 @@ class LogFile {
 static const char* ExpandLogFileName(const char* aFilename,
                                      char (&buffer)[2048]) {
   MOZ_ASSERT(aFilename);
-  static const char kPIDToken[] = "%PID";
+  static const char kPIDToken[] = MOZ_LOG_PID_TOKEN;
   static const char kMOZLOGExt[] = MOZ_LOG_FILE_EXTENSION;
 
   bool hasMozLogExtension = StringEndsWith(nsDependentCString(aFilename),
@@ -377,8 +377,7 @@ class LogModuleManager {
 
   void Print(const char* aName, LogLevel aLevel, const char* aFmt,
              va_list aArgs) MOZ_FORMAT_PRINTF(4, 0) {
-    // We don't do nuwa-style forking anymore, so our pid can't change.
-    static long pid = static_cast<long>(base::GetCurrentProcId());
+    long pid = static_cast<long>(base::GetCurrentProcId());
     const size_t kBuffSize = 1024;
     char buff[kBuffSize];
 
@@ -406,7 +405,7 @@ class LogModuleManager {
     }
 
 #ifdef MOZ_GECKO_PROFILER
-    if (mAddProfilerMarker && profiler_is_active()) {
+    if (mAddProfilerMarker && profiler_can_accept_markers()) {
       PROFILER_ADD_MARKER_WITH_PAYLOAD("LogMessages", OTHER, LogMarkerPayload,
                                        (aName, buffToWrite, TimeStamp::Now()));
     }

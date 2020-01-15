@@ -12,7 +12,6 @@
 #include "nsIContentSecurityPolicy.h"
 #include "nsNetUtil.h"
 #include "mozilla/dom/nsCSPContext.h"
-#include "nsIPrefService.h"
 #include "nsIPrefBranch.h"
 #include "nsStringFwd.h"
 
@@ -149,6 +148,7 @@ nsresult runTestSuite(const PolicyTest* aPolicies, uint32_t aPolicyCount,
   nsCOMPtr<nsIPrefBranch> prefs = do_GetService(NS_PREFSERVICE_CONTRACTID);
   bool experimentalEnabledCache = false;
   bool strictDynamicEnabledCache = false;
+  bool navigateTo = false;
   if (prefs) {
     prefs->GetBoolPref("security.csp.experimentalEnabled",
                        &experimentalEnabledCache);
@@ -157,6 +157,9 @@ nsresult runTestSuite(const PolicyTest* aPolicies, uint32_t aPolicyCount,
     prefs->GetBoolPref("security.csp.enableStrictDynamic",
                        &strictDynamicEnabledCache);
     prefs->SetBoolPref("security.csp.enableStrictDynamic", true);
+
+    prefs->GetBoolPref("security.csp.enableNavigateTo", &navigateTo);
+    prefs->SetBoolPref("security.csp.enableNavigateTo", true);
   }
 
   for (uint32_t i = 0; i < aPolicyCount; i++) {
@@ -170,6 +173,7 @@ nsresult runTestSuite(const PolicyTest* aPolicies, uint32_t aPolicyCount,
                        experimentalEnabledCache);
     prefs->SetBoolPref("security.csp.enableStrictDynamic",
                        strictDynamicEnabledCache);
+    prefs->SetBoolPref("security.csp.enableNavigateTo", navigateTo);
   }
 
   return NS_OK;
@@ -215,12 +219,20 @@ TEST(CSPParser, Directives)
       "script-src 'nonce-foo' 'unsafe-inline'" },
     { "script-src 'nonce-foo' 'strict-dynamic' 'unsafe-inline' https:  ",
       "script-src 'nonce-foo' 'strict-dynamic' 'unsafe-inline' https:" },
+    { "script-src 'nonce-foo' 'strict-dynamic' 'unsafe-inline' 'report-sample' https:  ",
+      "script-src 'nonce-foo' 'strict-dynamic' 'unsafe-inline' 'report-sample' https:" },
     { "default-src 'sha256-siVR8' 'strict-dynamic' 'unsafe-inline' https:  ",
       "default-src 'sha256-siVR8' 'unsafe-inline' https:" },
     { "worker-src https://example.com",
       "worker-src https://example.com" },
     { "worker-src http://worker.com; frame-src http://frame.com; child-src http://child.com",
       "worker-src http://worker.com; frame-src http://frame.com; child-src http://child.com" },
+    { "navigate-to http://example.com",
+      "navigate-to http://example.com"},
+    { "navigate-to 'unsafe-allow-redirects' http://example.com",
+      "navigate-to 'unsafe-allow-redirects' http://example.com"},
+    { "script-src 'unsafe-allow-redirects' http://example.com",
+      "script-src http://example.com"},
       // clang-format on
   };
 

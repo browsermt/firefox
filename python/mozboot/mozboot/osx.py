@@ -185,7 +185,11 @@ class OSXBootstrapper(BaseBootstrapper):
 
         choice = self.ensure_package_manager()
         self.package_manager = choice
-        getattr(self, 'ensure_%s_system_packages' % self.package_manager)()
+        _, hg_modern, _ = self.is_mercurial_modern()
+        if not hg_modern:
+            print("Mercurial wasn't found or is not sufficiently modern. "
+                  "It will be installed with %s" % self.package_manager)
+        getattr(self, 'ensure_%s_system_packages' % self.package_manager)(not hg_modern)
 
     def install_browser_packages(self):
         getattr(self, 'ensure_%s_browser_packages' % self.package_manager)()
@@ -316,14 +320,23 @@ class OSXBootstrapper(BaseBootstrapper):
     def _ensure_homebrew_casks(self, casks):
         self._ensure_homebrew_found()
 
-        # Ensure that we can access old versions of packages.  This is
-        # idempotent, so no need to avoid repeat invocation.
-        self.check_output([self.brew, 'tap', 'homebrew/cask-versions'])
+        known_taps = self.check_output([self.brew, 'tap'])
+
+        # Ensure that we can access old versions of packages.
+        if b'homebrew/cask-versions' not in known_taps:
+            self.check_output([self.brew, 'tap', 'homebrew/cask-versions'])
+
+        # "caskroom/versions" has been renamed to "homebrew/cask-versions", so
+        # it is safe to remove the old tap. Removing the old tap is necessary
+        # to avoid the error "Cask [name of cask] exists in multiple taps".
+        # See https://bugzilla.mozilla.org/show_bug.cgi?id=1544981
+        if b'caskroom/versions' in known_taps:
+            self.check_output([self.brew, 'untap', 'caskroom/versions'])
 
         # Change |brew install cask| into |brew cask install cask|.
         return self._ensure_homebrew_packages(casks, extra_brew_args=['cask'])
 
-    def ensure_homebrew_system_packages(self):
+    def ensure_homebrew_system_packages(self, install_mercurial):
         # We need to install Python because Mercurial requires the
         # Python development headers which are missing from OS X (at
         # least on 10.8) and because the build system wants a version
@@ -332,13 +345,14 @@ class OSXBootstrapper(BaseBootstrapper):
             'autoconf@2.13',
             'git',
             'gnu-tar',
-            'mercurial',
             'node',
             'python',
             'python@2',
             'terminal-notifier',
             'watchman',
         ]
+        if install_mercurial:
+            packages.append('mercurial')
         self._ensure_homebrew_packages(packages)
 
     def ensure_homebrew_browser_packages(self, artifact_mode=False):
@@ -398,17 +412,18 @@ class OSXBootstrapper(BaseBootstrapper):
             print(PACKAGE_MANAGER_PACKAGES % ('MacPorts',))
             self.run_as_root([self.port, '-v', 'install'] + missing)
 
-    def ensure_macports_system_packages(self):
+    def ensure_macports_system_packages(self, install_mercurial):
         packages = [
             'python27',
             'python36',
             'py27-gnureadline',
-            'mercurial',
             'autoconf213',
             'gnutar',
             'watchman',
             'nodejs8'
         ]
+        if install_mercurial:
+            packages.append('mercurial')
 
         self._ensure_macports_packages(packages)
 

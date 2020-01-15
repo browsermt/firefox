@@ -4,25 +4,28 @@
 
 "use strict";
 
-const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const {
   createFactory,
   PureComponent,
 } = require("devtools/client/shared/vendor/react");
 const { ul } = require("devtools/client/shared/vendor/react-dom-factories");
 
-const { MANIFEST_ISSUE_LEVELS } = require("../../constants");
-const ManifestIssue = createFactory(require("./ManifestIssue"));
+const {
+  MANIFEST_ISSUE_LEVELS,
+} = require("devtools/client/application/src/constants");
+const Types = require("devtools/client/application/src/types/index");
+
+const ManifestIssue = createFactory(
+  require("devtools/client/application/src/components/manifest/ManifestIssue")
+);
 
 /**
  * A collection of manifest issues (errors, warnings)
  */
 class ManifestIssueList extends PureComponent {
   static get propTypes() {
-    // TODO: Use well-defined types
-    //       See https://bugzilla.mozilla.org/show_bug.cgi?id=1576881
     return {
-      issues: PropTypes.array.isRequired,
+      issues: Types.manifestIssueArray.isRequired,
     };
   }
 

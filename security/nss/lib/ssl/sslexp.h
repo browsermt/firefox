@@ -536,7 +536,7 @@ typedef SECStatus(PR_CALLBACK *SSLResumptionTokenCallback)(
  * group -- the named group this key corresponds to
  * pubKey -- the public key for the key pair
  * pad -- the length to pad to
- * notBefore/notAfter -- validity range
+ * notBefore/notAfter -- validity range in seconds since epoch
  * out/outlen/maxlen -- where to output the data
  */
 #define SSL_EncodeESNIKeys(cipherSuites, cipherSuiteCount,          \
@@ -786,6 +786,95 @@ typedef PRTime(PR_CALLBACK *SSLTimeFunc)(void *arg);
                           SECItem *_out),                                     \
                          (cert, certPriv, dcPub, dcCertVerifyAlg, dcValidFor, \
                           now, out))
+
+/* New functions created to permit get/set the CipherSuites Order for the
+ * handshake (Client Hello).
+ *
+ * The *Get function puts the current set of active (enabled and policy set as
+ * PR_TRUE) cipher suites in the cipherOrder outparam. Cipher suites that
+ * aren't active aren't included. The paramenters are:
+ *   - PRFileDesc *fd = FileDescriptor to get information.
+ *   - PRUint16 *cipherOrder = The memory allocated for cipherOrder needs to be
+ *     SSL_GetNumImplementedCiphers() * sizeof(PRUint16) or more.
+ *   - PRUint16 numCiphers = The number of active ciphersuites listed in
+ *     *cipherOrder is written here.
+ *
+ * The *Set function permits reorder the CipherSuites list for the Handshake
+ * (Client Hello). The default ordering defined in ssl3con.c is enough in
+ * almost all cases. But, if the client needs some hardening or performance
+ * adjusts related to CipherSuites, this can be done with this function.
+ * The caller has to be aware about the risk of call this function while a
+ * handshake are being processed in this fd/socket. For example, if you disable
+ * a cipher after the handshake and this cipher was choosen for that
+ * connection, something bad will happen.
+ * The parameters are:
+ *   - PRFileDesc *fd = FileDescriptor to change.
+ *   - const PRUint16 *cipherOrder = Must receive all ciphers to be ordered, in
+ *     the desired order. They will be set in the begin of the list. Only
+ *     suites listed by SSL_ImplementedCiphers() can be included.
+ *   - PRUint16 numCiphers = Must receive the number of items in *cipherOrder.
+ * */
+#define SSL_CipherSuiteOrderGet(fd, cipherOrder, numCiphers)         \
+    SSL_EXPERIMENTAL_API("SSL_CipherSuiteOrderGet",                  \
+                         (PRFileDesc * _fd, PRUint16 * _cipherOrder, \
+                          unsigned int *_numCiphers),                \
+                         (fd, cipherOrder, numCiphers))
+
+#define SSL_CipherSuiteOrderSet(fd, cipherOrder, numCiphers)              \
+    SSL_EXPERIMENTAL_API("SSL_CipherSuiteOrderSet",                       \
+                         (PRFileDesc * _fd, const PRUint16 *_cipherOrder, \
+                          PRUint16 _numCiphers),                          \
+                         (fd, cipherOrder, numCiphers))
+
+/*
+ * The following functions expose a masking primitive that uses ciphersuite and
+ * version information to set paramaters for the masking key and mask generation
+ * logic. This is only supported for TLS 1.3.
+ *
+ * The key and IV are generated using the TLS KDF with a custom label.  That is
+ * HKDF-Expand-Label(secret, label, "", L), where |label| is an input to
+ * SSL_CreateMaskingContext.
+ *
+ * The mask generation logic in SSL_CreateMask is determined by the underlying
+ * symmetric cipher:
+ *  - For AES-ECB, mask = AES-ECB(mask_key, sample). |len| must be <= 16 as
+ *    the output is limited to a single block.
+ *  - For CHACHA20, mask = ChaCha20(mask_key, sample[0..3], sample[4..15], {0}.len)
+ *    That is, the low 4 bytes of |sample| used as the counter, the remaining 12 bytes
+ *    the nonce. We encrypt |len| bytes of zeros, returning the raw key stream.
+ *
+ *  The caller must pre-allocate at least |len| bytes for output. If the underlying
+ *  cipher cannot produce the requested amount of data, SECFailure is returned.
+ */
+
+typedef struct SSLMaskingContextStr {
+    CK_MECHANISM_TYPE mech;
+    PRUint16 version;
+    PRUint16 cipherSuite;
+    PK11SymKey *secret;
+} SSLMaskingContext;
+
+#define SSL_CreateMaskingContext(version, cipherSuite, secret,      \
+                                 label, labelLen, ctx)              \
+    SSL_EXPERIMENTAL_API("SSL_CreateMaskingContext",                \
+                         (PRUint16 _version, PRUint16 _cipherSuite, \
+                          PK11SymKey * _secret,                     \
+                          const char *_label,                       \
+                          unsigned int _labelLen,                   \
+                          SSLMaskingContext **_ctx),                \
+                         (version, cipherSuite, secret, label, labelLen, ctx))
+
+#define SSL_DestroyMaskingContext(ctx)                \
+    SSL_EXPERIMENTAL_API("SSL_DestroyMaskingContext", \
+                         (SSLMaskingContext * _ctx),  \
+                         (ctx))
+
+#define SSL_CreateMask(ctx, sample, sampleLen, mask, maskLen)               \
+    SSL_EXPERIMENTAL_API("SSL_CreateMask",                                  \
+                         (SSLMaskingContext * _ctx, const PRUint8 *_sample, \
+                          unsigned int _sampleLen, PRUint8 *_mask,          \
+                          unsigned int _maskLen),                           \
+                         (ctx, sample, sampleLen, mask, maskLen))
 
 /* Deprecated experimental APIs */
 #define SSL_UseAltServerHelloType(fd, enable) SSL_DEPRECATED_EXPERIMENTAL_API

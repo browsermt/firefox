@@ -667,7 +667,10 @@
       "../../babel-loader/lib/index.js??ref--1!../../devtools-modules/src/async-store-helper.js": 516,
       "../../@babel/types/lib/validators/isPlaceholderType.js": 517,
       "../../@babel/types/lib/definitions/placeholders.js": 518,
-      "../../webpack/buildin/harmony-module.js": 519
+      "../../webpack/buildin/harmony-module.js": 519,
+      "../../babel-loader/lib/index.js??ref--1!../../devtools-modules/src/saveAs.js": 520,
+      "../../punycode/punycode.js": 521,
+      "../../babel-loader/lib/index.js??ref--1!../../../../../shared/dom-node-constants.js": 522
     },
     "usedIds": {
       "0": 0,
@@ -1189,7 +1192,10 @@
       "516": 516,
       "517": 517,
       "518": 518,
-      "519": 519
+      "519": 519,
+      "520": 520,
+      "521": 521,
+      "522": 522
     }
   },
   "chunks": {

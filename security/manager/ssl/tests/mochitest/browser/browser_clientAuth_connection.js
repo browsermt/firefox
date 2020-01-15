@@ -89,24 +89,23 @@ const gClientAuthDialogs = {
       "Server cert issuer Organization should be 'Mozilla Testing'"
     );
 
-    // For mochitests, only the cert at build/pgo/certs/mochitest.client should
-    // be selectable, so we do some brief checks to confirm this.
+    // For mochitests, the cert at build/pgo/certs/mochitest.client should be
+    // selectable as well as one of the PGO certs we loaded in `setup`, so we do
+    // some brief checks to confirm this.
     Assert.notEqual(certList, null, "Cert list should not be null");
-    Assert.ok(certList.length > 0, "Should have at least one certificate");
-    let index = -1;
-    for (let i = 0; i < certList.length; i++) {
-      let cert = certList.queryElementAt(i, Ci.nsIX509Cert);
-      Assert.notEqual(cert, null, "Cert list should contain an nsIX509Cert");
-      if (cert.commonName === "Mochitest client") {
-        index = i;
-        break;
-      }
+    Assert.equal(certList.length, 2, "2 certificate should be available");
+
+    for (let cert of certList.enumerate(Ci.nsIX509Cert)) {
+      Assert.notEqual(cert, null, "Cert list should contain nsIX509Certs");
+      Assert.equal(
+        cert.issuerCommonName,
+        "Temporary Certificate Authority",
+        "cert should have expected issuer CN"
+      );
     }
 
-    Assert.notEqual(index, -1, "Should have found 'Mochitest client'");
-
     if (this.state == DialogState.RETURN_CERT_SELECTED) {
-      selectedIndex.value = index;
+      selectedIndex.value = 0;
       return true;
     }
     return false;
@@ -123,6 +122,13 @@ add_task(async function setup() {
   registerCleanupFunction(() => {
     MockRegistrar.unregister(clientAuthDialogsCID);
   });
+
+  // This CA has the expected keyCertSign and cRLSign usages. It should not be
+  // presented for use as a client certificate.
+  await readCertificate("pgo-ca-regular-usages.pem", "CTu,CTu,CTu");
+  // This CA has all keyUsages. For compatibility with preexisting behavior, it
+  // will be presented for use as a client certificate.
+  await readCertificate("pgo-ca-all-usages.pem", "CTu,CTu,CTu");
 });
 
 /**

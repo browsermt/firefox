@@ -23,6 +23,7 @@
 #include "nsCaret.h"
 #include "nsContainerFrame.h"
 #include "nsContentUtils.h"
+#include "nsDebug.h"
 #include "nsFocusManager.h"
 #include "nsFrame.h"
 #include "nsFrameSelection.h"
@@ -170,6 +171,7 @@ void AccessibleCaretManager::HideCarets() {
     AC_LOG("%s", __FUNCTION__);
     mFirstCaret->SetAppearance(Appearance::None);
     mSecondCaret->SetAppearance(Appearance::None);
+    mIsCaretPositionChanged = false;
     DispatchCaretStateChangedEvent(CaretChangedReason::Visibilitychange);
   }
 }
@@ -192,6 +194,8 @@ void AccessibleCaretManager::UpdateCarets(const UpdateCaretsHintSet& aHint) {
       UpdateCaretsForSelectionMode(aHint);
       break;
   }
+
+  UpdateShouldDisableApz();
 }
 
 bool AccessibleCaretManager::IsCaretDisplayableInCursorMode(
@@ -279,6 +283,8 @@ void AccessibleCaretManager::UpdateCaretsForCursorMode(
 
   mSecondCaret->SetAppearance(Appearance::None);
 
+  mIsCaretPositionChanged = (result == PositionChangedResult::Changed);
+
   if (!aHints.contains(UpdateCaretsHint::DispatchNoEvent) && !mActiveCaret) {
     DispatchCaretStateChangedEvent(CaretChangedReason::Updateposition);
   }
@@ -326,8 +332,11 @@ void AccessibleCaretManager::UpdateCaretsForSelectionMode(
   PositionChangedResult secondCaretResult =
       updateSingleCaret(mSecondCaret.get(), endFrame, endOffset);
 
-  if (firstCaretResult == PositionChangedResult::Changed ||
-      secondCaretResult == PositionChangedResult::Changed) {
+  mIsCaretPositionChanged =
+      firstCaretResult == PositionChangedResult::Changed ||
+      secondCaretResult == PositionChangedResult::Changed;
+
+  if (mIsCaretPositionChanged) {
     // Flush layout to make the carets intersection correct.
     if (!FlushLayout()) {
       return;
@@ -347,6 +356,39 @@ void AccessibleCaretManager::UpdateCaretsForSelectionMode(
 
   if (!aHints.contains(UpdateCaretsHint::DispatchNoEvent) && !mActiveCaret) {
     DispatchCaretStateChangedEvent(CaretChangedReason::Updateposition);
+  }
+}
+
+void AccessibleCaretManager::UpdateShouldDisableApz() {
+  if (mActiveCaret) {
+    // No need to disable APZ when dragging the caret.
+    mShouldDisableApz = false;
+    return;
+  }
+
+  if (mIsScrollStarted) {
+    // During scrolling, the caret's position is changed only if it is in a
+    // position:fixed or a "stuck" position:sticky frame subtree.
+    mShouldDisableApz = mIsCaretPositionChanged;
+    return;
+  }
+
+  // For other cases, we can only reliably detect whether the caret is in a
+  // position:fixed frame subtree.
+  switch (mLastUpdateCaretMode) {
+    case CaretMode::None:
+      mShouldDisableApz = false;
+      break;
+    case CaretMode::Cursor:
+      mShouldDisableApz = mFirstCaret->IsVisuallyVisible() &&
+                          mFirstCaret->IsInPositionFixedSubtree();
+      break;
+    case CaretMode::Selection:
+      mShouldDisableApz = (mFirstCaret->IsVisuallyVisible() &&
+                           mFirstCaret->IsInPositionFixedSubtree()) ||
+                          (mSecondCaret->IsVisuallyVisible() &&
+                           mSecondCaret->IsInPositionFixedSubtree());
+      break;
   }
 }
 
@@ -453,6 +495,7 @@ nsresult AccessibleCaretManager::ReleaseCaret() {
 
   mActiveCaret = nullptr;
   SetSelectionDragState(false);
+  UpdateShouldDisableApz();
   DispatchCaretStateChangedEvent(CaretChangedReason::Releasecaret);
   return NS_OK;
 }
@@ -572,6 +615,40 @@ nsresult AccessibleCaretManager::SelectWordOrShortcut(const nsPoint& aPoint) {
     return NS_ERROR_FAILURE;
   }
 
+  // If long tap point isn't selectable frame for caret and frame selection
+  // can find a better frame for caret, we don't select a word.
+  // See https://webcompat.com/issues/15953
+  nsIFrame::ContentOffsets offsets =
+      ptFrame->GetContentOffsetsFromPoint(ptInFrame, nsIFrame::SKIP_HIDDEN);
+  if (offsets.content) {
+    RefPtr<nsFrameSelection> frameSelection = GetFrameSelection();
+    if (frameSelection) {
+      int32_t offset;
+      nsIFrame* theFrame = frameSelection->GetFrameForNodeOffset(
+          offsets.content, offsets.offset, offsets.associate, &offset);
+      if (theFrame && theFrame != ptFrame) {
+        SetSelectionDragState(true);
+        frameSelection->HandleClick(offsets.content, offsets.StartOffset(),
+                                    offsets.EndOffset(), false, false,
+                                    offsets.associate);
+        SetSelectionDragState(false);
+        ClearMaintainedSelection();
+
+        if (StaticPrefs::
+                layout_accessiblecaret_caret_shown_when_long_tapping_on_empty_content()) {
+          mFirstCaret->SetAppearance(Appearance::Normal);
+        }
+
+        UpdateCarets();
+        ProvideHapticFeedback();
+        DispatchCaretStateChangedEvent(
+            CaretChangedReason::Longpressonemptycontent);
+
+        return NS_OK;
+      }
+    }
+  }
+
   // Then try select a word under point.
   nsresult rv = SelectWord(ptFrame, ptInFrame);
   UpdateCarets();
@@ -585,6 +662,11 @@ void AccessibleCaretManager::OnScrollStart() {
 
   AutoRestore<bool> saveAllowFlushingLayout(mAllowFlushingLayout);
   mAllowFlushingLayout = false;
+
+  Maybe<PresShell::AutoAssertNoFlush> assert;
+  if (mPresShell) {
+    assert.emplace(*mPresShell);
+  }
 
   mIsScrollStarted = true;
 
@@ -602,6 +684,11 @@ void AccessibleCaretManager::OnScrollEnd() {
 
   AutoRestore<bool> saveAllowFlushingLayout(mAllowFlushingLayout);
   mAllowFlushingLayout = false;
+
+  Maybe<PresShell::AutoAssertNoFlush> assert;
+  if (mPresShell) {
+    assert.emplace(*mPresShell);
+  }
 
   mIsScrollStarted = false;
 
@@ -633,6 +720,11 @@ void AccessibleCaretManager::OnScrollPositionChanged() {
   AutoRestore<bool> saveAllowFlushingLayout(mAllowFlushingLayout);
   mAllowFlushingLayout = false;
 
+  Maybe<PresShell::AutoAssertNoFlush> assert;
+  if (mPresShell) {
+    assert.emplace(*mPresShell);
+  }
+
   if (mFirstCaret->IsLogicallyVisible() || mSecondCaret->IsLogicallyVisible()) {
     if (mIsScrollStarted) {
       // We don't want extra CaretStateChangedEvents dispatched when user is
@@ -655,6 +747,11 @@ void AccessibleCaretManager::OnReflow() {
 
   AutoRestore<bool> saveAllowFlushingLayout(mAllowFlushingLayout);
   mAllowFlushingLayout = false;
+
+  Maybe<PresShell::AutoAssertNoFlush> assert;
+  if (mPresShell) {
+    assert.emplace(*mPresShell);
+  }
 
   if (mFirstCaret->IsLogicallyVisible() || mSecondCaret->IsLogicallyVisible()) {
     AC_LOG("%s: UpdateCarets(RespectOldAppearance)", __FUNCTION__);
@@ -825,7 +922,8 @@ bool AccessibleCaretManager::IsPhoneNumber(nsAString& aCandidate) const {
   RefPtr<Document> doc = mPresShell->GetDocument();
   nsAutoString phoneNumberRegex(
       NS_LITERAL_STRING("(^\\+)?[0-9 ,\\-.()*#pw]{1,30}$"));
-  return nsContentUtils::IsPatternMatching(aCandidate, phoneNumberRegex, doc);
+  return nsContentUtils::IsPatternMatching(aCandidate, phoneNumberRegex, doc)
+      .valueOr(false);
 }
 
 void AccessibleCaretManager::SelectMoreIfPhoneNumber() const {
@@ -1024,8 +1122,14 @@ bool AccessibleCaretManager::RestrictCaretDraggingOffsets(
 
   // Compare the active caret's new position (aOffsets) to the inactive caret's
   // position.
-  int32_t cmpToInactiveCaretPos = nsContentUtils::ComparePoints(
+  const Maybe<int32_t> cmpToInactiveCaretPos = nsContentUtils::ComparePoints(
       aOffsets.content, aOffsets.StartOffset(), content, contentOffset);
+  if (NS_WARN_IF(!cmpToInactiveCaretPos)) {
+    // Potentially handle this properly when Selection across Shadow DOM
+    // boundary is implemented
+    // (https://bugzilla.mozilla.org/show_bug.cgi?id=1607497).
+    return false;
+  }
 
   // Move one character (in the direction of dir) from the inactive caret's
   // position. This is the limit for the active caret's new position.
@@ -1038,9 +1142,15 @@ bool AccessibleCaretManager::RestrictCaretDraggingOffsets(
   }
 
   // Compare the active caret's new position (aOffsets) to the limit.
-  int32_t cmpToLimit =
+  const Maybe<int32_t> cmpToLimit =
       nsContentUtils::ComparePoints(aOffsets.content, aOffsets.StartOffset(),
                                     limit.mResultContent, limit.mContentOffset);
+  if (NS_WARN_IF(!cmpToLimit)) {
+    // Potentially handle this properly when Selection across Shadow DOM
+    // boundary is implemented
+    // (https://bugzilla.mozilla.org/show_bug.cgi?id=1607497).
+    return false;
+  }
 
   auto SetOffsetsToLimit = [&aOffsets, &limit]() {
     aOffsets.content = limit.mResultContent;
@@ -1050,15 +1160,15 @@ bool AccessibleCaretManager::RestrictCaretDraggingOffsets(
 
   if (!StaticPrefs::
           layout_accessiblecaret_allow_dragging_across_other_caret()) {
-    if ((mActiveCaret == mFirstCaret.get() && cmpToLimit == 1) ||
-        (mActiveCaret == mSecondCaret.get() && cmpToLimit == -1)) {
+    if ((mActiveCaret == mFirstCaret.get() && *cmpToLimit == 1) ||
+        (mActiveCaret == mSecondCaret.get() && *cmpToLimit == -1)) {
       // The active caret's position is past the limit, which we don't allow
       // here. So set it to the limit, resulting in one character being
       // selected.
       SetOffsetsToLimit();
     }
   } else {
-    switch (cmpToInactiveCaretPos) {
+    switch (*cmpToInactiveCaretPos) {
       case 0:
         // The active caret's position is the same as the position of the
         // inactive caret. So set it to the limit to prevent the selection from
@@ -1294,7 +1404,7 @@ void AccessibleCaretManager::DispatchCaretStateChangedEvent(
   const nsRange* range = sel->GetAnchorFocusRange();
   nsINode* commonAncestorNode = nullptr;
   if (range) {
-    commonAncestorNode = range->GetCommonAncestor();
+    commonAncestorNode = range->GetClosestCommonInclusiveAncestor();
   }
 
   if (!commonAncestorNode) {
@@ -1354,7 +1464,7 @@ void AccessibleCaretManager::DispatchCaretStateChangedEvent(
          __FUNCTION__, static_cast<uint32_t>(init.mReason), init.mCollapsed,
          static_cast<uint32_t>(init.mCaretVisible));
 
-  (new AsyncEventDispatcher(doc, event))->RunDOMEventWhenSafe();
+  (new AsyncEventDispatcher(doc, event))->PostDOMEvent();
 }
 
 }  // namespace mozilla

@@ -104,9 +104,11 @@ class DownloadItem {
     return this.download.source.url;
   }
   get referrer() {
-    return this.download.source.referrerInfo
+    const uri = this.download.source.referrerInfo
       ? this.download.source.referrerInfo.originalReferrer
       : null;
+
+    return uri && uri.spec;
   }
   get filename() {
     return this.download.target.path;
@@ -558,7 +560,7 @@ this.downloads = class extends ExtensionAPI {
           }
 
           if (filename != null) {
-            if (filename.length == 0) {
+            if (!filename.length) {
               return Promise.reject({ message: "filename must not be empty" });
             }
 
@@ -774,8 +776,14 @@ this.downloads = class extends ExtensionAPI {
               const source = {
                 url: options.url,
                 isPrivate: options.incognito,
-                allowHttpStatus,
               };
+
+              // Unless the API user explicitly wants errors ignored,
+              // set the allowHttpStatus callback, which will instruct
+              // DownloadCore to cancel downloads on HTTP errors.
+              if (!options.allowHttpErrors) {
+                source.allowHttpStatus = allowHttpStatus;
+              }
 
               if (options.method || options.headers || options.body) {
                 source.adjustChannel = adjustChannel;
@@ -1059,7 +1067,7 @@ this.downloads = class extends ExtensionAPI {
                 };
               }
             });
-            if (Object.keys(changes).length > 0) {
+            if (Object.keys(changes).length) {
               changes.id = item.id;
               fire.async(changes);
             }

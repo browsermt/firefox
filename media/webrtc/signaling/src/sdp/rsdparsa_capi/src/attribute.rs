@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 use std::slice;
 use libc::{size_t, c_float};
 use std::ptr;
@@ -256,7 +260,7 @@ impl<'a> From<&'a SdpAttributeRtpmap> for RustSdpAttributeRtpmap {
             payload_type: other.payload_type as u8,
             codec_name: StringView::from(other.codec_name.as_str()),
             frequency: other.frequency as u32,
-            channels: other.channels.unwrap_or(1)
+            channels: other.channels.unwrap_or(0)
         }
     }
 }

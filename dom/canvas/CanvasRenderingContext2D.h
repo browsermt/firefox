@@ -22,7 +22,6 @@
 #include "mozilla/PresShell.h"
 #include "mozilla/UniquePtr.h"
 #include "gfx2DGlue.h"
-#include "imgIEncoder.h"
 #include "nsLayoutUtils.h"
 #include "mozilla/EnumeratedArray.h"
 #include "FilterSupport.h"
@@ -382,7 +381,7 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
   }
 
   void DrawWindow(nsGlobalWindowInner& aWindow, double aX, double aY, double aW,
-                  double aH, const nsAString& aBgColor, uint32_t aFlags,
+                  double aH, const nsACString& aBgColor, uint32_t aFlags,
                   mozilla::ErrorResult& aError);
 
   // Eventually this should be deprecated. Keeping for now to keep the binding
@@ -562,7 +561,7 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
                        Style aWhichStyle);
 
   // Returns whether a color was successfully parsed.
-  bool ParseColor(const nsAString& aString, nscolor* aColor);
+  bool ParseColor(const nsACString& aString, nscolor* aColor);
 
   static void StyleColorToString(const nscolor& aColor, nsAString& aStr);
 
@@ -1042,6 +1041,7 @@ class CanvasRenderingContext2D final : public nsICanvasRenderingContextInternal,
   bool IsWriteOnly() const { return mWriteOnly; }
 
   bool mWriteOnly;
+  bool mClipsNeedConverting = false;
 };
 
 size_t BindingJSObjectMallocBytes(CanvasRenderingContext2D* aContext);

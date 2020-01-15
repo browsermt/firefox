@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
 "use strict";
 
 const { PromiseMessage } = ChromeUtils.import(
@@ -66,20 +70,21 @@ async function getIcon(aWindow, icons, expectedSize) {
 
 async function fetchIcon(aWindow, src) {
   const iconURL = new aWindow.URL(src, aWindow.location);
+  // If this is already a data URL then no need to load it again.
+  if (iconURL.protocol === "data:") {
+    return iconURL.href;
+  }
+
   const request = new aWindow.Request(iconURL, { mode: "cors" });
   request.overrideContentPolicyType(Ci.nsIContentPolicy.TYPE_IMAGE);
-  return aWindow
-    .fetch(request)
-    .then(response => response.blob())
-    .then(
-      blob =>
-        new Promise((resolve, reject) => {
-          var reader = new FileReader();
-          reader.onloadend = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        })
-    );
+  const response = await aWindow.fetch(request);
+  const blob = await response.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 var EXPORTED_SYMBOLS = ["ManifestIcons"]; // jshint ignore:line

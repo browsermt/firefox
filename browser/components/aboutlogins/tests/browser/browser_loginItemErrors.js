@@ -22,10 +22,11 @@ add_task(async function test_showLoginItemErrors() {
     "pass2"
   );
   LOGIN_TO_UPDATE = Services.logins.addLogin(LOGIN_TO_UPDATE);
+  EXPECTED_ERROR_MESSAGE = "This login already exists.";
 
-  await ContentTask.spawn(
+  await SpecialPowers.spawn(
     browser,
-    LoginHelper.loginToVanillaObject(LOGIN_TO_UPDATE),
+    [LoginHelper.loginToVanillaObject(LOGIN_TO_UPDATE)],
     async loginToUpdate => {
       const loginItem = Cu.waiveXrays(
         content.document.querySelector("login-item")
@@ -81,11 +82,11 @@ add_task(async function test_showLoginItemErrors() {
       );
 
       const loginItemErrorMessageText = loginItemErrorMessage.querySelector(
-        "span"
+        "span:not([hidden])"
       );
-      ok(
-        loginItemErrorMessageText.dataset.l10nId ===
-          "about-logins-error-message-duplicate-login",
+      is(
+        loginItemErrorMessageText.dataset.l10nId,
+        "about-logins-error-message-duplicate-login-with-link",
         "The correct error message is displayed."
       );
 
@@ -129,4 +130,5 @@ add_task(async function test_showLoginItemErrors() {
       );
     }
   );
+  EXPECTED_ERROR_MESSAGE = null;
 });

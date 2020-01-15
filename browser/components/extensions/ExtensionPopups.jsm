@@ -21,11 +21,6 @@ ChromeUtils.defineModuleGetter(
 );
 ChromeUtils.defineModuleGetter(
   this,
-  "E10SUtils",
-  "resource://gre/modules/E10SUtils.jsm"
-);
-ChromeUtils.defineModuleGetter(
-  this,
   "ExtensionParent",
   "resource://gre/modules/ExtensionParent.jsm"
 );
@@ -292,7 +287,7 @@ class BasePopup {
 
     if (this.extension.remote) {
       browser.setAttribute("remote", "true");
-      browser.setAttribute("remoteType", E10SUtils.EXTENSION_REMOTE_TYPE);
+      browser.setAttribute("remoteType", this.extension.remoteType);
     }
 
     // We only need flex sizing for the sake of the slide-in sub-views of the
@@ -350,9 +345,6 @@ class BasePopup {
     return readyPromise.then(() => {
       setupBrowser(browser);
       let mm = browser.messageManager;
-
-      // Sets the context information for context menus.
-      mm.loadFrameScript("chrome://browser/content/content.js", true, true);
 
       mm.loadFrameScript(
         "chrome://extensions/content/ext-browser-content.js",

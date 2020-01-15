@@ -12,6 +12,10 @@
 #include "mozilla/UniquePtr.h"
 
 namespace mozilla {
+namespace webgpu {
+class PWebGPUParent;
+}  // namespace webgpu
+
 namespace layers {
 
 class CanvasParent;
@@ -96,8 +100,15 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
     return IPC_OK();
   }
 
-  mozilla::ipc::IPCResult RecvEndRecording(bool* aOutSuccess) override {
-    *aOutSuccess = false;
+  mozilla::ipc::IPCResult RecvEndRecordingToDisk(
+      EndRecordingToDiskResolver&& aResolve) override {
+    aResolve(false);
+    return IPC_OK();
+  }
+
+  mozilla::ipc::IPCResult RecvEndRecordingToMemory(
+      EndRecordingToMemoryResolver&& aResolve) override {
+    aResolve(Nothing());
     return IPC_OK();
   }
 
@@ -150,6 +161,9 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
     return IPC_FAIL_NO_REASON(this);
   }
 
+  already_AddRefed<dom::PWebGLParent> AllocPWebGLParent(
+      const webgl::InitContextDesc&, webgl::InitContextResult* out) override;
+
   // Use DidCompositeLocked if you already hold a lock on
   // sIndirectLayerTreesLock; Otherwise use DidComposite, which would request
   // the lock automatically.
@@ -166,6 +180,8 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
 
   mozilla::ipc::IPCResult RecvInitPCanvasParent(
       Endpoint<PCanvasParent>&& aEndpoint) final;
+
+  mozilla::ipc::IPCResult RecvReleasePCanvasParent() final;
 
   bool IsSameProcess() const override;
 
@@ -197,6 +213,9 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
       const LayoutDeviceIntSize& aSize) override;
   bool DeallocPWebRenderBridgeParent(PWebRenderBridgeParent* aActor) override;
 
+  webgpu::PWebGPUParent* AllocPWebGPUParent() override;
+  bool DeallocPWebGPUParent(webgpu::PWebGPUParent* aActor) override;
+
   void ObserveLayersUpdate(LayersId aLayersId, LayersObserverEpoch aEpoch,
                            bool aActive) override;
 
@@ -204,6 +223,10 @@ class ContentCompositorBridgeParent final : public CompositorBridgeParentBase {
 
   UniquePtr<SurfaceDescriptor> LookupSurfaceDescriptorForClientDrawTarget(
       const uintptr_t aDrawTarget) final;
+
+  mozilla::ipc::IPCResult RecvSupportsAsyncDXGISurface(bool* value) override;
+  mozilla::ipc::IPCResult RecvPreferredDXGIAdapter(
+      DxgiAdapterDesc* desc) override;
 
  private:
   // Private destructor, to discourage deletion outside of Release():

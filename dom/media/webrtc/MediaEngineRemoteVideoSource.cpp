@@ -10,7 +10,6 @@
 #include "MediaTrackConstraints.h"
 #include "mozilla/ErrorNames.h"
 #include "mozilla/RefPtr.h"
-#include "nsIPrefService.h"
 #include "Tracing.h"
 #include "VideoFrameUtils.h"
 #include "VideoUtils.h"
@@ -156,8 +155,8 @@ void MediaEngineRemoteVideoSource::SetName(nsString aName) {
   }
 
   mFacingMode = facingMode.map([](const auto& aFM) {
-    return NS_ConvertUTF8toUTF16(
-        dom::VideoFacingModeEnumValues::strings[uint32_t(aFM)].value);
+    return NS_ConvertASCIItoUTF16(
+        dom::VideoFacingModeEnumValues::GetString(aFM));
   });
   NS_DispatchToMainThread(NS_NewRunnableFunction(
       "MediaEngineRemoteVideoSource::SetName (facingMode updater)",
@@ -192,8 +191,7 @@ nsString MediaEngineRemoteVideoSource::GetGroupId() const {
 
 nsresult MediaEngineRemoteVideoSource::Allocate(
     const MediaTrackConstraints& aConstraints, const MediaEnginePrefs& aPrefs,
-    const mozilla::ipc::PrincipalInfo& aPrincipalInfo,
-    const char** aOutBadConstraint) {
+    uint64_t aWindowID, const char** aOutBadConstraint) {
   LOG("%s", __PRETTY_FUNCTION__);
   AssertIsOnOwningThread();
 
@@ -216,7 +214,7 @@ nsresult MediaEngineRemoteVideoSource::Allocate(
 
   if (camera::GetChildAndCall(&camera::CamerasChild::AllocateCaptureDevice,
                               mCapEngine, mUniqueId.get(), kMaxUniqueIdLength,
-                              mCaptureIndex, aPrincipalInfo)) {
+                              mCaptureIndex, aWindowID)) {
     return NS_ERROR_FAILURE;
   }
 
@@ -236,15 +234,14 @@ nsresult MediaEngineRemoteVideoSource::Deallocate() {
 
   MOZ_ASSERT(mState == kStopped || mState == kAllocated);
 
-  if (mStream && IsTrackIDExplicit(mTrackID)) {
-    mStream->EndTrack(mTrackID);
+  if (mTrack) {
+    mTrack->End();
   }
 
   {
     MutexAutoLock lock(mMutex);
 
-    mStream = nullptr;
-    mTrackID = TRACK_NONE;
+    mTrack = nullptr;
     mPrincipal = PRINCIPAL_HANDLE_NONE;
     mState = kReleased;
   }
@@ -265,16 +262,13 @@ nsresult MediaEngineRemoteVideoSource::Deallocate() {
 }
 
 void MediaEngineRemoteVideoSource::SetTrack(
-    const RefPtr<SourceMediaStream>& aStream, TrackID aTrackID,
-    const PrincipalHandle& aPrincipal) {
+    const RefPtr<SourceMediaTrack>& aTrack, const PrincipalHandle& aPrincipal) {
   LOG("%s", __PRETTY_FUNCTION__);
   AssertIsOnOwningThread();
 
   MOZ_ASSERT(mState == kAllocated);
-  MOZ_ASSERT(!mStream);
-  MOZ_ASSERT(mTrackID == TRACK_NONE);
-  MOZ_ASSERT(aStream);
-  MOZ_ASSERT(IsTrackIDExplicit(aTrackID));
+  MOZ_ASSERT(!mTrack);
+  MOZ_ASSERT(aTrack);
 
   if (!mImageContainer) {
     mImageContainer = layers::LayerManager::CreateImageContainer(
@@ -283,11 +277,9 @@ void MediaEngineRemoteVideoSource::SetTrack(
 
   {
     MutexAutoLock lock(mMutex);
-    mStream = aStream;
-    mTrackID = aTrackID;
+    mTrack = aTrack;
     mPrincipal = aPrincipal;
   }
-  aStream->AddTrack(aTrackID, new VideoSegment());
 }
 
 nsresult MediaEngineRemoteVideoSource::Start() {
@@ -296,8 +288,7 @@ nsresult MediaEngineRemoteVideoSource::Start() {
 
   MOZ_ASSERT(mState == kAllocated || mState == kStopped);
   MOZ_ASSERT(mInitDone);
-  MOZ_ASSERT(mStream);
-  MOZ_ASSERT(IsTrackIDExplicit(mTrackID));
+  MOZ_ASSERT(mTrack);
 
   {
     MutexAutoLock lock(mMutex);
@@ -540,6 +531,11 @@ int MediaEngineRemoteVideoSource::DeliverFrame(
     }
   }
 
+  // Ensure width and height are at least two. Smaller frames can lead to
+  // problems with scaling and video encoding.
+  dst_width = std::max(2, dst_width);
+  dst_height = std::max(2, dst_height);
+
   rtc::Callback0<void> callback_unused;
   rtc::scoped_refptr<webrtc::I420BufferInterface> buffer =
       new rtc::RefCountedObject<webrtc::WrappedI420Buffer>(
@@ -620,7 +616,7 @@ int MediaEngineRemoteVideoSource::DeliverFrame(
     VideoSegment segment;
     mImageSize = image->GetSize();
     segment.AppendFrame(image.forget(), mImageSize, mPrincipal);
-    mStream->AppendToTrack(mTrackID, &segment);
+    mTrack->AppendData(&segment);
   }
 
   return 0;

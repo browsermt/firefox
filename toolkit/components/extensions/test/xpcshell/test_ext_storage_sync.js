@@ -204,7 +204,7 @@ class KintoServer {
         }),
       };
 
-      if (this.conflicts.length > 0) {
+      if (this.conflicts.length) {
         const nextConflict = this.conflicts.shift();
         if (!nextConflict.transient) {
           this.records.push(nextConflict);
@@ -486,7 +486,7 @@ async function withContextAndServer(f) {
 async function withSignedInUser(user, f) {
   let fxaServiceMock = {
     getSignedInUser() {
-      return Promise.resolve(user);
+      return Promise.resolve({ uid: user.uid });
     },
     getOAuthToken() {
       return Promise.resolve("some-access-token");
@@ -496,6 +496,14 @@ async function withSignedInUser(user, f) {
     },
     removeCachedOAuthToken() {
       return Promise.resolve();
+    },
+    keys: {
+      getKeys() {
+        return Promise.resolve({
+          kExtSync: user.kExtSync,
+          kExtKbHash: user.kExtKbHash,
+        });
+      },
     },
   };
 

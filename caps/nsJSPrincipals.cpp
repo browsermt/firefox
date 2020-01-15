@@ -5,15 +5,12 @@
 
 #include "xpcpublic.h"
 #include "nsString.h"
-#include "nsIObjectOutputStream.h"
-#include "nsIObjectInputStream.h"
 #include "nsJSPrincipals.h"
 #include "plstr.h"
 #include "nsCOMPtr.h"
-#include "nsIServiceManager.h"
 #include "nsMemory.h"
 #include "nsStringBuffer.h"
-
+#include "mozilla/BasePrincipal.h"
 #include "mozilla/dom/StructuredCloneTags.h"
 // for mozilla::dom::workerinternals::kJSPrincipalsDebugToken
 #include "mozilla/dom/workerinternals/JSSettings.h"
@@ -344,13 +341,14 @@ static bool WritePrincipalInfo(JSStructuredCloneWriter* aWriter,
          JS_WriteBytes(aWriter, aBaseDomain.get(), aBaseDomain.Length());
 }
 
-static bool WritePrincipalInfo(JSStructuredCloneWriter* aWriter,
-                               const PrincipalInfo& aInfo) {
+/* static */
+bool nsJSPrincipals::WritePrincipalInfo(JSStructuredCloneWriter* aWriter,
+                                        const PrincipalInfo& aInfo) {
   if (aInfo.type() == PrincipalInfo::TNullPrincipalInfo) {
     const NullPrincipalInfo& nullInfo = aInfo;
     return JS_WriteUint32Pair(aWriter, SCTAG_DOM_NULL_PRINCIPAL, 0) &&
-           WritePrincipalInfo(aWriter, nullInfo.attrs(), nullInfo.spec(),
-                              EmptyCString(), EmptyCString());
+           ::WritePrincipalInfo(aWriter, nullInfo.attrs(), nullInfo.spec(),
+                                EmptyCString(), EmptyCString());
   }
   if (aInfo.type() == PrincipalInfo::TSystemPrincipalInfo) {
     return JS_WriteUint32Pair(aWriter, SCTAG_DOM_SYSTEM_PRINCIPAL, 0);
@@ -373,8 +371,8 @@ static bool WritePrincipalInfo(JSStructuredCloneWriter* aWriter,
   MOZ_ASSERT(aInfo.type() == PrincipalInfo::TContentPrincipalInfo);
   const ContentPrincipalInfo& cInfo = aInfo;
   return JS_WriteUint32Pair(aWriter, SCTAG_DOM_CONTENT_PRINCIPAL, 0) &&
-         WritePrincipalInfo(aWriter, cInfo.attrs(), cInfo.spec(),
-                            cInfo.originNoSuffix(), cInfo.baseDomain());
+         ::WritePrincipalInfo(aWriter, cInfo.attrs(), cInfo.spec(),
+                              cInfo.originNoSuffix(), cInfo.baseDomain());
 }
 
 bool nsJSPrincipals::write(JSContext* aCx, JSStructuredCloneWriter* aWriter) {
@@ -385,4 +383,9 @@ bool nsJSPrincipals::write(JSContext* aCx, JSStructuredCloneWriter* aWriter) {
   }
 
   return WritePrincipalInfo(aWriter, info);
+}
+
+bool nsJSPrincipals::isSystemOrAddonPrincipal() {
+  return this->IsSystemPrincipal() ||
+         this->GetIsAddonOrExpandedAddonPrincipal();
 }

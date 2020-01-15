@@ -10,8 +10,6 @@
   <script>
 "use strict";
 
-const TEST_URL = "data:text/html,<html>Test ConsoleAPI timestamp correctness";
-
 window.onload = async function () {
   SimpleTest.waitForExplicitFinish();
   let state;
@@ -21,7 +19,7 @@ window.onload = async function () {
       (consoleState, response) => resolve(consoleState)
     ));
     state = await onAttachConsole;
-    const consoleFront = state.client;
+    const consoleFront = state.webConsoleFront;
 
     info("Testing console.log packet timestamp correctness");
     const clientLogTimestamp = Date.now();

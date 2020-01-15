@@ -23,6 +23,7 @@ job-defaults:
         max-run-time: 3600
         env:
             PERFHERDER_EXTRA_OPTIONS: static-analysis-autotest
+    run-on-projects: ['mozilla-central', 'try']
     run:
         using: mozharness
         actions: [static-analysis-autotest]
@@ -63,6 +64,8 @@ jobs:
                 - linux64-cbindgen
                 - linux64-nasm
                 - linux64-node
+                - linux64-lucetc
+                - wasi-sysroot
 
     win64-st-autotest/debug:
         description: "Win64 Debug Static Analysis Autotest"
@@ -81,6 +84,7 @@ jobs:
                 - builds/taskcluster_base_windows.py
                 - builds/taskcluster_base_win64.py
                 - builds/taskcluster_sub_win64/debug.py
+            tooltool-downloads: internal
             extra-config:
                 mozconfig_variant: debug
         fetches:

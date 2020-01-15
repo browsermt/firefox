@@ -7,11 +7,13 @@
 const {
   CanvasFrameAnonymousContentHelper,
   createNode,
-} = require("./utils/markup");
+} = require("devtools/server/actors/highlighters/utils/markup");
 
-const { LocalizationHelper } = require("devtools/shared/l10n");
-const STRINGS_URI = "devtools/client/shared/locales/debugger.properties";
-const L10N = new LocalizationHelper(STRINGS_URI);
+loader.lazyGetter(this, "L10N", () => {
+  const { LocalizationHelper } = require("devtools/shared/l10n");
+  const STRINGS_URI = "devtools/client/locales/debugger.properties";
+  return new LocalizationHelper(STRINGS_URI);
+});
 
 /**
  * The PausedDebuggerOverlay is a class that displays a semi-transparent mask on top of
@@ -22,7 +24,6 @@ const L10N = new LocalizationHelper(STRINGS_URI);
  */
 function PausedDebuggerOverlay(highlighterEnv, options = {}) {
   this.env = highlighterEnv;
-  this.showOverlayStepButtons = options.showOverlayStepButtons;
   this.resume = options.resume;
   this.stepOver = options.stepOver;
 
@@ -78,54 +79,52 @@ PausedDebuggerOverlay.prototype = {
       prefix,
     });
 
-    if (this.showOverlayStepButtons) {
-      createNode(window, {
-        parent: toolbar,
-        attributes: {
-          id: "divider",
-          class: "divider",
-        },
-        prefix,
-      });
+    createNode(window, {
+      parent: toolbar,
+      attributes: {
+        id: "divider",
+        class: "divider",
+      },
+      prefix,
+    });
 
-      const stepWrapper = createNode(window, {
-        parent: toolbar,
-        attributes: {
-          id: "step-button-wrapper",
-          class: "step-button-wrapper",
-        },
-        prefix,
-      });
+    const stepWrapper = createNode(window, {
+      parent: toolbar,
+      attributes: {
+        id: "step-button-wrapper",
+        class: "step-button-wrapper",
+      },
+      prefix,
+    });
 
-      createNode(window, {
-        nodeType: "button",
-        parent: stepWrapper,
-        attributes: {
-          id: "step-button",
-          class: "step-button",
-        },
-        prefix,
-      });
+    createNode(window, {
+      nodeType: "button",
+      parent: stepWrapper,
+      attributes: {
+        id: "step-button",
+        class: "step-button",
+      },
+      prefix,
+    });
 
-      const resumeWrapper = createNode(window, {
-        parent: toolbar,
-        attributes: {
-          id: "resume-button-wrapper",
-          class: "resume-button-wrapper",
-        },
-        prefix,
-      });
+    const resumeWrapper = createNode(window, {
+      parent: toolbar,
+      attributes: {
+        id: "resume-button-wrapper",
+        class: "resume-button-wrapper",
+      },
+      prefix,
+    });
 
-      createNode(window, {
-        nodeType: "button",
-        parent: resumeWrapper,
-        attributes: {
-          id: "resume-button",
-          class: "resume-button",
-        },
-        prefix,
-      });
-    }
+    createNode(window, {
+      nodeType: "button",
+      parent: resumeWrapper,
+      attributes: {
+        id: "resume-button",
+        class: "resume-button",
+      },
+      prefix,
+    });
 
     return container;
   },
@@ -152,7 +151,7 @@ PausedDebuggerOverlay.prototype = {
 
   onMouseMove(target) {
     // Not an element we care about
-    if (!target.id) {
+    if (!target || !target.id) {
       return;
     }
 
@@ -210,6 +209,19 @@ PausedDebuggerOverlay.prototype = {
       return false;
     }
 
+    let reason;
+    try {
+      reason = L10N.getStr(`whyPaused.${options.reason}`);
+    } catch (e) {
+      // This is a temporary workaround to be uplifted to Firefox 71.
+      // This actors relies on a client side properties file. This file will not
+      // be available when debugging Firefox for Android / Gecko View.
+      // The highlighter also shows buttons that use client only images and are
+      // therefore invisible when remote debugging a mobile Firefox.
+      // Should be fixed in Bug 1591025.
+      return false;
+    }
+
     // Only track mouse movement when the the overlay is shown
     // Prevents mouse tracking when the user isn't paused
     const { pageListenerTarget } = this.env;
@@ -222,9 +234,7 @@ PausedDebuggerOverlay.prototype = {
 
     // Set the text to appear in the toolbar.
     const toolbar = this.getElement("toolbar");
-    this.getElement("reason").setTextContent(
-      L10N.getStr(`whyPaused.${options.reason}`)
-    );
+    this.getElement("reason").setTextContent(reason);
     toolbar.removeAttribute("hidden");
 
     this.env.window.document.setSuppressedEventListener(this);

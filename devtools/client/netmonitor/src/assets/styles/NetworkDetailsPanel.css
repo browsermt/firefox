@@ -200,6 +200,13 @@
   padding-inline-start: 4px;
 }
 
+.network-monitor .tabpanel-summary-container .tracking-resource {
+  margin-inline-start: -2px;
+  margin-inline-end: 2px;
+  vertical-align: text-bottom;
+  fill: var(--theme-icon-color);
+}
+
 .network-monitor .tabpanel-summary-labelvalue {
   white-space: pre-wrap;
 }
@@ -207,7 +214,6 @@
 .network-monitor .tabpanel-summary-label {
   display: inline-block;
   padding-inline-end: 3px;
-  font-weight: 600;
 }
 
 .network-monitor .tabpanel-summary-value {
@@ -222,16 +228,7 @@
 .network-monitor .tracking-protection {
   background-color: var(--toolbarbutton-background);
   color: inherit;
-  margin-top: 2px;
-  margin-bottom: 2px;
-}
-
-.theme-dark .network-monitor .tracking-protection .tracking-resource {
-  filter: brightness(500%);
-}
-
-.theme-light .network-monitor .tracking-protection .tracking-resource {
-  filter: brightness(0);
+  margin-block: 2px;
 }
 
 .theme-dark .network-monitor .edit-and-resend-button  {
@@ -267,8 +264,7 @@
 .network-monitor .edit-and-resend-button {
   align-self: flex-end;
   height: 24px;
-  padding-left: 8px;
-  padding-right: 8px;
+  padding-inline: 8px;
   width: auto;
   border: 1px solid var(--theme-splitter-color);
 }
@@ -289,13 +285,12 @@
   display: inline-block;
   align-items: center;
   background: var(--toggle-track-color);
-  width: 2em ;
+  width: 2em;
   vertical-align: bottom;
 }
 
 .network-monitor .properties-view .tree-container .treeTable .treeValueCell .devtools-checkbox-toggle {
-  margin-top: 2px;
-  margin-bottom: 2px;
+  margin-block: 2px;
 }
 
 .network-monitor .properties-view .raw-headers-container .raw-headers {
@@ -333,7 +328,7 @@
 }
 
 .network-monitor .properties-view .raw-headers .tabpanel-summary-label {
-  padding: 0 0 4px 0;
+  padding: 0 0 4px;
 }
 
 .headers-summary .textbox-input {
@@ -341,8 +336,8 @@
 }
 
 .network-monitor .headers-summary .status-text {
-    width: auto!important;
-    margin-inline-start: 4px;
+  width: auto!important;
+  margin-inline-start: 4px;
 }
 
 /* Params and Response error messages */
@@ -417,6 +412,25 @@
   display: flex;
 }
 
+.network-monitor .timings-overview {
+  display: flex;
+  border-bottom: 1px solid var(--theme-splitter-color);
+  padding: 4px;
+}
+
+.network-monitor .timings-overview-item {
+  display: inline-flex;
+}
+
+.network-monitor .timings-overview-item:not(:first-of-type)::before {
+  content: "";
+  display: inline-flex;
+  margin-inline-end: 10px;
+  margin-inline-start: 10px;
+  width: 1px;
+  background: var(--theme-splitter-color);
+}
+
 .network-monitor .timings-label {
   width: 10em;
 }
@@ -436,6 +450,44 @@
   min-width: 1px;
   transition: width 0.2s ease-out;
 }
+
+.network-monitor .label-separator {
+  margin-inline-start: 4px;
+  font-weight: 600;
+  margin-block: 5px;
+  color: var(--theme-comment);
+}
+
+.theme-light .network-monitor .requests-list-timings-box {
+  --timing-server-color-1: rgba(104, 195, 179, 0.8); /* teal */
+  --timing-server-color-2: rgba(123, 102, 167, 0.8); /* purple */
+  --timing-server-color-3: rgba(233, 236, 130, 0.8); /* yellow */
+  --timing-server-color-total: rgba(186, 90, 140, 0.8); /* pink */
+}
+
+.theme-dark .network-monitor .requests-list-timings-box {
+  --timing-server-color-1: rgba(74, 228, 201, 0.8); /* teal */
+  --timing-server-color-2: rgba(156, 119, 233, 0.8); /* purple */
+  --timing-server-color-3: rgba(234, 239, 73, 0.8); /* yellow */
+  --timing-server-color-total: rgba(186, 74, 133, 0.8); /* pink */
+}
+
+.network-monitor .server-timings-color-1 {
+  background: var(--timing-server-color-1);
+}
+
+.network-monitor .server-timings-color-2 {
+  background: var(--timing-server-color-2);
+}
+
+.network-monitor .server-timings-color-3 {
+  background: var(--timing-server-color-3);
+}
+
+.network-monitor .server-timings-color-total {
+  background: var(--timing-server-color-total);
+}
+
 
 /* Stack trace panel */
 
@@ -500,8 +552,6 @@
 
 .network-monitor .custom-request-panel {
   height: 100%;
-  overflow: auto;
-  padding: 0 4px;
   background-color: var(--theme-sidebar-background);
 }
 

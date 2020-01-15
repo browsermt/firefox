@@ -379,7 +379,10 @@ add_task(async function test_client_name_change() {
   let changedIDs = await tracker.getChangedIDs();
   equal(Object.keys(changedIDs).length, 0);
 
-  Svc.Prefs.set("client.name", "new name");
+  Services.prefs.setStringPref(
+    "identity.fxaccounts.account.device.name",
+    "new name"
+  );
   await tracker.asyncObserver.promiseObserversComplete();
 
   _("new name: " + engine.localName);
@@ -980,11 +983,25 @@ add_task(async function test_clients_not_in_fxa_list() {
     notifyDevices() {
       return Promise.resolve(true);
     },
-    getDeviceId() {
-      return fxAccounts.getDeviceId();
+    device: {
+      getLocalId() {
+        return fxAccounts.device.getLocalId();
+      },
+      getLocalName() {
+        return fxAccounts.device.getLocalName();
+      },
+      getLocalType() {
+        return fxAccounts.device.getLocalType();
+      },
+      recentDeviceList: [{ id: remoteId }],
+      refreshDeviceList() {
+        return Promise.resolve(true);
+      },
     },
-    getDeviceList() {
-      return Promise.resolve([{ id: remoteId }]);
+    _internal: {
+      now() {
+        return Date.now();
+      },
     },
   };
 
@@ -1051,11 +1068,25 @@ add_task(async function test_dupe_device_ids() {
     notifyDevices() {
       return Promise.resolve(true);
     },
-    getDeviceId() {
-      return fxAccounts.getDeviceId();
+    device: {
+      getLocalId() {
+        return fxAccounts.device.getLocalId();
+      },
+      getLocalName() {
+        return fxAccounts.device.getLocalName();
+      },
+      getLocalType() {
+        return fxAccounts.device.getLocalType();
+      },
+      recentDeviceList: [{ id: remoteDeviceId }],
+      refreshDeviceList() {
+        return Promise.resolve(true);
+      },
     },
-    getDeviceList() {
-      return Promise.resolve([{ id: remoteDeviceId }]);
+    _internal: {
+      now() {
+        return Date.now();
+      },
     },
   };
 
@@ -1074,6 +1105,64 @@ add_task(async function test_dupe_device_ids() {
     } finally {
       await promiseStopServer(server);
     }
+  }
+});
+
+add_task(async function test_refresh_fxa_device_list() {
+  _("Ensure we refresh the fxa device list when we expect to.");
+
+  await engine._store.wipe();
+  engine._lastFxaDeviceRefresh = 0;
+  await generateNewKeys(Service.collectionKeys);
+
+  let server = await serverForFoo(engine);
+  await SyncTestingInfrastructure(server);
+
+  let numRefreshes = 0;
+  let now = Date.now();
+  let fxAccounts = engine.fxAccounts;
+  engine.fxAccounts = {
+    notifyDevices() {
+      return Promise.resolve(true);
+    },
+    device: {
+      getLocalId() {
+        return fxAccounts.device.getLocalId();
+      },
+      getLocalName() {
+        return fxAccounts.device.getLocalName();
+      },
+      getLocalType() {
+        return fxAccounts.device.getLocalType();
+      },
+      recentDeviceList: [],
+      refreshDeviceList() {
+        numRefreshes += 1;
+        return Promise.resolve(true);
+      },
+    },
+    _internal: {
+      now() {
+        return now;
+      },
+    },
+  };
+
+  try {
+    _("Syncing.");
+    await syncClientsEngine(server);
+    Assert.equal(numRefreshes, 1, "first sync should refresh");
+    now += 1000; // a second later.
+    await syncClientsEngine(server);
+    Assert.equal(numRefreshes, 1, "next sync should not refresh");
+    now += 60 * 60 * 2 * 1000; // 2 hours later
+    await syncClientsEngine(server);
+    Assert.equal(numRefreshes, 2, "2 hours later should refresh");
+    now += 1000; // a second later.
+    Assert.equal(numRefreshes, 2, "next sync should not refresh");
+  } finally {
+    await cleanup();
+    await promiseStopServer(server);
   }
 });
 
@@ -2057,12 +2146,25 @@ add_task(async function test_other_clients_notified_on_first_sync() {
   const fxAccounts = engine.fxAccounts;
   let calls = 0;
   engine.fxAccounts = {
-    getDeviceId() {
-      return fxAccounts.getDeviceId();
+    device: {
+      getLocalId() {
+        return fxAccounts.device.getLocalId();
+      },
+      getLocalName() {
+        return fxAccounts.device.getLocalName();
+      },
+      getLocalType() {
+        return fxAccounts.device.getLocalType();
+      },
     },
     notifyDevices() {
       calls++;
       return Promise.resolve(true);
+    },
+    _internal: {
+      now() {
+        return Date.now();
+      },
     },
   };
 

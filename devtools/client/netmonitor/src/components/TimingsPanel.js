@@ -4,13 +4,23 @@
 
 "use strict";
 
+const {
+  connect,
+} = require("devtools/client/shared/redux/visibility-handler-connect");
 const { Component } = require("devtools/client/shared/vendor/react");
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const dom = require("devtools/client/shared/vendor/react-dom-factories");
-const { L10N } = require("../utils/l10n");
-const { getNetMonitorTimingsURL } = require("../utils/mdn-utils");
-const { fetchNetworkUpdatePacket } = require("../utils/request-utils");
-const { TIMING_KEYS } = require("../constants");
+const { L10N } = require("devtools/client/netmonitor/src/utils/l10n");
+const {
+  getNetMonitorTimingsURL,
+} = require("devtools/client/netmonitor/src/utils/mdn-utils");
+const {
+  fetchNetworkUpdatePacket,
+} = require("devtools/client/netmonitor/src/utils/request-utils");
+const {
+  getFormattedTime,
+} = require("devtools/client/netmonitor/src/utils/format-utils");
+const { TIMING_KEYS } = require("devtools/client/netmonitor/src/constants");
 
 // Components
 const MDNLink = require("devtools/client/shared/components/MdnLink");
@@ -28,6 +38,7 @@ class TimingsPanel extends Component {
     return {
       connector: PropTypes.object.isRequired,
       request: PropTypes.object.isRequired,
+      firstRequestStartedMs: PropTypes.number.isRequired,
     };
   }
 
@@ -41,14 +52,75 @@ class TimingsPanel extends Component {
     fetchNetworkUpdatePacket(connector.requestData, request, ["eventTimings"]);
   }
 
+  renderServerTimings() {
+    const { serverTimings, totalTime } = this.props.request.eventTimings;
+
+    if (!serverTimings.length) {
+      return null;
+    }
+
+    return div(
+      {},
+      div(
+        { className: "label-separator" },
+        L10N.getStr("netmonitor.timings.serverTiming")
+      ),
+      ...serverTimings.map(({ name, duration, description }, index) => {
+        const color = name === "total" ? "total" : (index % 3) + 1;
+
+        return div(
+          {
+            key: index,
+            className: "tabpanel-summary-container timings-container server",
+          },
+          span(
+            { className: "tabpanel-summary-label timings-label" },
+            description || name
+          ),
+          div(
+            { className: "requests-list-timings-container" },
+            span({
+              className: "requests-list-timings-offset",
+              style: {
+                width: `calc(${(totalTime - duration) /
+                  totalTime} * (100% - ${TIMINGS_END_PADDING})`,
+              },
+            }),
+            span({
+              className: `requests-list-timings-box server-timings-color-${color}`,
+              style: {
+                width: `calc(${duration /
+                  totalTime} * (100% - ${TIMINGS_END_PADDING}))`,
+              },
+            }),
+            span(
+              { className: "requests-list-timings-total" },
+              getFormattedTime(duration)
+            )
+          )
+        );
+      })
+    );
+  }
+
   render() {
-    const { eventTimings, totalTime } = this.props.request;
+    const { eventTimings, totalTime, startedMs } = this.props.request;
+    const { firstRequestStartedMs } = this.props;
 
     if (!eventTimings) {
       return null;
     }
 
     const { timings, offsets } = eventTimings;
+    let queuedAt, startedAt, downloadedAt;
+    const isFirstRequestStartedAvailable = firstRequestStartedMs !== null;
+
+    if (isFirstRequestStartedAvailable) {
+      queuedAt = startedMs - firstRequestStartedMs;
+      startedAt = queuedAt + timings.blocked;
+      downloadedAt = queuedAt + totalTime;
+    }
+
     const timelines = TIMING_KEYS.map((type, idx) => {
       // Determine the relative offset for each timings box. For example, the
       // offset of third timings box will be 0 + blocked offset + dns offset
@@ -68,7 +140,7 @@ class TimingsPanel extends Component {
         {
           key: type,
           id: `timings-summary-${type}`,
-          className: "tabpanel-summary-container timings-container",
+          className: "tabpanel-summary-container timings-container request",
         },
         span(
           { className: "tabpanel-summary-label timings-label" },
@@ -90,7 +162,7 @@ class TimingsPanel extends Component {
           }),
           span(
             { className: "requests-list-timings-total" },
-            L10N.getFormatStr("networkMenu.totalMS2", timings[type])
+            getFormattedTime(timings[type])
           )
         )
       );
@@ -98,7 +170,37 @@ class TimingsPanel extends Component {
 
     return div(
       { className: "panel-container" },
+      isFirstRequestStartedAvailable &&
+        div(
+          { className: "timings-overview" },
+          span(
+            { className: "timings-overview-item" },
+            L10N.getFormatStr(
+              "netmonitor.timings.queuedAt",
+              getFormattedTime(queuedAt)
+            )
+          ),
+          span(
+            { className: "timings-overview-item" },
+            L10N.getFormatStr(
+              "netmonitor.timings.startedAt",
+              getFormattedTime(startedAt)
+            )
+          ),
+          span(
+            { className: "timings-overview-item" },
+            L10N.getFormatStr(
+              "netmonitor.timings.downloadedAt",
+              getFormattedTime(downloadedAt)
+            )
+          )
+        ),
+      div(
+        { className: "label-separator" },
+        L10N.getStr("netmonitor.timings.requestTiming")
+      ),
       timelines,
+      this.renderServerTimings(),
       MDNLink({
         url: getNetMonitorTimingsURL(),
         title: L10N.getStr("netmonitor.timings.learnMore"),
@@ -107,4 +209,6 @@ class TimingsPanel extends Component {
   }
 }
 
-module.exports = TimingsPanel;
+module.exports = connect(state => ({
+  firstRequestStartedMs: state.requests ? state.requests.firstStartedMs : null,
+}))(TimingsPanel);

@@ -6,6 +6,7 @@
 
 import LockwiseCard from "./lockwise-card.js";
 import MonitorCard from "./monitor-card.js";
+import ProxyCard from "./proxy-card.js";
 
 // We need to send the close telemetry before unload while we still have a connection to RPM.
 window.addEventListener("beforeunload", () => {
@@ -14,7 +15,7 @@ window.addEventListener("beforeunload", () => {
 
 document.addEventListener("DOMContentLoaded", e => {
   let todayInMs = Date.now();
-  let weekAgoInMs = todayInMs - 7 * 24 * 60 * 60 * 1000;
+  let weekAgoInMs = todayInMs - 6 * 24 * 60 * 60 * 1000;
   RPMSendAsyncMessage("FetchContentBlockingEvents", {
     from: weekAgoInMs,
     to: todayInMs,
@@ -28,6 +29,7 @@ document.addEventListener("DOMContentLoaded", e => {
   ];
 
   let protectionDetails = document.getElementById("protection-details");
+  let manageProtections = document.getElementById("manage-protections");
   let protectionDetailsEvtHandler = evt => {
     if (evt.keyCode == evt.DOM_VK_RETURN || evt.type == "click") {
       RPMSendAsyncMessage("OpenContentBlockingPreferences");
@@ -35,22 +37,24 @@ document.addEventListener("DOMContentLoaded", e => {
   };
   protectionDetails.addEventListener("click", protectionDetailsEvtHandler);
   protectionDetails.addEventListener("keypress", protectionDetailsEvtHandler);
+  manageProtections.addEventListener("click", protectionDetailsEvtHandler);
+  manageProtections.addEventListener("keypress", protectionDetailsEvtHandler);
 
   let cbCategory = RPMGetStringPref("browser.contentblocking.category");
   if (cbCategory == "custom") {
     protectionDetails.setAttribute(
       "data-l10n-id",
-      "protection-header-details-custom"
+      "protection-report-header-details-custom"
     );
   } else if (cbCategory == "strict") {
     protectionDetails.setAttribute(
       "data-l10n-id",
-      "protection-header-details-strict"
+      "protection-report-header-details-strict"
     );
   } else {
     protectionDetails.setAttribute(
       "data-l10n-id",
-      "protection-header-details-standard"
+      "protection-report-header-details-standard"
     );
   }
 
@@ -69,19 +73,21 @@ document.addEventListener("DOMContentLoaded", e => {
   document.sendTelemetryEvent("show", "protection_report");
 
   let createGraph = data => {
-    // All of our dates are recorded as 00:00 GMT, add 12 hours to the timestamp
-    // to ensure we display the correct date no matter the user's location.
-    let hoursInMS12 = 12 * 60 * 60 * 1000;
-    let dateInMS = data.earliestDate
-      ? new Date(data.earliestDate).getTime() + hoursInMS12
-      : Date.now();
-
+    let graph = document.getElementById("graph");
     let summary = document.getElementById("graph-total-summary");
-    summary.setAttribute(
-      "data-l10n-args",
-      JSON.stringify({ count: data.sumEvents, earliestDate: dateInMS })
-    );
-    summary.setAttribute("data-l10n-id", "graph-total-tracker-summary");
+    let weekSummary = document.getElementById("graph-week-summary");
+
+    // User is in private mode, show no data on the graph
+    if (data.isPrivate) {
+      graph.classList.add("private-window");
+    } else {
+      let earliestDate = data.earliestDate || Date.now();
+      summary.setAttribute(
+        "data-l10n-args",
+        JSON.stringify({ count: data.sumEvents, earliestDate })
+      );
+      summary.setAttribute("data-l10n-id", "graph-total-tracker-summary");
+    }
 
     // Set a default top size for the height of the graph bars so that small
     // numbers don't fill the whole graph.
@@ -106,13 +112,10 @@ document.addEventListener("DOMContentLoaded", e => {
     // But we need to caclulate the actual number of the most cells in a row to give accurate information.
     let maxColumnCount = 0;
     let date = new Date();
-    // The graph is already a role "table" from the HTML file.
-    let graph = document.getElementById("graph");
     for (let i = 0; i <= 6; i++) {
       let dateString = date.toISOString().split("T")[0];
       let ariaOwnsString = ""; // Get the row's colummns in order
       let currentColumnCount = 0;
-
       let bar = document.createElement("div");
       bar.className = "graph-bar";
       bar.setAttribute("role", "row");
@@ -125,12 +128,18 @@ document.addEventListener("DOMContentLoaded", e => {
         count.id = "count" + i;
         count.setAttribute("role", "cell");
         count.textContent = content.total;
+        setTimeout(() => {
+          count.classList.add("animate");
+        }, 400);
         bar.appendChild(count);
         ariaOwnsString = count.id;
         currentColumnCount += 1;
         let barHeight = (content.total / largest) * 100;
         weekCount += content.total;
-        bar.style.height = `${barHeight}%`;
+        // Add a short timeout to allow the elements to be added to the dom before triggering an animation.
+        setTimeout(() => {
+          bar.style.height = `${barHeight}%`;
+        }, 20);
         for (let type of dataTypes) {
           if (content[type]) {
             let dataHeight = (content[type] / content.total) * 100;
@@ -165,12 +174,19 @@ document.addEventListener("DOMContentLoaded", e => {
       }
       bar.appendChild(innerBar);
       graph.prepend(bar);
-      let weekSummary = document.getElementById("graph-week-summary");
-      weekSummary.setAttribute(
-        "data-l10n-args",
-        JSON.stringify({ count: weekCount })
-      );
-      weekSummary.setAttribute("data-l10n-id", "graph-week-summary");
+
+      if (data.isPrivate) {
+        weekSummary.setAttribute(
+          "data-l10n-id",
+          "graph-week-summary-private-window"
+        );
+      } else {
+        weekSummary.setAttribute(
+          "data-l10n-args",
+          JSON.stringify({ count: weekCount })
+        );
+        weekSummary.setAttribute("data-l10n-id", "graph-week-summary");
+      }
 
       let label = document.createElement("span");
       label.className = "column-label";
@@ -203,37 +219,101 @@ document.addEventListener("DOMContentLoaded", e => {
       });
     }
 
-    // Hide the trackers tab if the user is in standard and
-    // has no recorded trackers blocked.
-    if (weekTypeCounts.tracker == 0 && cbCategory == "standard") {
-      legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
-        "tracker",
-        ""
-      );
-      let radio = document.getElementById("tab-tracker");
-      radio.setAttribute("disabled", true);
-      document.querySelector("#tab-tracker ~ label").style.display = "none";
-    }
-    let socialEnabled = RPMGetBoolPref(
+    let blockingCookies =
+      RPMGetIntPref("network.cookie.cookieBehavior", 0) != 0;
+    let cryptominingEnabled = RPMGetBoolPref(
+      "privacy.trackingprotection.cryptomining.enabled",
+      false
+    );
+    let fingerprintingEnabled = RPMGetBoolPref(
+      "privacy.trackingprotection.fingerprinting.enabled",
+      false
+    );
+    let tpEnabled = RPMGetBoolPref("privacy.trackingprotection.enabled", false);
+    let socialTracking = RPMGetBoolPref(
+      "privacy.trackingprotection.socialtracking.enabled",
+      false
+    );
+    let socialCookies = RPMGetBoolPref(
       "privacy.socialtracking.block_cookies.enabled",
       false
     );
+    let socialEnabled =
+      socialCookies && (blockingCookies || (tpEnabled && socialTracking));
+    let notBlocking =
+      !blockingCookies &&
+      !cryptominingEnabled &&
+      !fingerprintingEnabled &&
+      !tpEnabled &&
+      !socialEnabled;
 
-    if (weekTypeCounts.social == 0 && !socialEnabled) {
-      legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
-        "social",
-        ""
-      );
-      let radio = document.getElementById("tab-social");
-      radio.setAttribute("disabled", true);
-      document.querySelector("#tab-social ~ label").style.display = "none";
+    // User has turned off all blocking, show a different card.
+    if (notBlocking) {
+      document
+        .getElementById("etp-card-content")
+        .setAttribute(
+          "data-l10n-id",
+          "protection-report-etp-card-content-custom-not-blocking"
+        );
+      document.querySelector(".etp-card").classList.add("custom-not-blocking");
+    } else {
+      // Hide each type of tab if the user has no recorded
+      // trackers of that type blocked and blocking of that type is off.
+      if (weekTypeCounts.tracker == 0 && !tpEnabled) {
+        legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
+          "tracker",
+          ""
+        );
+        let radio = document.getElementById("tab-tracker");
+        radio.setAttribute("disabled", true);
+        document.querySelector("#tab-tracker ~ label").style.display = "none";
+      }
+      if (weekTypeCounts.social == 0 && !socialEnabled) {
+        legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
+          "social",
+          ""
+        );
+        let radio = document.getElementById("tab-social");
+        radio.setAttribute("disabled", true);
+        document.querySelector("#tab-social ~ label").style.display = "none";
+      }
+      if (weekTypeCounts.cookie == 0 && !blockingCookies) {
+        legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
+          "cookie",
+          ""
+        );
+        let radio = document.getElementById("tab-cookie");
+        radio.setAttribute("disabled", true);
+        document.querySelector("#tab-cookie ~ label").style.display = "none";
+      }
+      if (weekTypeCounts.cryptominer == 0 && !cryptominingEnabled) {
+        legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
+          "cryptominer",
+          ""
+        );
+        let radio = document.getElementById("tab-cryptominer");
+        radio.setAttribute("disabled", true);
+        document.querySelector("#tab-cryptominer ~ label").style.display =
+          "none";
+      }
+      if (weekTypeCounts.fingerprinter == 0 && !fingerprintingEnabled) {
+        legend.style.gridTemplateAreas = legend.style.gridTemplateAreas.replace(
+          "fingerprinter",
+          ""
+        );
+        let radio = document.getElementById("tab-fingerprinter");
+        radio.setAttribute("disabled", true);
+        document.querySelector("#tab-fingerprinter ~ label").style.display =
+          "none";
+      }
+
+      let firstRadio = document.querySelector("input:not(:disabled)");
+      // There will be no radio options if we are showing the
+      firstRadio.checked = true;
+      document.body.setAttribute("focuseddatatype", firstRadio.dataset.type);
+
+      addListeners();
     }
-
-    let firstRadio = document.querySelector("input:not(:disabled)");
-    firstRadio.checked = true;
-    document.body.setAttribute("focuseddatatype", firstRadio.dataset.type);
-
-    addListeners();
   };
 
   let addListeners = () => {
@@ -313,6 +393,20 @@ document.addEventListener("DOMContentLoaded", e => {
   // For tests
   const monitorUI = document.querySelector(".monitor-card");
   monitorUI.dataset.enabled = monitorEnabled;
+
+  const proxyEnabled = RPMGetBoolPref(
+    "browser.contentblocking.report.proxy.enabled",
+    true
+  );
+
+  if (proxyEnabled) {
+    const proxyCard = new ProxyCard(document);
+    proxyCard.init();
+  }
+
+  // For tests
+  const proxyUI = document.querySelector(".proxy-card");
+  proxyUI.dataset.enabled = proxyEnabled;
 
   // Dispatch messages to retrieve data for the Lockwise & Monitor
   // cards.

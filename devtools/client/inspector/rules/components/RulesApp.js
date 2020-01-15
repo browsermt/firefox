@@ -16,14 +16,20 @@ const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const { connect } = require("devtools/client/shared/vendor/react-redux");
 
 const Accordion = createFactory(
-  require("devtools/client/inspector/layout/components/Accordion")
+  require("devtools/client/shared/components/Accordion")
 );
-const Rule = createFactory(require("./Rule"));
-const Rules = createFactory(require("./Rules"));
-const Toolbar = createFactory(require("./Toolbar"));
+const Rule = createFactory(
+  require("devtools/client/inspector/rules/components/Rule")
+);
+const Rules = createFactory(
+  require("devtools/client/inspector/rules/components/Rules")
+);
+const Toolbar = createFactory(
+  require("devtools/client/inspector/rules/components/Toolbar")
+);
 
-const { getStr } = require("../utils/l10n");
-const Types = require("../types");
+const { getStr } = require("devtools/client/inspector/rules/utils/l10n");
+const Types = require("devtools/client/inspector/rules/types");
 
 const SHOW_PSEUDO_ELEMENTS_PREF = "devtools.inspector.show_pseudo_elements";
 
@@ -37,6 +43,7 @@ class RulesApp extends PureComponent {
       onToggleClassPanelExpanded: PropTypes.func.isRequired,
       onToggleDeclaration: PropTypes.func.isRequired,
       onTogglePrintSimulation: PropTypes.func.isRequired,
+      onToggleColorSchemeSimulation: PropTypes.func.isRequired,
       onTogglePseudoClass: PropTypes.func.isRequired,
       onToggleSelectorHighlighter: PropTypes.func.isRequired,
       rules: PropTypes.arrayOf(PropTypes.shape(Types.rule)).isRequired,
@@ -113,6 +120,7 @@ class RulesApp extends PureComponent {
             rules: rules.filter(r => r.keyframesRule.id === lastKeyframes),
           },
           header: rule.keyframesRule.keyframesName,
+          id: "rules-section-keyframes",
           opened: true,
         },
       ];
@@ -147,10 +155,10 @@ class RulesApp extends PureComponent {
           rules,
         },
         header: getStr("rule.pseudoElement"),
+        id: "rules-section-pseudoelement",
         opened: Services.prefs.getBoolPref(SHOW_PSEUDO_ELEMENTS_PREF),
-        onToggled: () => {
-          const opened = Services.prefs.getBoolPref(SHOW_PSEUDO_ELEMENTS_PREF);
-          Services.prefs.setBoolPref(SHOW_PSEUDO_ELEMENTS_PREF, !opened);
+        onToggle: opened => {
+          Services.prefs.setBoolPref(SHOW_PSEUDO_ELEMENTS_PREF, opened);
         },
       },
     ];
@@ -193,6 +201,7 @@ class RulesApp extends PureComponent {
         onSetClassState: this.props.onSetClassState,
         onToggleClassPanelExpanded: this.props.onToggleClassPanelExpanded,
         onTogglePrintSimulation: this.props.onTogglePrintSimulation,
+        onToggleColorSchemeSimulation: this.props.onToggleColorSchemeSimulation,
         onTogglePseudoClass: this.props.onTogglePseudoClass,
       }),
       dom.div(

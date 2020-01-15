@@ -220,9 +220,8 @@ void ParseContext::Scope::removeCatchParameters(ParseContext* pc,
 
 ParseContext::ParseContext(JSContext* cx, ParseContext*& parent,
                            SharedContext* sc, ErrorReporter& errorReporter,
-                           class UsedNameTracker& usedNames,
-                           FunctionTreeHolder& treeHolder,
-                           Directives* newDirectives, bool isFull)
+                           ParseInfo& parseInfo, Directives* newDirectives,
+                           bool isFull)
     : Nestable<ParseContext>(&parent),
       traceLog_(sc->cx_,
                 isFull ? TraceLogger_ParsingFull : TraceLogger_ParsingSyntax,
@@ -238,7 +237,7 @@ ParseContext::ParseContext(JSContext* cx, ParseContext*& parent,
       newDirectives(newDirectives),
       lastYieldOffset(NoYieldOffset),
       lastAwaitOffset(NoAwaitOffset),
-      scriptId_(usedNames.nextScriptId()),
+      scriptId_(parseInfo.usedNames.nextScriptId()),
       isStandaloneFunctionBody_(false),
       superScopeNeedsHomeObject_(false) {
   if (isFunctionBox()) {
@@ -246,18 +245,15 @@ ParseContext::ParseContext(JSContext* cx, ParseContext*& parent,
     // FunctionBoxes that get added to the tree in an AsmJS compilation
     // don't have a long enough lifespan, as AsmJS marks the lifo allocator
     // inside the ModuleValidator, and frees it again when that dies.
-    //
-    // We do this here, rather than in init below to avoid having to pass
-    // the TreeHolder to all the init calls.
-    if (treeHolder.isDeferred() &&
+    if (parseInfo.isDeferred() &&
         !this->functionBox()->useAsmOrInsideUseAsm()) {
-      tree.emplace(treeHolder);
+      tree.emplace(parseInfo.treeHolder);
     }
 
     if (functionBox()->isNamedLambda()) {
-      namedLambdaScope_.emplace(cx, parent, usedNames);
+      namedLambdaScope_.emplace(cx, parent, parseInfo.usedNames);
     }
-    functionScope_.emplace(cx, parent, usedNames);
+    functionScope_.emplace(cx, parent, parseInfo.usedNames);
   }
 }
 
@@ -520,11 +516,10 @@ bool ParseContext::declareFunctionThis(const UsedNameTracker& usedNames,
 
   bool declareThis;
   if (canSkipLazyClosedOverBindings) {
-    declareThis = funbox->function()->lazyScript()->hasThisBinding();
+    declareThis = funbox->function()->baseScript()->functionHasThisBinding();
   } else {
-    declareThis =
-        hasUsedFunctionSpecialName(usedNames, dotThis) ||
-        funbox->kind() == FunctionFlags::FunctionKind::ClassConstructor;
+    declareThis = hasUsedFunctionSpecialName(usedNames, dotThis) ||
+                  funbox->isClassConstructor();
   }
 
   if (declareThis) {
@@ -555,7 +550,7 @@ bool ParseContext::declareFunctionArgumentsObject(
   bool tryDeclareArguments;
   if (canSkipLazyClosedOverBindings) {
     tryDeclareArguments =
-        funbox->function()->lazyScript()->shouldDeclareArguments();
+        funbox->function()->baseScript()->shouldDeclareArguments();
   } else {
     tryDeclareArguments = hasUsedFunctionSpecialName(usedNames, argumentsName);
   }

@@ -25,6 +25,7 @@
 
 #include "wasm/cranelift/baldrapi.h"
 #include "wasm/cranelift/clifapi.h"
+#include "wasm/WasmFrameIter.h"  // js::wasm::GenerateFunction{Pro,Epi}logue
 #include "wasm/WasmGenerator.h"
 
 #include "jit/MacroAssembler-inl.h"
@@ -47,6 +48,34 @@ static inline SymbolicAddress ToSymbolicAddress(BD_SymbolicAddress bd) {
       return SymbolicAddress::MemoryGrow;
     case BD_SymbolicAddress::MemorySize:
       return SymbolicAddress::MemorySize;
+    case BD_SymbolicAddress::MemoryCopy:
+      return SymbolicAddress::MemCopy;
+    case BD_SymbolicAddress::MemoryCopyShared:
+      return SymbolicAddress::MemCopyShared;
+    case BD_SymbolicAddress::DataDrop:
+      return SymbolicAddress::DataDrop;
+    case BD_SymbolicAddress::MemoryFill:
+      return SymbolicAddress::MemFill;
+    case BD_SymbolicAddress::MemoryFillShared:
+      return SymbolicAddress::MemFillShared;
+    case BD_SymbolicAddress::MemoryInit:
+      return SymbolicAddress::MemInit;
+    case BD_SymbolicAddress::TableCopy:
+      return SymbolicAddress::TableCopy;
+    case BD_SymbolicAddress::ElemDrop:
+      return SymbolicAddress::ElemDrop;
+    case BD_SymbolicAddress::TableFill:
+      return SymbolicAddress::TableFill;
+    case BD_SymbolicAddress::TableGet:
+      return SymbolicAddress::TableGet;
+    case BD_SymbolicAddress::TableGrow:
+      return SymbolicAddress::TableGrow;
+    case BD_SymbolicAddress::TableInit:
+      return SymbolicAddress::TableInit;
+    case BD_SymbolicAddress::TableSet:
+      return SymbolicAddress::TableSet;
+    case BD_SymbolicAddress::TableSize:
+      return SymbolicAddress::TableSize;
     case BD_SymbolicAddress::FloorF32:
       return SymbolicAddress::FloorF;
     case BD_SymbolicAddress::FloorF64:
@@ -95,13 +124,6 @@ static bool GenerateCraneliftCode(WasmMacroAssembler& masm,
 #if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
   uint32_t codeEnd = masm.currentOffset();
 #endif
-
-  // Cranelift isn't aware of pinned registers in general, so we need to reload
-  // both TLS and pinned regs from the stack.
-  // TODO(bug 1507820): We should teach Cranelift to reload this register
-  // itself, so we don't have to do it manually.
-  masm.loadWasmTlsRegFromFrame();
-  masm.loadWasmPinnedRegsFromTls();
 
   wasm::GenerateFunctionEpilogue(masm, func.framePushed, offsets);
 
@@ -293,6 +315,7 @@ CraneliftStaticEnvironment::CraneliftStaticEnvironment()
 #endif
       staticMemoryBound(0),
       memoryGuardSize(0),
+      memoryBaseTlsOffset(offsetof(TlsData, memoryBase)),
       instanceTlsOffset(offsetof(TlsData, instance)),
       interruptTlsOffset(offsetof(TlsData, interrupt)),
       cxTlsOffset(offsetof(TlsData, cx)),
@@ -319,6 +342,10 @@ CraneliftModuleEnvironment::CraneliftModuleEnvironment(
 
 TypeCode env_unpack(BD_ValType valType) {
   return TypeCode(UnpackTypeCodeType(PackedTypeCode(valType.packed)));
+}
+
+bool env_uses_shared_memory(const CraneliftModuleEnvironment* wrapper) {
+  return wrapper->env->usesSharedMemory();
 }
 
 const FuncTypeWithId* env_function_signature(
@@ -433,7 +460,7 @@ bool wasm::CraneliftCompileFunctions(const ModuleEnvironment& env,
     uint32_t totalCodeSize = masm.currentOffset();
     uint8_t* codeBuf = (uint8_t*)js_malloc(totalCodeSize);
     if (codeBuf) {
-      masm.executableCopy(codeBuf, totalCodeSize);
+      masm.executableCopy(codeBuf);
 
       const CodeRangeVector& codeRanges = code->codeRanges;
       MOZ_ASSERT(codeRanges.length() >= inputs.length());
@@ -494,7 +521,7 @@ bool global_isIndirect(const GlobalDesc* global) {
 BD_ConstantValue global_constantValue(const GlobalDesc* global) {
   Val value(global->constantValue());
   BD_ConstantValue v;
-  v.t = TypeCode(value.type().code());
+  v.t = TypeCode(value.type().kind());
   switch (v.t) {
     case TypeCode::I32:
       v.u.i32 = value.i32();
@@ -515,7 +542,7 @@ BD_ConstantValue global_constantValue(const GlobalDesc* global) {
 }
 
 TypeCode global_type(const GlobalDesc* global) {
-  return TypeCode(global->type().code());
+  return UnpackTypeCodeType(global->type().packed());
 }
 
 size_t global_tlsOffset(const GlobalDesc* global) {
@@ -542,8 +569,13 @@ const BD_ValType* funcType_args(const FuncTypeWithId* funcType) {
   return (const BD_ValType*)&funcType->args()[0];
 }
 
-TypeCode funcType_retType(const FuncTypeWithId* funcType) {
-  return TypeCode(funcType->ret().code());
+size_t funcType_numResults(const FuncTypeWithId* funcType) {
+  return funcType->results().length();
+}
+
+const BD_ValType* funcType_results(const FuncTypeWithId* funcType) {
+  static_assert(sizeof(BD_ValType) == sizeof(ValType), "update BD_ValType");
+  return (const BD_ValType*)&funcType->results()[0];
 }
 
 FuncTypeIdDescKind funcType_idKind(const FuncTypeWithId* funcType) {

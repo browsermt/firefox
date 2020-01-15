@@ -16,26 +16,22 @@
 #include <prthread.h>
 #include "AndroidBridge.h"
 #include "AndroidBridgeUtilities.h"
+#include "AndroidRect.h"
 #include "nsAlertsUtils.h"
 #include "nsAppShell.h"
 #include "nsOSHelperAppService.h"
 #include "nsWindow.h"
 #include "mozilla/Preferences.h"
 #include "nsThreadUtils.h"
-#include "nsIThreadManager.h"
 #include "gfxPlatform.h"
 #include "gfxContext.h"
 #include "mozilla/gfx/2D.h"
 #include "gfxUtils.h"
 #include "nsPresContext.h"
-#include "nsIDocShell.h"
 #include "nsPIDOMWindow.h"
-#include "nsIDOMWindowUtils.h"
 #include "mozilla/ClearOnShutdown.h"
 #include "nsPrintfCString.h"
 #include "nsContentUtils.h"
-#include "nsIScriptError.h"
-#include "nsIHttpChannel.h"
 
 #include "EventDispatcher.h"
 #include "MediaCodec.h"
@@ -45,10 +41,9 @@
 #include "mozilla/TimeStamp.h"
 #include "mozilla/UniquePtr.h"
 #include "nsIObserverService.h"
-#include "nsISupportsPrimitives.h"
 #include "WidgetUtils.h"
 
-#include "FennecJNIWrappers.h"
+#include "GeneratedJNIWrappers.h"
 
 using namespace mozilla;
 using namespace mozilla::gfx;
@@ -235,20 +230,26 @@ bool AndroidBridge::GetHandlersForMimeType(const nsAString& aMimeType,
   return true;
 }
 
-bool AndroidBridge::GetHWEncoderCapability() {
-  ALOG_BRIDGE("AndroidBridge::GetHWEncoderCapability");
+bool AndroidBridge::HasHWVP8Encoder() {
+  ALOG_BRIDGE("AndroidBridge::HasHWVP8Encoder");
 
-  bool value = GeckoAppShell::GetHWEncoderCapability();
+  bool value = GeckoAppShell::HasHWVP8Encoder();
 
   return value;
 }
 
-bool AndroidBridge::GetHWDecoderCapability() {
-  ALOG_BRIDGE("AndroidBridge::GetHWDecoderCapability");
+bool AndroidBridge::HasHWVP8Decoder() {
+  ALOG_BRIDGE("AndroidBridge::HasHWVP8Decoder");
 
-  bool value = GeckoAppShell::GetHWDecoderCapability();
+  bool value = GeckoAppShell::HasHWVP8Decoder();
 
   return value;
+}
+
+bool AndroidBridge::HasHWH264() {
+  ALOG_BRIDGE("AndroidBridge::HasHWH264");
+
+  return HardwareCodecCapabilityUtils::HasHWH264();
 }
 
 bool AndroidBridge::GetHandlersForURL(const nsAString& aURL,
@@ -290,6 +291,16 @@ void AndroidBridge::GetExtensionFromMimeType(const nsACString& aMimeType,
   if (jstrExt) {
     aFileExt = jstrExt->ToCString();
   }
+}
+
+gfx::Rect AndroidBridge::getScreenSize() {
+  ALOG_BRIDGE("AndroidBridge::getScreenSize");
+
+  java::sdk::Rect::LocalRef screenrect = GeckoAppShell::GetScreenSize();
+  gfx::Rect screensize(screenrect->Left(), screenrect->Top(),
+                       screenrect->Width(), screenrect->Height());
+
+  return screensize;
 }
 
 int AndroidBridge::GetScreenDepth() {
@@ -356,35 +367,6 @@ void AndroidBridge::Vibrate(const nsTArray<uint32_t>& aPattern) {
 
   GeckoAppShell::Vibrate(jni::LongArray::Ref::From(array),
                          -1 /* don't repeat */);
-}
-
-void AndroidBridge::GetSystemColors(AndroidSystemColors* aColors) {
-  NS_ASSERTION(aColors != nullptr,
-               "AndroidBridge::GetSystemColors: aColors is null!");
-  if (!aColors) return;
-
-  auto arr = GeckoAppShell::GetSystemColors();
-  if (!arr) return;
-
-  JNIEnv* const env = arr.Env();
-  uint32_t len = static_cast<uint32_t>(env->GetArrayLength(arr.Get()));
-  jint* elements = env->GetIntArrayElements(arr.Get(), 0);
-
-  uint32_t colorsCount = sizeof(AndroidSystemColors) / sizeof(nscolor);
-  if (len < colorsCount) colorsCount = len;
-
-  // Convert Android colors to nscolor by switching R and B in the ARGB 32 bit
-  // value
-  nscolor* colors = (nscolor*)aColors;
-
-  for (uint32_t i = 0; i < colorsCount; i++) {
-    uint32_t androidColor = static_cast<uint32_t>(elements[i]);
-    uint8_t r = (androidColor & 0x00ff0000) >> 16;
-    uint8_t b = (androidColor & 0x000000ff);
-    colors[i] = (androidColor & 0xff00ff00) | (b << 16) | r;
-  }
-
-  env->ReleaseIntArrayElements(arr.Get(), elements, 0);
 }
 
 void AndroidBridge::GetIconForExtension(const nsACString& aFileExt,
@@ -620,36 +602,14 @@ nsAndroidBridge::Observe(nsISupports* aSubject, const char* aTopic,
                          const char16_t* aData) {
   if (!strcmp(aTopic, "xpcom-shutdown")) {
     RemoveObservers();
-  } else if (!strcmp(aTopic, "audio-playback")) {
-    ALOG_BRIDGE("nsAndroidBridge::Observe, get audio-playback event.");
-
-    nsAutoString activeStr(aData);
-    bool isPlaying = activeStr.EqualsLiteral("active");
-    UpdateAudioPlayingWindows(isPlaying);
   }
   return NS_OK;
-}
-
-void nsAndroidBridge::UpdateAudioPlayingWindows(bool aPlaying) {
-  // Request audio focus for the first audio playing window and abandon focus
-  // for the last audio playing window.
-  MOZ_ASSERT(mAudibleWindowsNum >= 0);
-  if (aPlaying && mAudibleWindowsNum++ == 0) {
-    ALOG_BRIDGE("nsAndroidBridge, request audio focus.");
-    AudioFocusAgent::NotifyStartedPlaying();
-  } else if (!aPlaying && --mAudibleWindowsNum == 0) {
-    ALOG_BRIDGE("nsAndroidBridge, abandon audio focus.");
-    AudioFocusAgent::NotifyStoppedPlaying();
-  }
 }
 
 void nsAndroidBridge::AddObservers() {
   nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
   if (obs) {
     obs->AddObserver(this, "xpcom-shutdown", false);
-    if (jni::IsFennec()) {  // No AudioFocusAgent in non-Fennec environment.
-      obs->AddObserver(this, "audio-playback", false);
-    }
   }
 }
 
@@ -657,9 +617,6 @@ void nsAndroidBridge::RemoveObservers() {
   nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
   if (obs) {
     obs->RemoveObserver(this, "xpcom-shutdown");
-    if (jni::IsFennec()) {  // No AudioFocusAgent in non-Fennec environment.
-      obs->RemoveObserver(this, "audio-playback");
-    }
   }
 }
 
@@ -717,7 +674,7 @@ bool AndroidBridge::PumpMessageLoop() {
 }
 
 NS_IMETHODIMP nsAndroidBridge::GetIsFennec(bool* aIsFennec) {
-  *aIsFennec = jni::IsFennec();
+  *aIsFennec = false;
   return NS_OK;
 }
 

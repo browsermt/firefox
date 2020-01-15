@@ -10,7 +10,13 @@ const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const Message = createFactory(
   require("devtools/client/webconsole/components/Output/Message")
 );
-const { MODE, REPS } = require("devtools/client/shared/components/reps/reps");
+
+loader.lazyGetter(this, "REPS", function() {
+  return require("devtools/client/shared/components/reps/reps").REPS;
+});
+loader.lazyGetter(this, "MODE", function() {
+  return require("devtools/client/shared/components/reps/reps").MODE;
+});
 
 PageError.displayName = "PageError";
 
@@ -38,6 +44,7 @@ function PageError(props) {
     isPaused,
     maybeScrollToBottom,
     inWarningGroup,
+    pausedExecutionPoint,
   } = props;
   const {
     id: messageId,
@@ -86,6 +93,7 @@ function PageError(props) {
     timestampsVisible,
     maybeScrollToBottom,
     message,
+    pausedExecutionPoint,
   });
 }
 

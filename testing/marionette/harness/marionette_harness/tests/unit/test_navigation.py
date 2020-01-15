@@ -13,8 +13,8 @@ from marionette_driver.keys import Keys
 from marionette_driver.marionette import Alert
 from marionette_harness import (
     MarionetteTestCase,
-    run_if_e10s,
     run_if_manage_instance,
+    skip,
     WindowManagerMixin,
 )
 
@@ -181,7 +181,6 @@ class TestNavigate(BaseNavigationTestCase):
             self.marionette.navigate(self.marionette.absolute_url("slow"))
         self.assertEqual(self.is_remote_tab, is_remote_before_timeout)
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_navigate_timeout_error_remoteness_change(self):
         self.assertTrue(self.is_remote_tab)
         self.marionette.navigate("about:robots")
@@ -262,7 +261,6 @@ class TestNavigate(BaseNavigationTestCase):
         self.marionette.find_element(By.ID, "file-url")
         self.marionette.navigate(self.test_page_remote)
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_navigate_file_url_remoteness_change(self):
         self.marionette.navigate("about:robots")
         self.assertFalse(self.is_remote_tab)
@@ -310,7 +308,6 @@ class TestNavigate(BaseNavigationTestCase):
             message="'about:support' hasn't been loaded")
         self.assertFalse(self.is_remote_tab)
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_type_to_remote_tab(self):
         self.assertTrue(self.is_remote_tab)
 
@@ -409,6 +406,7 @@ class TestBackForwardNavigation(BaseNavigationTestCase):
 
         self.run_bfcache_test(test_pages)
 
+    @skip("Bug 1484927: Maybe causes crash in [@ mozilla::ShutdownXPCOM(nsIServiceManager*)]")
     def test_data_urls(self):
         test_pages = [
             {"url": inline("<p>foobar</p>")},
@@ -505,7 +503,6 @@ class TestBackForwardNavigation(BaseNavigationTestCase):
         ]
         self.run_bfcache_test(test_pages)
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_remoteness_change(self):
         test_pages = [
             {"url": "about:robots", "is_remote": False},
@@ -785,7 +782,6 @@ class TestPageLoadStrategy(BaseNavigationTestCase):
         self.assertEqual("complete", self.ready_state)
         self.marionette.find_element(By.ID, "slow")
 
-    @run_if_e10s("Requires e10s mode enabled")
     def test_strategy_after_remoteness_change(self):
         """Bug 1378191 - Reset of capabilities after listener reload."""
         self.marionette.delete_session()

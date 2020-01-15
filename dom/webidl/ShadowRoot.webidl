@@ -17,6 +17,7 @@ enum ShadowRootMode {
 };
 
 // https://dom.spec.whatwg.org/#shadowroot
+[Exposed=Window]
 interface ShadowRoot : DocumentFragment
 {
   // Shadow DOM v1
@@ -25,6 +26,7 @@ interface ShadowRoot : DocumentFragment
 
   Element? getElementById(DOMString elementId);
 
+  // https://w3c.github.io/DOM-Parsing/#the-innerhtml-mixin
   [CEReactions, SetterThrows]
   attribute [TreatNullAs=EmptyString] DOMString innerHTML;
 
@@ -48,4 +50,4 @@ interface ShadowRoot : DocumentFragment
   boolean isUAWidget();
 };
 
-ShadowRoot implements DocumentOrShadowRoot;
+ShadowRoot includes DocumentOrShadowRoot;

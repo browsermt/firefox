@@ -7,18 +7,18 @@
 #include "nsDOMNavigationTiming.h"
 
 #include "GeckoProfiler.h"
+#include "mozilla/Telemetry.h"
+#include "mozilla/TimeStamp.h"
+#include "mozilla/dom/PerformanceNavigation.h"
+#include "mozilla/ipc/IPDLParamTraits.h"
 #include "nsCOMPtr.h"
 #include "nsContentUtils.h"
 #include "nsDocShell.h"
 #include "nsHttp.h"
-#include "nsIDocShellTreeItem.h"
 #include "nsIScriptSecurityManager.h"
-#include "prtime.h"
 #include "nsIURI.h"
 #include "nsPrintfCString.h"
-#include "mozilla/dom/PerformanceNavigation.h"
-#include "mozilla/TimeStamp.h"
-#include "mozilla/Telemetry.h"
+#include "prtime.h"
 #ifdef MOZ_GECKO_PROFILER
 #  include "ProfilerMarkerPayload.h"
 #endif
@@ -59,6 +59,14 @@ void nsDOMNavigationTiming::Clear() {
   mNonBlankPaint = TimeStamp();
 
   mDocShellHasBeenActiveSinceNavigationStart = false;
+}
+
+void nsDOMNavigationTiming::Anonymize(nsIURI* aFinalURI) {
+  mLoadedURI = aFinalURI;
+  mUnloadedURI = nullptr;
+  mBeforeUnloadStart = TimeStamp();
+  mUnloadStart = TimeStamp();
+  mUnloadEnd = TimeStamp();
 }
 
 DOMTimeMilliSec nsDOMNavigationTiming::TimeStampToDOM(TimeStamp aStamp) const {
@@ -153,7 +161,7 @@ void nsDOMNavigationTiming::NotifyLoadEventEnd() {
 
   if (IsTopLevelContentDocumentInContentProcess()) {
 #ifdef MOZ_GECKO_PROFILER
-    if (profiler_is_active() || PAGELOAD_LOG_ENABLED()) {
+    if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
       TimeDuration elapsed = mLoadEventEnd - mNavigationStart;
       TimeDuration duration = mLoadEventEnd - mLoadEventStart;
       nsAutoCString spec;
@@ -163,11 +171,11 @@ void nsDOMNavigationTiming::NotifyLoadEventEnd() {
       nsPrintfCString marker(
           "Document %s loaded after %dms, load event duration %dms", spec.get(),
           int(elapsed.ToMilliseconds()), int(duration.ToMilliseconds()));
-      DECLARE_DOCSHELL_AND_HISTORY_ID(mDocShell);
       PAGELOAD_LOG(("%s", marker.get()));
-      PROFILER_ADD_MARKER_WITH_PAYLOAD("DocumentLoad", DOM, TextMarkerPayload,
-                                       (marker, mNavigationStart, mLoadEventEnd,
-                                        docShellId, docShellHistoryId));
+      PROFILER_ADD_MARKER_WITH_PAYLOAD(
+          "DocumentLoad", DOM, TextMarkerPayload,
+          (marker, mNavigationStart, mLoadEventEnd,
+           profiler_get_inner_window_id_from_docshell(mDocShell)));
     }
 #endif
     Telemetry::AccumulateTimeDelta(Telemetry::TIME_TO_LOAD_EVENT_END_MS,
@@ -345,7 +353,7 @@ void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
   mTTITimer = nullptr;
 
 #ifdef MOZ_GECKO_PROFILER
-  if (profiler_is_active() || PAGELOAD_LOG_ENABLED()) {
+  if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
     TimeDuration elapsed = mTTFI - mNavigationStart;
     MOZ_ASSERT(elapsed.ToMilliseconds() > 0);
     TimeDuration elapsedLongTask =
@@ -358,13 +366,12 @@ void nsDOMNavigationTiming::TTITimeout(nsITimer* aTimer) {
                            int(elapsed.ToMilliseconds()),
                            int(elapsedLongTask.ToMilliseconds()), spec.get());
 
-    DECLARE_DOCSHELL_AND_HISTORY_ID(mDocShell);
     PROFILER_ADD_MARKER_WITH_PAYLOAD(
         "TTFI", DOM, TextMarkerPayload,
-        (marker, mNavigationStart, mTTFI, docShellId, docShellHistoryId));
+        (marker, mNavigationStart, mTTFI,
+         profiler_get_inner_window_id_from_docshell(mDocShell)));
   }
 #endif
-  return;
 }
 
 void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
@@ -392,11 +399,10 @@ void nsDOMNavigationTiming::NotifyNonBlankPaintForRootContentDocument() {
             : "this tab was inactive some of the time between navigation start "
               "and first non-blank paint");
     PAGELOAD_LOG(("%s", marker.get()));
-    DECLARE_DOCSHELL_AND_HISTORY_ID(mDocShell);
-    PROFILER_ADD_MARKER_WITH_PAYLOAD("FirstNonBlankPaint", DOM,
-                                     TextMarkerPayload,
-                                     (marker, mNavigationStart, mNonBlankPaint,
-                                      docShellId, docShellHistoryId));
+    PROFILER_ADD_MARKER_WITH_PAYLOAD(
+        "FirstNonBlankPaint", DOM, TextMarkerPayload,
+        (marker, mNavigationStart, mNonBlankPaint,
+         profiler_get_inner_window_id_from_docshell(mDocShell)));
   }
 #endif
 
@@ -428,7 +434,7 @@ void nsDOMNavigationTiming::NotifyContentfulPaintForRootContentDocument(
   mContentfulPaint = aCompositeEndTime;
 
 #ifdef MOZ_GECKO_PROFILER
-  if (profiler_is_active() || PAGELOAD_LOG_ENABLED()) {
+  if (profiler_can_accept_markers() || PAGELOAD_LOG_ENABLED()) {
     TimeDuration elapsed = mContentfulPaint - mNavigationStart;
     nsAutoCString spec;
     if (mLoadedURI) {
@@ -441,12 +447,11 @@ void nsDOMNavigationTiming::NotifyContentfulPaintForRootContentDocument(
             ? "foreground tab"
             : "this tab was inactive some of the time between navigation start "
               "and first non-blank paint");
-    DECLARE_DOCSHELL_AND_HISTORY_ID(mDocShell);
     PAGELOAD_LOG(("%s", marker.get()));
     PROFILER_ADD_MARKER_WITH_PAYLOAD(
         "FirstContentfulPaint", DOM, TextMarkerPayload,
-        (marker, mNavigationStart, mContentfulPaint, docShellId,
-         docShellHistoryId));
+        (marker, mNavigationStart, mContentfulPaint,
+         profiler_get_inner_window_id_from_docshell(mDocShell)));
   }
 #endif
 
@@ -491,12 +496,11 @@ void nsDOMNavigationTiming::NotifyDOMContentFlushedForRootContentDocument() {
             ? "foreground tab"
             : "this tab was inactive some of the time between navigation start "
               "and DOMContentFlushed");
-    DECLARE_DOCSHELL_AND_HISTORY_ID(mDocShell);
     PAGELOAD_LOG(("%s", marker.get()));
     PROFILER_ADD_MARKER_WITH_PAYLOAD(
         "DOMContentFlushed", DOM, TextMarkerPayload,
-        (marker, mNavigationStart, mDOMContentFlushed, docShellId,
-         docShellHistoryId));
+        (marker, mNavigationStart, mDOMContentFlushed,
+         profiler_get_inner_window_id_from_docshell(mDocShell)));
   }
 #endif
 }
@@ -536,11 +540,101 @@ bool nsDOMNavigationTiming::IsTopLevelContentDocumentInContentProcess() const {
   if (!XRE_IsContentProcess()) {
     return false;
   }
-  nsCOMPtr<nsIDocShellTreeItem> rootItem;
-  Unused << mDocShell->GetInProcessSameTypeRootTreeItem(
-      getter_AddRefs(rootItem));
-  if (rootItem.get() != static_cast<nsIDocShellTreeItem*>(mDocShell.get())) {
+  return mDocShell->GetBrowsingContext()->IsTopContent();
+}
+
+nsDOMNavigationTiming::nsDOMNavigationTiming(nsDocShell* aDocShell,
+                                             nsDOMNavigationTiming* aOther)
+    : mDocShell(aDocShell),
+      mUnloadedURI(aOther->mUnloadedURI),
+      mLoadedURI(aOther->mLoadedURI),
+      mNavigationType(aOther->mNavigationType),
+      mNavigationStartHighRes(aOther->mNavigationStartHighRes),
+      mNavigationStart(aOther->mNavigationStart),
+      mNonBlankPaint(aOther->mNonBlankPaint),
+      mContentfulPaint(aOther->mContentfulPaint),
+      mDOMContentFlushed(aOther->mDOMContentFlushed),
+      mBeforeUnloadStart(aOther->mBeforeUnloadStart),
+      mUnloadStart(aOther->mUnloadStart),
+      mUnloadEnd(aOther->mUnloadEnd),
+      mLoadEventStart(aOther->mLoadEventStart),
+      mLoadEventEnd(aOther->mLoadEventEnd),
+      mDOMLoading(aOther->mDOMLoading),
+      mDOMInteractive(aOther->mDOMInteractive),
+      mDOMContentLoadedEventStart(aOther->mDOMContentLoadedEventStart),
+      mDOMContentLoadedEventEnd(aOther->mDOMContentLoadedEventEnd),
+      mDOMComplete(aOther->mDOMComplete),
+      mTTFI(aOther->mTTFI),
+      mDocShellHasBeenActiveSinceNavigationStart(
+          aOther->mDocShellHasBeenActiveSinceNavigationStart) {}
+
+/* static */
+void mozilla::ipc::IPDLParamTraits<nsDOMNavigationTiming*>::Write(
+    IPC::Message* aMsg, IProtocol* aActor, nsDOMNavigationTiming* aParam) {
+  RefPtr<nsIURI> unloadedURI = aParam->mUnloadedURI.get();
+  RefPtr<nsIURI> loadedURI = aParam->mLoadedURI.get();
+  WriteIPDLParam(aMsg, aActor, unloadedURI ? Some(unloadedURI) : Nothing());
+  WriteIPDLParam(aMsg, aActor, loadedURI ? Some(loadedURI) : Nothing());
+  WriteIPDLParam(aMsg, aActor, uint32_t(aParam->mNavigationType));
+  WriteIPDLParam(aMsg, aActor, aParam->mNavigationStartHighRes);
+  WriteIPDLParam(aMsg, aActor, aParam->mNavigationStart);
+  WriteIPDLParam(aMsg, aActor, aParam->mNonBlankPaint);
+  WriteIPDLParam(aMsg, aActor, aParam->mContentfulPaint);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMContentFlushed);
+  WriteIPDLParam(aMsg, aActor, aParam->mBeforeUnloadStart);
+  WriteIPDLParam(aMsg, aActor, aParam->mUnloadStart);
+  WriteIPDLParam(aMsg, aActor, aParam->mUnloadEnd);
+  WriteIPDLParam(aMsg, aActor, aParam->mLoadEventStart);
+  WriteIPDLParam(aMsg, aActor, aParam->mLoadEventEnd);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMLoading);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMInteractive);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMContentLoadedEventStart);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMContentLoadedEventEnd);
+  WriteIPDLParam(aMsg, aActor, aParam->mDOMComplete);
+  WriteIPDLParam(aMsg, aActor, aParam->mTTFI);
+  WriteIPDLParam(aMsg, aActor,
+                 aParam->mDocShellHasBeenActiveSinceNavigationStart);
+}
+
+/* static */
+bool mozilla::ipc::IPDLParamTraits<nsDOMNavigationTiming*>::Read(
+    const IPC::Message* aMsg, PickleIterator* aIter, IProtocol* aActor,
+    RefPtr<nsDOMNavigationTiming>* aResult) {
+  auto timing = MakeRefPtr<nsDOMNavigationTiming>(nullptr);
+  uint32_t type;
+  Maybe<RefPtr<nsIURI>> unloadedURI;
+  Maybe<RefPtr<nsIURI>> loadedURI;
+  if (!ReadIPDLParam(aMsg, aIter, aActor, &unloadedURI) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &loadedURI) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &type) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNavigationStartHighRes) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNavigationStart) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mNonBlankPaint) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mContentfulPaint) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMContentFlushed) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mBeforeUnloadStart) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mUnloadStart) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mUnloadEnd) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mLoadEventStart) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mLoadEventEnd) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMLoading) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMInteractive) ||
+      !ReadIPDLParam(aMsg, aIter, aActor,
+                     &timing->mDOMContentLoadedEventStart) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMContentLoadedEventEnd) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mDOMComplete) ||
+      !ReadIPDLParam(aMsg, aIter, aActor, &timing->mTTFI) ||
+      !ReadIPDLParam(aMsg, aIter, aActor,
+                     &timing->mDocShellHasBeenActiveSinceNavigationStart)) {
     return false;
   }
-  return rootItem->ItemType() == nsIDocShellTreeItem::typeContent;
+  timing->mNavigationType = nsDOMNavigationTiming::Type(type);
+  if (unloadedURI) {
+    timing->mUnloadedURI = unloadedURI->forget();
+  }
+  if (loadedURI) {
+    timing->mLoadedURI = loadedURI->forget();
+  }
+  *aResult = timing.forget();
+  return true;
 }

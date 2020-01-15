@@ -18,6 +18,8 @@
     constructor() {
       super();
 
+      this.attachShadow({ mode: "open" });
+
       this.addEventListener(
         "keypress",
         event => {
@@ -52,36 +54,19 @@
           true
         );
       } else {
-        this.addEventListener(
-          "focus",
-          event => {
-            let btn = this.getButton(this.defaultButton);
-            if (btn) {
-              btn.setAttribute(
-                "default",
-                event.originalTarget == btn ||
-                  !(
-                    event.originalTarget.localName == "button" ||
-                    event.originalTarget.localName == "toolbarbutton"
-                  )
-              );
-            }
-          },
-          true
-        );
+        this.addEventListener("focus", this, true);
+        this.shadowRoot.addEventListener("focus", this, true);
       }
 
       // listen for when window is closed via native close buttons
       window.addEventListener("close", event => {
-        if (!document.documentElement.cancelDialog()) {
+        if (!this.cancelDialog()) {
           event.preventDefault();
         }
       });
 
       // for things that we need to initialize after onload fires
       window.addEventListener("load", event => this.postLoadInit(event));
-
-      this.attachShadow({ mode: "open" });
     }
 
     static get observedAttributes() {
@@ -144,10 +129,10 @@
       let key =
         AppConstants.platform == "macosx"
           ? `<key phase="capturing"
-            oncommand="document.documentElement.openHelp(event)"
+            oncommand="document.querySelector('dialog').openHelp(event)"
             key="&openHelpMac.commandkey;" modifiers="accel"/>`
           : `<key phase="capturing"
-            oncommand="document.documentElement.openHelp(event)"
+            oncommand="document.querySelector('dialog').openHelp(event)"
             keycode="&openHelp.commandkey;"/>`;
 
       return `
@@ -178,6 +163,8 @@
       if (this.delayConnectedCallback()) {
         return;
       }
+
+      document.documentElement.setAttribute("role", "dialog");
 
       this.shadowRoot.textContent = "";
       this.shadowRoot.appendChild(
@@ -294,14 +281,13 @@
     }
 
     postLoadInit(aEvent) {
-      function focusInit() {
-        const dialog = document.documentElement;
-        const defaultButton = dialog.getButton(dialog.defaultButton);
+      let focusInit = () => {
+        const defaultButton = this.getButton(this.defaultButton);
 
         // give focus to the first focusable element in the dialog
         let focusedElt = document.commandDispatcher.focusedElement;
         if (!focusedElt) {
-          document.commandDispatcher.advanceFocusIntoSubtree(dialog);
+          document.commandDispatcher.advanceFocusIntoSubtree(this);
 
           focusedElt = document.commandDispatcher.focusedElement;
           if (focusedElt) {
@@ -343,7 +329,7 @@
             window.notifyDefaultButtonLoaded(defaultButton);
           }
         } catch (e) {}
-      }
+      };
 
       // Give focus after onload completes, see bug 103197.
       setTimeout(focusInit, 0);
@@ -356,7 +342,7 @@
     }
 
     openHelp(event) {
-      var helpButton = document.documentElement.getButton("help");
+      var helpButton = this.getButton("help");
       if (helpButton.disabled || helpButton.hidden) {
         return;
       }
@@ -393,7 +379,11 @@
       // add the label and oncommand handler to each button
       for (dlgtype in buttons) {
         var button = buttons[dlgtype];
-        button.addEventListener("command", this._handleButtonCommand, true);
+        button.addEventListener(
+          "command",
+          this._handleButtonCommand.bind(this),
+          true
+        );
 
         // don't override custom labels with pre-defined labels on explicit buttons
         if (!button.hasAttribute("label")) {
@@ -516,9 +506,7 @@
     }
 
     _handleButtonCommand(aEvent) {
-      return document.documentElement._doButtonCommand(
-        aEvent.target.getAttribute("dlgtype")
-      );
+      return this._doButtonCommand(aEvent.target.getAttribute("dlgtype"));
     }
 
     _doButtonCommand(aDlgType) {
@@ -556,6 +544,20 @@
       var btn = this.getButton(this.defaultButton);
       if (btn) {
         this._doButtonCommand(this.defaultButton);
+      }
+    }
+
+    on_focus(event) {
+      let btn = this.getButton(this.defaultButton);
+      if (btn) {
+        btn.setAttribute(
+          "default",
+          event.originalTarget == btn ||
+            !(
+              event.originalTarget.localName == "button" ||
+              event.originalTarget.localName == "toolbarbutton"
+            )
+        );
       }
     }
   }

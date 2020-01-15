@@ -16,12 +16,13 @@
 #endif /* MOZ_X11 */
 #ifdef MOZ_WAYLAND
 #  include <gdk/gdkwayland.h>
+#  include "base/thread.h"
+#  include "WaylandVsyncSource.h"
 #endif
 #include "mozcontainer.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/UniquePtr.h"
 #include "nsIDragService.h"
-#include "nsITimer.h"
 #include "nsGkAtoms.h"
 #include "nsRefPtrHashtable.h"
 #include "nsIFrame.h"
@@ -83,7 +84,18 @@ class gfxPattern;
 namespace mozilla {
 class TimeStamp;
 class CurrentX11TimeGetter;
+
 }  // namespace mozilla
+
+class OpaqueRegionState {
+ public:
+  OpaqueRegionState() : mRect({-1, -1, -1, -1}), mSubtractedCorners(false){};
+  bool NeedsUpdate(GdkRectangle& aNewRect, bool aNewSubtractedCorners);
+
+ private:
+  GdkRectangle mRect;
+  bool mSubtractedCorners;
+};
 
 class nsWindow final : public nsBaseWidget {
  public:
@@ -129,6 +141,7 @@ class nsWindow final : public nsBaseWidget {
   virtual void ConstrainPosition(bool aAllowSlop, int32_t* aX,
                                  int32_t* aY) override;
   virtual void SetSizeConstraints(const SizeConstraints& aConstraints) override;
+  virtual void LockAspectRatio(bool aShouldLock) override;
   virtual void Move(double aX, double aY) override;
   virtual void Show(bool aState) override;
   virtual void Resize(double aWidth, double aHeight, bool aRepaint) override;
@@ -225,6 +238,13 @@ class nsWindow final : public nsBaseWidget {
 
   void SetProgress(unsigned long progressPercent);
 
+#ifdef MOZ_WAYLAND
+  void SetEGLNativeWindowSize(const LayoutDeviceIntSize& aEGLWindowSize);
+  static nsWindow* GetFocusedWindow();
+#endif
+
+  RefPtr<mozilla::gfx::VsyncSource> GetVsyncSource() override;
+
  private:
   void UpdateAlpha(mozilla::gfx::SourceSurface* aSourceSurface,
                    nsIntRect aBoundsRect);
@@ -241,13 +261,17 @@ class nsWindow final : public nsBaseWidget {
   void GrabPointer(guint32 aTime);
   void ReleaseGrabs(void);
 
-  void UpdateClientOffset();
+  void UpdateClientOffsetFromFrameExtents();
+  void UpdateClientOffsetFromCSDWindow();
 
   void DispatchContextMenuEventFromMouseEvent(uint16_t domButton,
                                               GdkEventButton* aEvent);
 #ifdef MOZ_WAYLAND
-  void WaylandEGLSurfaceForceRedraw();
+  void MaybeResumeCompositor();
 #endif
+
+  void WaylandStartVsync();
+  void WaylandStopVsync();
 
  public:
   void ThemeChanged(void);
@@ -275,6 +299,7 @@ class nsWindow final : public nsBaseWidget {
   nsIFrame* GetFrame();
   bool IsDestroyed() { return mIsDestroyed; }
   bool IsWaylandPopup();
+  bool IsPIPWindow() { return mIsPIPWindow; };
 
   void DispatchDragEvent(mozilla::EventMessage aMsg,
                          const LayoutDeviceIntPoint& aRefPoint, guint aTime);
@@ -294,7 +319,7 @@ class nsWindow final : public nsBaseWidget {
                                const mozilla::WidgetKeyboardEvent& aEvent,
                                nsTArray<mozilla::CommandInt>& aCommands,
                                uint32_t aGeckoKeyCode, uint32_t aNativeKeyCode);
-  virtual void GetEditCommands(
+  virtual bool GetEditCommands(
       NativeKeyBindingsType aType, const mozilla::WidgetKeyboardEvent& aEvent,
       nsTArray<mozilla::CommandInt>& aCommands) override;
 
@@ -305,6 +330,7 @@ class nsWindow final : public nsBaseWidget {
 
   virtual void SetTransparencyMode(nsTransparencyMode aMode) override;
   virtual nsTransparencyMode GetTransparencyMode() override;
+  virtual void SetWindowMouseTransparent(bool aIsTransparent) override;
   virtual void UpdateOpaqueRegion(
       const LayoutDeviceIntRegion& aOpaqueRegion) override;
   virtual nsresult ConfigureChildren(
@@ -347,6 +373,7 @@ class nsWindow final : public nsBaseWidget {
   wl_display* GetWaylandDisplay();
   wl_surface* GetWaylandSurface();
   bool WaylandSurfaceNeedsClear();
+  virtual void CreateCompositorVsyncDispatcher() override;
 #endif
   virtual void GetCompositorWidgetInitData(
       mozilla::widget::CompositorWidgetInitData* aInitData) override;
@@ -377,6 +404,9 @@ class nsWindow final : public nsBaseWidget {
   nsresult SetSystemFont(const nsCString& aFontName) override;
   nsresult GetSystemFont(nsCString& aFontName) override;
 
+  nsresult SetPrefersReducedMotionOverrideForTest(bool aValue) final;
+  nsresult ResetPrefersReducedMotionOverrideForTest() final;
+
   typedef enum {
     CSD_SUPPORT_SYSTEM,  // CSD including shadows
     CSD_SUPPORT_CLIENT,  // CSD without shadows
@@ -392,6 +422,11 @@ class nsWindow final : public nsBaseWidget {
   static bool HideTitlebarByDefault();
   static bool GetTopLevelWindowActiveState(nsIFrame* aFrame);
   static bool TitlebarCanUseShapeMask();
+#ifdef MOZ_WAYLAND
+  virtual nsresult GetScreenRect(LayoutDeviceIntRect* aRect) override;
+#endif
+  bool IsRemoteContent() { return HasRemoteContent(); }
+  static void HideWaylandOpenedPopups();
 
  protected:
   virtual ~nsWindow();
@@ -436,9 +471,11 @@ class nsWindow final : public nsBaseWidget {
   // Can we access X?
   bool mIsX11Display;
 #ifdef MOZ_WAYLAND
-  bool mNeedsUpdatingEGLSurface;
+  bool mNeedsCompositorResume;
   bool mCompositorInitiallyPaused;
 #endif
+  bool mWindowScaleFactorChanged;
+  int mWindowScaleFactor;
 
  private:
   void DestroyChildWindows();
@@ -458,11 +495,17 @@ class nsWindow final : public nsBaseWidget {
   void ClearCachedResources();
   nsIWidgetListener* GetListener();
 
-  void UpdateClientOffsetForCSDWindow();
+#ifdef MOZ_WAYLAND
+  void UpdateTopLevelOpaqueRegionWayland(bool aSubtractCorners);
+#endif
+  void UpdateTopLevelOpaqueRegionGtk(bool aSubtractCorners);
+  void UpdatePopupOpaqueRegion(const LayoutDeviceIntRegion& aOpaqueRegion);
 
   nsWindow* GetTransientForWindowIfPopup();
   bool IsHandlingTouchSequence(GdkEventSequence* aSequence);
 
+  void ResizeInt(int aX, int aY, int aWidth, int aHeight, bool aMove,
+                 bool aRepaint);
   void NativeMoveResizeWaylandPopup(GdkPoint* aPosition, GdkRectangle* aSize);
 
   GtkTextDirection GetTextDirection();
@@ -474,20 +517,19 @@ class nsWindow final : public nsBaseWidget {
 
   void SetCompositorHint(WindowComposeRequest aState);
 #endif
-  nsCString mGtkWindowTypeName;
+  nsCString mGtkWindowAppName;
   nsCString mGtkWindowRoleName;
   void RefreshWindowClass();
 
   GtkWidget* mShell;
   MozContainer* mContainer;
   GdkWindow* mGdkWindow;
-  GtkWindow* mToplevelParentWindow;
   bool mWindowShouldStartDragging = false;
   PlatformCompositorWidgetDelegate* mCompositorWidgetDelegate;
 
   uint32_t mHasMappedToplevel : 1, mIsFullyObscured : 1, mRetryPointerGrab : 1;
   nsSizeMode mSizeState;
-
+  float mAspectRatio;
   nsIntPoint mClientOffset;
 
 #if GTK_CHECK_VERSION(3, 4, 0)
@@ -508,6 +550,9 @@ class nsWindow final : public nsBaseWidget {
   int mXDepth;
   mozilla::widget::WindowSurfaceProvider mSurfaceProvider;
 #endif
+#ifdef MOZ_WAYLAND
+  RefPtr<mozilla::gfx::VsyncSource> mWaylandVsyncSource;
+#endif
 
   // Upper bound on pending ConfigureNotify events to be dispatched to the
   // window. See bug 1225044.
@@ -516,12 +561,16 @@ class nsWindow final : public nsBaseWidget {
   // Window titlebar rendering mode, CSD_SUPPORT_NONE if it's disabled
   // for this window.
   CSDSupportLevel mCSDSupportLevel;
+  // Use dedicated GdkWindow for mContainer
+  bool mDrawToContainer;
   // If true, draw our own window titlebar.
   bool mDrawInTitlebar;
   // Draw titlebar with :backdrop css state (inactive/unfocused).
   bool mTitlebarBackdropState;
   // Draggable titlebar region maintained by UpdateWindowDraggingRegion
   LayoutDeviceIntRegion mDraggableRegion;
+  // It's PictureInPicture window.
+  bool mIsPIPWindow;
 
 #ifdef ACCESSIBILITY
   RefPtr<mozilla::a11y::Accessible> mRootAccessible;
@@ -596,6 +645,13 @@ class nsWindow final : public nsBaseWidget {
   // Remember the last sizemode so that we can restore it when
   // leaving fullscreen
   nsSizeMode mLastSizeMode;
+  // We can't detect size state changes correctly so set this flag
+  // to force update mBounds after a size state change from a configure
+  // event.
+  bool mBoundsAreValid;
+
+  // Used to track opaque region changes for toplevel windows.
+  OpaqueRegionState mToplevelOpaqueRegionState;
 
   static bool DragInProgress(void);
 
@@ -613,12 +669,21 @@ class nsWindow final : public nsBaseWidget {
 
   virtual int32_t RoundsWidgetCoordinatesTo() override;
 
+  void UpdateMozWindowActive();
+
   void ForceTitlebarRedraw();
 
+  void SetPopupWindowDecoration(bool aShowOnTaskbar);
+
+  void ApplySizeConstraints(void);
+
+  bool IsMainMenuWindow();
   GtkWidget* ConfigureWaylandPopupWindows();
   void HideWaylandWindow();
   void HideWaylandTooltips();
   void HideWaylandPopupAndAllChildren();
+  void CleanupWaylandPopups();
+  GtkWindow* GetCurrentTopmostWindow();
 
   /**
    * |mIMContext| takes all IME related stuff.

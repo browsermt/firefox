@@ -197,13 +197,13 @@ impl Example for App {
         builder.push_simple_stacking_context(
             content_bounds.origin,
             spatial_id,
-            true,
+            PrimitiveFlags::IS_BACKFACE_VISIBLE,
         );
 
         let image_mask_key = api.generate_image_key();
         txn.add_image(
             image_mask_key,
-            ImageDescriptor::new(2, 2, ImageFormat::R8, true, false),
+            ImageDescriptor::new(2, 2, ImageFormat::R8, ImageDescriptorFlags::IS_OPAQUE),
             ImageData::new(vec![0, 80, 180, 255]),
             None,
         );

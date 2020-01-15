@@ -679,7 +679,7 @@ class Interface(object):
         if self.attributes.function:
             has_method = False
             for member in self.members:
-                if member.kind is 'method':
+                if member.kind == 'method':
                     if has_method:
                         raise IDLError(
                             "interface '%s' has multiple methods, but marked 'function'" %
@@ -943,7 +943,7 @@ class CEnum(object):
         return "%s::%s " % (self.iface.name, self.basename)
 
     def rustType(self, calltype):
-        raise RustNoncompat('cenums unimplemented')
+        return "%s u%d" % ('*mut' if 'out' in calltype else '', self.width)
 
     def __str__(self):
         body = ', '.join('%s = %s' % v for v in self.variants)
@@ -980,9 +980,12 @@ class Attribute(object):
     must_use = False
     binaryname = None
     infallible = False
-    # explicit_can_run_script is true if the attribute is explicitly annotated
-    # as being able to cause script to run.
-    explicit_can_run_script = False
+    # explicit_setter_can_run_script is true if the attribute is explicitly
+    # annotated as having a setter that can cause script to run.
+    explicit_setter_can_run_script = False
+    # explicit_getter_can_run_script is true if the attribute is explicitly
+    # annotated as having a getter that can cause script to run.
+    explicit_getter_can_run_script = False
 
     def __init__(self, type, name, attlist, readonly, location, doccomments):
         self.type = type
@@ -1019,7 +1022,23 @@ class Attribute(object):
             elif name == 'infallible':
                 self.infallible = True
             elif name == 'can_run_script':
-                self.explicit_can_run_script = True
+                if (self.explicit_setter_can_run_script or
+                    self.explicit_getter_can_run_script):
+                    raise IDLError("Redundant getter_can_run_script or "
+                                   "setter_can_run_script annotation on "
+                                   "attribute", aloc)
+                self.explicit_setter_can_run_script = True
+                self.explicit_getter_can_run_script = True
+            elif name == 'setter_can_run_script':
+                if self.explicit_setter_can_run_script:
+                    raise IDLError("Redundant setter_can_run_script annotation "
+                                   "on attribute", aloc)
+                self.explicit_setter_can_run_script = True
+            elif name == 'getter_can_run_script':
+                if self.explicit_getter_can_run_script:
+                    raise IDLError("Redundant getter_can_run_script annotation "
+                                   "on attribute", aloc)
+                self.explicit_getter_can_run_script = True
             else:
                 raise IDLError("Unexpected attribute '%s'" % name, aloc)
 
@@ -1243,7 +1262,7 @@ class Param(object):
             return self.realtype.nativeType(self.paramtype, **kwargs)
         except IDLError as e:
             raise IDLError(e.message, self.location)
-        except TypeError as e:
+        except TypeError:
             raise IDLError("Unexpected parameter attribute", self.location)
 
     def rustType(self):
@@ -1257,7 +1276,7 @@ class Param(object):
             return self.realtype.rustType(self.paramtype, **kwargs)
         except IDLError as e:
             raise IDLError(e.message, self.location)
-        except TypeError as e:
+        except TypeError:
             raise IDLError("Unexpected parameter attribute", self.location)
 
     def toIDL(self):

@@ -11,10 +11,22 @@ const { XPCOMUtils } = ChromeUtils.import(
   "resource://gre/modules/XPCOMUtils.jsm"
 );
 
+ChromeUtils.defineModuleGetter(
+  this,
+  "PrivateBrowsingUtils",
+  "resource://gre/modules/PrivateBrowsingUtils.jsm"
+);
+
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
   "useSeparateFileUriProcess",
   "browser.tabs.remote.separateFileUriProcess",
+  false
+);
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "useSeparateDataUriProcess",
+  "browser.tabs.remote.dataUriInDefaultWebProcess",
   false
 );
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -45,8 +57,8 @@ XPCOMUtils.defineLazyPreferenceGetter(
 );
 XPCOMUtils.defineLazyPreferenceGetter(
   this,
-  "useHttpResponseProcessSelection",
-  "browser.tabs.remote.useHTTPResponseProcessSelection",
+  "documentChannel",
+  "browser.tabs.documentchannel",
   false
 );
 XPCOMUtils.defineLazyPreferenceGetter(
@@ -60,6 +72,12 @@ XPCOMUtils.defineLazyServiceGetter(
   "serializationHelper",
   "@mozilla.org/network/serialization-helper;1",
   "nsISerializationHelper"
+);
+XPCOMUtils.defineLazyServiceGetter(
+  this,
+  "extProtService",
+  "@mozilla.org/uriloader/external-protocol-service;1",
+  "nsIExternalProtocolService"
 );
 
 function debug(msg) {
@@ -83,7 +101,8 @@ const NOT_REMOTE = null;
 
 // These must match any similar ones in ContentParent.h and ProcInfo.h
 const WEB_REMOTE_TYPE = "web";
-const FISSION_WEB_REMOTE_TYPE_PREFIX = "webIsolated=";
+const FISSION_WEB_REMOTE_TYPE = "webIsolated";
+const WEB_REMOTE_COOP_COEP_TYPE_PREFIX = "webCOOP+COEP=";
 const FILE_REMOTE_TYPE = "file";
 const EXTENSION_REMOTE_TYPE = "extension";
 const PRIVILEGEDABOUT_REMOTE_TYPE = "privilegedabout";
@@ -93,10 +112,53 @@ const PRIVILEGEDMOZILLA_REMOTE_TYPE = "privilegedmozilla";
 const LARGE_ALLOCATION_REMOTE_TYPE = "webLargeAllocation";
 const DEFAULT_REMOTE_TYPE = WEB_REMOTE_TYPE;
 
+// This list is duplicated between Navigator.cpp and here because navigator
+// is not accessible in this context. Please update both if the list changes.
+const kSafeSchemes = [
+  "bitcoin",
+  "geo",
+  "im",
+  "irc",
+  "ircs",
+  "magnet",
+  "mailto",
+  "mms",
+  "news",
+  "nntp",
+  "openpgp4fpr",
+  "sip",
+  "sms",
+  "smsto",
+  "ssh",
+  "tel",
+  "urn",
+  "webcal",
+  "wtai",
+  "xmpp",
+];
+
+const kDocumentChannelAllowedSchemes = ["http", "https", "ftp", "data"];
+
+// Note that even if the scheme fits the criteria for a web-handled scheme
+// (ie it is compatible with the checks registerProtocolHandler uses), it may
+// not be web-handled - it could still be handled via the OS by another app.
+function hasPotentiallyWebHandledScheme({ scheme }) {
+  // Note that `scheme` comes from a URI object so is already lowercase.
+  if (kSafeSchemes.includes(scheme)) {
+    return true;
+  }
+  if (!scheme.startsWith("web+") || scheme.length < 5) {
+    return false;
+  }
+  // Check the rest of the scheme only consists of ascii a-z chars
+  return /^[a-z]+$/.test(scheme.substr("web+".length));
+}
+
 function validatedWebRemoteType(
   aPreferredRemoteType,
   aTargetUri,
   aCurrentUri,
+  aResultPrincipal,
   aRemoteSubframes
 ) {
   // To load into the Privileged Mozilla Content Process you must be https,
@@ -114,6 +176,39 @@ function validatedWebRemoteType(
     return PRIVILEGEDMOZILLA_REMOTE_TYPE;
   }
 
+  // If we're in the parent and we were passed a web-handled scheme,
+  // transform it now to avoid trying to load it in the wrong process.
+  if (aRemoteSubframes && hasPotentiallyWebHandledScheme(aTargetUri)) {
+    if (
+      Services.appinfo.processType != Services.appinfo.PROCESS_TYPE_DEFAULT &&
+      Services.appinfo.remoteType.startsWith(FISSION_WEB_REMOTE_TYPE + "=")
+    ) {
+      // If we're in a child process, assume we're OK to load this non-web
+      // URL for now. We'll either load it externally or re-evaluate once
+      // we know the "real" URL to which we'll redirect.
+      return Services.appinfo.remoteType;
+    }
+    // This doesn't work (throws) in the child - see
+    // https://bugzilla.mozilla.org/show_bug.cgi?id=1589082
+    // Even if it did, it'd cause sync IPC
+    // ( https://bugzilla.mozilla.org/show_bug.cgi?id=1589085 ), and this code
+    // can get called several times per page load so that seems like something
+    // we'd want to avoid.
+    let handlerInfo = extProtService.getProtocolHandlerInfo(aTargetUri.scheme);
+    try {
+      if (!handlerInfo.alwaysAskBeforeHandling) {
+        let app = handlerInfo.preferredApplicationHandler;
+        app.QueryInterface(Ci.nsIWebHandlerApp);
+        // If we get here, the default handler is a web app.
+        // Target to the origin of that web app:
+        let uriStr = app.uriTemplate.replace(/%s/, aTargetUri.spec);
+        aTargetUri = Services.io.newURI(uriStr);
+      }
+    } catch (ex) {
+      // It's not strange for this to throw, we just ignore it and fall through.
+    }
+  }
+
   // If the domain is whitelisted to allow it to use file:// URIs, then we have
   // to run it in a file content process, in case it uses file:// sub-resources.
   const sm = Services.scriptSecurityManager;
@@ -124,8 +219,31 @@ function validatedWebRemoteType(
   // If we're within a fission window, extract site information from the URI in
   // question, and use it to generate an isolated origin.
   if (aRemoteSubframes) {
-    let targetPrincipal = sm.createContentPrincipal(aTargetUri, {});
-    return FISSION_WEB_REMOTE_TYPE_PREFIX + targetPrincipal.siteOrigin;
+    // To be consistent with remote types when using a principal vs. a URI,
+    // always clear OAs.
+    // FIXME: This should be accurate.
+    let originAttributes = {};
+
+    // Get a principal to use for isolation.
+    let targetPrincipal;
+    if (aResultPrincipal) {
+      targetPrincipal = sm.principalWithOA(aResultPrincipal, originAttributes);
+    } else {
+      targetPrincipal = sm.createContentPrincipal(aTargetUri, originAttributes);
+    }
+
+    // If this is a special webCOOP+COEP= remote type that matches the
+    // principal's siteOrigin, we don't want to override it with webIsolated=
+    // as it's already isolated.
+    if (
+      aPreferredRemoteType &&
+      aPreferredRemoteType ==
+        `${WEB_REMOTE_COOP_COEP_TYPE_PREFIX}${targetPrincipal.siteOrigin}`
+    ) {
+      return aPreferredRemoteType;
+    }
+
+    return `${FISSION_WEB_REMOTE_TYPE}=${targetPrincipal.siteOrigin}`;
   }
 
   if (!aPreferredRemoteType) {
@@ -141,8 +259,13 @@ function validatedWebRemoteType(
     aPreferredRemoteType == FILE_REMOTE_TYPE
   ) {
     // If aCurrentUri is passed then we should only allow FILE_REMOTE_TYPE
-    // when it is same origin as target.
+    // when it is same origin as target or the current URI is already a
+    // file:// URI.
     if (aCurrentUri) {
+      if (documentChannel && aCurrentUri.scheme == "file") {
+        return aPreferredRemoteType;
+      }
+
       try {
         // checkSameOriginURI throws when not same origin.
         // todo: if you intend to update CheckSameOriginURI to log the error to the
@@ -164,17 +287,18 @@ var E10SUtils = {
   DEFAULT_REMOTE_TYPE,
   NOT_REMOTE,
   WEB_REMOTE_TYPE,
+  WEB_REMOTE_COOP_COEP_TYPE_PREFIX,
   FILE_REMOTE_TYPE,
   EXTENSION_REMOTE_TYPE,
   PRIVILEGEDABOUT_REMOTE_TYPE,
   PRIVILEGEDMOZILLA_REMOTE_TYPE,
   LARGE_ALLOCATION_REMOTE_TYPE,
 
-  useHttpResponseProcessSelection() {
-    return useHttpResponseProcessSelection;
-  },
   useCrossOriginOpenerPolicy() {
     return useCrossOriginOpenerPolicy;
+  },
+  documentChannel() {
+    return documentChannel;
   },
 
   /**
@@ -221,25 +345,15 @@ var E10SUtils = {
   canLoadURIInRemoteType(
     aURL,
     aRemoteSubframes,
-    aRemoteType = DEFAULT_REMOTE_TYPE,
-    aPreferredRemoteType = undefined
+    aRemoteType = DEFAULT_REMOTE_TYPE
   ) {
-    // We need a strict equality here because the value of `NOT_REMOTE` is
-    // `null`, and there is a possibility that `undefined` is passed as an
-    // argument, which might result a load in the parent process.
-    if (aPreferredRemoteType === undefined) {
-      aPreferredRemoteType =
-        aRemoteType === NOT_REMOTE ? NOT_REMOTE : DEFAULT_REMOTE_TYPE;
-    }
+    // aRemoteType cannot be undefined, as that would cause it to default to
+    // `DEFAULT_REMOTE_TYPE`. This means any falsy remote types are
+    // intentionally `NOT_REMOTE`.
 
     return (
       aRemoteType ==
-      this.getRemoteTypeForURI(
-        aURL,
-        true,
-        aRemoteSubframes,
-        aPreferredRemoteType
-      )
+      this.getRemoteTypeForURI(aURL, true, aRemoteSubframes, aRemoteType)
     );
   },
 
@@ -287,7 +401,9 @@ var E10SUtils = {
     aMultiProcess,
     aRemoteSubframes,
     aPreferredRemoteType = DEFAULT_REMOTE_TYPE,
-    aCurrentUri
+    aCurrentUri = null,
+    aResultPrincipal = null,
+    aIsSubframe = false
   ) {
     if (!aMultiProcess) {
       return NOT_REMOTE;
@@ -366,9 +482,14 @@ var E10SUtils = {
         return NOT_REMOTE;
 
       case "moz-extension":
-        return WebExtensionPolicy.useRemoteWebExtensions
-          ? EXTENSION_REMOTE_TYPE
-          : NOT_REMOTE;
+        if (WebExtensionPolicy.useRemoteWebExtensions) {
+          // Extension iframes should load in the same process
+          // as their outer frame, top-level ones should load
+          // in the extension process.
+          return aIsSubframe ? aPreferredRemoteType : EXTENSION_REMOTE_TYPE;
+        }
+
+        return NOT_REMOTE;
 
       default:
         // WebExtensions may set up protocol handlers for protocol names
@@ -399,7 +520,8 @@ var E10SUtils = {
             aMultiProcess,
             aRemoteSubframes,
             aPreferredRemoteType,
-            aCurrentUri
+            aCurrentUri,
+            aResultPrincipal
           );
         }
 
@@ -407,6 +529,7 @@ var E10SUtils = {
           aPreferredRemoteType,
           aURI,
           aCurrentUri,
+          aResultPrincipal,
           aRemoteSubframes
         );
     }
@@ -417,7 +540,8 @@ var E10SUtils = {
     aMultiProcess,
     aRemoteSubframes,
     aPreferredRemoteType = DEFAULT_REMOTE_TYPE,
-    aCurrentPrincipal
+    aCurrentPrincipal,
+    aIsSubframe
   ) {
     if (!aMultiProcess) {
       return NOT_REMOTE;
@@ -429,11 +553,17 @@ var E10SUtils = {
       throw Cr.NS_ERROR_UNEXPECTED;
     }
 
-    // Null principals can be loaded in any remote process.
+    // Null principals can be loaded in any remote process, but when
+    // using fission we add the option to force them into the default
+    // web process for better test coverage.
     if (aPrincipal.isNullPrincipal) {
-      return aPreferredRemoteType == NOT_REMOTE
-        ? DEFAULT_REMOTE_TYPE
-        : aPreferredRemoteType;
+      if (
+        (aRemoteSubframes && useSeparateDataUriProcess) ||
+        aPreferredRemoteType == NOT_REMOTE
+      ) {
+        return WEB_REMOTE_TYPE;
+      }
+      return aPreferredRemoteType;
     }
 
     // We might care about the currently loaded URI. Pull it out of our current
@@ -448,7 +578,9 @@ var E10SUtils = {
       aMultiProcess,
       aRemoteSubframes,
       aPreferredRemoteType,
-      currentURI
+      currentURI,
+      aPrincipal,
+      aIsSubframe
     );
   },
 
@@ -566,6 +698,9 @@ var E10SUtils = {
       if (flags & Ci.nsIWebNavigation.LOAD_FLAGS_FIXUP_SCHEME_TYPOS) {
         fixupFlags |= Ci.nsIURIFixup.FIXUP_FLAG_FIX_SCHEME_TYPOS;
       }
+      if (PrivateBrowsingUtils.isBrowserPrivate(browser)) {
+        fixupFlags |= Ci.nsIURIFixup.FIXUP_FLAG_PRIVATE_CONTEXT;
+      }
       uriObject = Services.uriFixup.createFixupURI(uri, fixupFlags);
       // Note that I had thought that we could set uri = uriObject.spec here, to
       // save on fixup later on, but that changes behavior and breaks tests.
@@ -583,6 +718,18 @@ var E10SUtils = {
     }
 
     let mustChangeProcess = requiredRemoteType != currentRemoteType;
+
+    // If we already have a content process, and the load will be
+    // handled using DocumentChannel, then we can skip switching
+    // for now, and let DocumentChannel do it during the response.
+    if (
+      currentRemoteType != NOT_REMOTE &&
+      uriObject &&
+      (remoteSubframes || documentChannel) &&
+      kDocumentChannelAllowedSchemes.includes(uriObject.scheme)
+    ) {
+      mustChangeProcess = false;
+    }
     let newFrameloader = false;
     if (
       browser.getAttribute("preloadedState") === "consumed" &&
@@ -616,7 +763,7 @@ var E10SUtils = {
   },
 
   shouldLoadURI(aDocShell, aURI, aHasPostData) {
-    let remoteSubframes = aDocShell.useRemoteSubframes;
+    let { useRemoteSubframes } = aDocShell;
 
     // Inner frames should always load in the current process
     // XXX(nika): Handle shouldLoadURI-triggered process switches for remote
@@ -648,9 +795,9 @@ var E10SUtils = {
     // We should never be sending a POST request from the parent process to a
     // http(s) uri, so make sure we switch if we're currently in that process.
     if (
-      useHttpResponseProcessSelection &&
-      (aURI.scheme == "http" || aURI.scheme == "https") &&
-      Services.appinfo.remoteType != NOT_REMOTE
+      Services.appinfo.remoteType != NOT_REMOTE &&
+      (useRemoteSubframes || documentChannel) &&
+      kDocumentChannelAllowedSchemes.includes(aURI.scheme)
     ) {
       return true;
     }
@@ -659,11 +806,14 @@ var E10SUtils = {
     // to change processes, we want to load into a new process so that we can throw
     // this one out. We don't want to move into a new process if we have post data,
     // because we would accidentally throw out that data.
+    let isOnlyToplevelBrowsingContext =
+      !aDocShell.browsingContext.parent &&
+      aDocShell.browsingContext.group.getToplevels().length == 1;
     if (
       !aHasPostData &&
       Services.appinfo.remoteType == LARGE_ALLOCATION_REMOTE_TYPE &&
       !aDocShell.awaitingLargeAlloc &&
-      aDocShell.isOnlyToplevelInTabGroup
+      isOnlyToplevelBrowsingContext
     ) {
       return false;
     }
@@ -686,7 +836,7 @@ var E10SUtils = {
         this.getRemoteTypeForURIObject(
           aURI,
           true,
-          remoteSubframes,
+          useRemoteSubframes,
           remoteType,
           webNav.currentURI
         )
@@ -694,7 +844,7 @@ var E10SUtils = {
     }
 
     // If the URI can be loaded in the current process then continue
-    return this.shouldLoadURIInThisProcess(aURI, remoteSubframes);
+    return this.shouldLoadURIInThisProcess(aURI, useRemoteSubframes);
   },
 
   redirectLoad(
@@ -802,14 +952,20 @@ var E10SUtils = {
   },
 
   /**
-   * If Fission is enabled, the remote type for a standard content process will
-   * start with webIsolated=.
+   * The suffix after a `=` in a remoteType is dynamic, and used to control the
+   * process pool to use. The C++ version of this method is mozilla::dom::RemoteTypePrefix().
    */
-  isWebRemoteType(aBrowser) {
-    if (aBrowser.ownerGlobal.docShell.nsILoadContext.useRemoteSubframes) {
-      return aBrowser.remoteType.startsWith(FISSION_WEB_REMOTE_TYPE_PREFIX);
-    }
-    return aBrowser.remoteType == WEB_REMOTE_TYPE;
+  remoteTypePrefix(aRemoteType) {
+    return aRemoteType.split("=")[0];
+  },
+
+  /**
+   * There are various types of remote types that are for web content processes, but
+   * they all start with "web". The C++ version of this method is
+   * mozilla::dom::IsWebRemoteType().
+   */
+  isWebRemoteType(aRemoteType) {
+    return aRemoteType.startsWith(WEB_REMOTE_TYPE);
   },
 };
 
@@ -821,4 +977,10 @@ XPCOMUtils.defineLazyGetter(
       Services.scriptSecurityManager.getSystemPrincipal()
     );
   }
+);
+XPCOMUtils.defineLazyPreferenceGetter(
+  E10SUtils,
+  "rebuildFrameloadersOnRemotenessChange",
+  "fission.rebuild_frameloaders_on_remoteness_change",
+  false
 );

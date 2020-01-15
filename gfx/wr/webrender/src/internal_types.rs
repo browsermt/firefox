@@ -2,10 +2,11 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-use api::{ColorF, DebugCommand, DocumentId, ExternalImageData, ExternalImageId};
+use api::{ColorF, DebugCommand, DocumentId, ExternalImageData, ExternalImageId, PrimitiveFlags};
 use api::{ImageFormat, ItemTag, NotificationRequest, Shadow, FilterOp, MAX_BLUR_RADIUS};
 use api::units::*;
 use api;
+use crate::composite::NativeSurfaceOperation;
 use crate::device::TextureFilter;
 use crate::renderer::PipelineInfo;
 use crate::gpu_cache::GpuCacheUpdateList;
@@ -29,8 +30,34 @@ use crate::capture::PlainExternalImage;
 pub type FastHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 pub type FastHashSet<K> = HashSet<K, BuildHasherDefault<FxHasher>>;
 
+/// Custom field embedded inside the Polygon struct of the plane-split crate.
+#[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "capture", derive(Serialize))]
+pub struct PlaneSplitAnchor {
+    pub cluster_index: usize,
+    pub instance_index: usize,
+}
+
+impl PlaneSplitAnchor {
+    pub fn new(cluster_index: usize, instance_index: usize) -> Self {
+        PlaneSplitAnchor {
+            cluster_index,
+            instance_index,
+        }
+    }
+}
+
+impl Default for PlaneSplitAnchor {
+    fn default() -> Self {
+        PlaneSplitAnchor {
+            cluster_index: 0,
+            instance_index: 0,
+        }
+    }
+}
+
 /// A concrete plane splitter type used in WebRender.
-pub type PlaneSplitter = BspSplitter<f64, WorldPixel>;
+pub type PlaneSplitter = BspSplitter<f64, WorldPixel, PlaneSplitAnchor>;
 
 /// An arbitrary number which we assume opacity is invisible below.
 const OPACITY_EPSILON: f32 = 0.001;
@@ -134,6 +161,29 @@ impl Filter {
             Filter::LinearToSrgb |
             Filter::ComponentTransfer |
             Filter::Flood(..) => false,
+        }
+    }
+
+
+    pub fn as_int(&self) -> i32 {
+        // Must be kept in sync with brush_blend.glsl
+        match *self {
+            Filter::Identity => 0, // matches `Contrast(1)`
+            Filter::Contrast(..) => 0,
+            Filter::Grayscale(..) => 1,
+            Filter::HueRotate(..) => 2,
+            Filter::Invert(..) => 3,
+            Filter::Saturate(..) => 4,
+            Filter::Sepia(..) => 5,
+            Filter::Brightness(..) => 6,
+            Filter::ColorMatrix(..) => 7,
+            Filter::SrgbToLinear => 8,
+            Filter::LinearToSrgb => 9,
+            Filter::Flood(..) => 10,
+            Filter::ComponentTransfer => 11,
+            Filter::Blur(..) => 12,
+            Filter::DropShadows(..) => 13,
+            Filter::Opacity(..) => 14,
         }
     }
 }
@@ -244,6 +294,9 @@ pub enum TextureSource {
     /// passes, these are not made available automatically, but are instead
     /// opt-in by the `RenderTask` (see `mark_for_saving()`).
     RenderTaskCache(SavedTargetIndex, Swizzle),
+    /// Select a dummy 1x1 white texture. This can be used by image
+    /// shaders that want to draw a solid color.
+    Dummy,
 }
 
 // See gpu_types.rs where we declare the number of possible documents and
@@ -311,7 +364,6 @@ pub enum TextureCacheAllocationKind {
 /// Command to update the contents of the texture cache.
 #[derive(Debug)]
 pub struct TextureCacheUpdate {
-    pub id: CacheTextureId,
     pub rect: DeviceIntRect,
     pub stride: Option<i32>,
     pub offset: i32,
@@ -333,7 +385,7 @@ pub struct TextureUpdateList {
     /// Commands to alloc/realloc/free the textures. Processed first.
     pub allocations: Vec<TextureCacheAllocation>,
     /// Commands to update the contents of the textures. Processed second.
-    pub updates: Vec<TextureCacheUpdate>,
+    pub updates: FastHashMap<CacheTextureId, Vec<TextureCacheUpdate>>,
 }
 
 impl TextureUpdateList {
@@ -342,8 +394,13 @@ impl TextureUpdateList {
         TextureUpdateList {
             clears_shared_cache: false,
             allocations: Vec::new(),
-            updates: Vec::new(),
+            updates: FastHashMap::default(),
         }
+    }
+
+    /// Returns true if this is a no-op (no updates to be applied).
+    pub fn is_nop(&self) -> bool {
+        self.allocations.is_empty() && self.updates.is_empty()
     }
 
     /// Sets the clears_shared_cache flag for renderer-side sanity checks.
@@ -354,8 +411,11 @@ impl TextureUpdateList {
 
     /// Pushes an update operation onto the list.
     #[inline]
-    pub fn push_update(&mut self, update: TextureCacheUpdate) {
-        self.updates.push(update);
+    pub fn push_update(&mut self, id: CacheTextureId, update: TextureCacheUpdate) {
+        self.updates
+            .entry(id)
+            .or_default()
+            .push(update);
     }
 
     /// Sends a command to the Renderer to clear the portion of the shared region
@@ -371,8 +431,7 @@ impl TextureUpdateList {
     ) {
         let size = DeviceIntSize::new(width, height);
         let rect = DeviceIntRect::new(origin, size);
-        self.push_update(TextureCacheUpdate {
-            id,
+        self.push_update(id, TextureCacheUpdate {
             rect,
             stride: None,
             offset: 0,
@@ -445,7 +504,7 @@ impl TextureUpdateList {
         self.debug_assert_coalesced(id);
 
         // Drop any unapplied updates to the to-be-freed texture.
-        self.updates.retain(|x| x.id != id);
+        self.updates.remove(&id);
 
         // Drop any allocations for it as well. If we happen to be allocating and
         // freeing in the same batch, we can collapse them to a no-op.
@@ -473,6 +532,23 @@ impl TextureUpdateList {
     }
 }
 
+/// A list of updates built by the render backend that should be applied
+/// by the renderer thread.
+pub struct ResourceUpdateList {
+    /// List of OS native surface create / destroy operations to apply.
+    pub native_surface_updates: Vec<NativeSurfaceOperation>,
+
+    /// Atomic set of texture cache updates to apply.
+    pub texture_updates: TextureUpdateList,
+}
+
+impl ResourceUpdateList {
+    /// Returns true if this update list has no effect.
+    pub fn is_nop(&self) -> bool {
+        self.texture_updates.is_nop() && self.native_surface_updates.is_empty()
+    }
+}
+
 /// Wraps a frame_builder::Frame, but conceptually could hold more information
 pub struct RenderedDocument {
     pub frame: Frame,
@@ -495,17 +571,18 @@ pub enum ResultMsg {
     RefreshShader(PathBuf),
     UpdateGpuCache(GpuCacheUpdateList),
     UpdateResources {
-        updates: TextureUpdateList,
+        resource_updates: ResourceUpdateList,
         memory_pressure: bool,
     },
     PublishPipelineInfo(PipelineInfo),
     PublishDocument(
         DocumentId,
         RenderedDocument,
-        TextureUpdateList,
+        ResourceUpdateList,
         BackendProfileCounters,
     ),
     AppendNotificationRequests(Vec<NotificationRequest>),
+    ForceRedraw,
 }
 
 #[derive(Clone, Debug)]
@@ -528,7 +605,7 @@ pub struct LayoutPrimitiveInfo {
     /// but that's an ongoing project, so for now it exists and is used :(
     pub rect: LayoutRect,
     pub clip_rect: LayoutRect,
-    pub is_backface_visible: bool,
+    pub flags: PrimitiveFlags,
     pub hit_info: Option<ItemTag>,
 }
 
@@ -537,7 +614,7 @@ impl LayoutPrimitiveInfo {
         Self {
             rect,
             clip_rect,
-            is_backface_visible: true,
+            flags: PrimitiveFlags::default(),
             hit_info: None,
         }
     }

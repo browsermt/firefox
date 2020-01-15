@@ -8,6 +8,7 @@ const DEFAULT_CONTENT = {
   scene1_text: "foo",
   scene2_text: "bar",
   scene1_button_label: "Sign Up",
+  retry_button_label: "Try again",
   form_action: "foo.com",
   hidden_inputs: { foo: "foo" },
   error_text: "error",
@@ -177,7 +178,7 @@ describe("SubmitFormSnippet", () => {
       wrapper.find(".ASRouterButton").simulate("click");
 
       assert.equal(
-        wrapper.props().sendUserActionTelemetry.firstCall.args[0].value,
+        wrapper.props().sendUserActionTelemetry.firstCall.args[0].event_context,
         "scene1-button-learn-more"
       );
     });
@@ -194,7 +195,7 @@ describe("SubmitFormSnippet", () => {
       wrapper.find("form").simulate("submit");
 
       assert.equal(
-        wrapper.props().sendUserActionTelemetry.firstCall.args[0].value,
+        wrapper.props().sendUserActionTelemetry.firstCall.args[0].event_context,
         "conversion-subscribe-activation"
       );
     });
@@ -214,7 +215,8 @@ describe("SubmitFormSnippet", () => {
       await wrapper.instance().handleSubmit({ preventDefault: sandbox.stub() });
 
       assert.equal(
-        wrapper.props().sendUserActionTelemetry.secondCall.args[0].value,
+        wrapper.props().sendUserActionTelemetry.secondCall.args[0]
+          .event_context,
         "subscribe-success"
       );
     });
@@ -248,7 +250,8 @@ describe("SubmitFormSnippet", () => {
       await wrapper.instance().handleSubmit({ preventDefault: sandbox.stub() });
 
       assert.equal(
-        wrapper.props().sendUserActionTelemetry.secondCall.args[0].value,
+        wrapper.props().sendUserActionTelemetry.secondCall.args[0]
+          .event_context,
         "subscribe-error"
       );
     });
@@ -289,7 +292,8 @@ describe("SubmitFormSnippet", () => {
     it("should render the button to return to the signup form if there was an error", () => {
       wrapper.setState({ signupSubmitted: true, signupSuccess: false });
 
-      assert.isTrue(wrapper.find(".ASRouterButton").exists());
+      const button = wrapper.find("button.ASRouterButton");
+      assert.equal(button.text(), "Try again");
       wrapper.find(".ASRouterButton").simulate("click");
 
       assert.equal(wrapper.state().signupSubmitted, false);

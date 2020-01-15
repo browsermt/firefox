@@ -182,6 +182,8 @@ static const char* RetAddrEntryKindToString(RetAddrEntry::Kind kind) {
       return "warmup counter";
     case RetAddrEntry::Kind::StackCheck:
       return "stack check";
+    case RetAddrEntry::Kind::InterruptCheck:
+      return "interrupt check";
     case RetAddrEntry::Kind::DebugTrap:
       return "debug trap";
     case RetAddrEntry::Kind::DebugPrologue:
@@ -284,6 +286,7 @@ static void PatchBaselineFramesForDebugMode(
         switch (kind) {
           case RetAddrEntry::Kind::IC:
           case RetAddrEntry::Kind::CallVM:
+          case RetAddrEntry::Kind::InterruptCheck:
           case RetAddrEntry::Kind::WarmupCounter:
           case RetAddrEntry::Kind::StackCheck: {
             // Cases A, B, C, D above.
@@ -298,6 +301,7 @@ static void PatchBaselineFramesForDebugMode(
             switch (kind) {
               case RetAddrEntry::Kind::IC:
               case RetAddrEntry::Kind::CallVM:
+              case RetAddrEntry::Kind::InterruptCheck:
                 retAddrEntry = &bl->retAddrEntryFromPCOffset(pcOffset, kind);
                 break;
               case RetAddrEntry::Kind::WarmupCounter:
@@ -321,7 +325,11 @@ static void PatchBaselineFramesForDebugMode(
             // Resume in the Baseline Interpreter because these callVMs are not
             // present in the new BaselineScript if we recompiled without debug
             // instrumentation.
-            frame.baselineFrame()->switchFromJitToInterpreter(cx, pc);
+            if (kind == RetAddrEntry::Kind::DebugPrologue) {
+              frame.baselineFrame()->switchFromJitToInterpreterAtPrologue(cx);
+            } else {
+              frame.baselineFrame()->switchFromJitToInterpreter(cx, pc);
+            }
             switch (kind) {
               case RetAddrEntry::Kind::DebugTrap:
                 // DebugTrap handling is different from the ones below because

@@ -8,60 +8,88 @@
  */
 
 function setupBackgroundJsm() {
-  const background = ChromeUtils.import(
-    "resource://devtools/client/performance-new/popup/background.jsm"
+  return ChromeUtils.import(
+    "resource://devtools/client/performance-new/popup/background.jsm.js"
   );
-  return background;
 }
 
 add_task(function test() {
-  info("Test that we get the default values from state.");
-  const {
-    getState,
-    revertPrefs,
-    DEFAULT_BUFFER_SIZE,
-    DEFAULT_STACKWALK_FEATURE,
-  } = setupBackgroundJsm().forTestsOnly;
+  info("Test that we get the default preference values from the browser.");
+  const { getRecordingPreferencesFromBrowser } = setupBackgroundJsm();
 
-  Assert.equal(
-    getState().buffersize,
-    DEFAULT_BUFFER_SIZE,
-    "The initial state has the default buffersize."
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().entries,
+    undefined,
+    "The initial state has the default entries."
+  );
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().interval,
+    undefined,
+    "The initial state has the default interval."
+  );
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().features,
+    undefined,
+    "The initial state has the default features."
   );
   Assert.equal(
-    getState().features.stackwalk,
-    DEFAULT_STACKWALK_FEATURE,
-    "The stackwalk feature is initialized to the default."
+    getRecordingPreferencesFromBrowser().features.includes("js"),
+    true,
+    "The js feature is initialized to the default."
   );
-  revertPrefs();
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().threads,
+    undefined,
+    "The initial state has the default threads."
+  );
+  Assert.equal(
+    getRecordingPreferencesFromBrowser().threads.includes("GeckoMain"),
+    true,
+    "The GeckoMain thread is initialized to the default."
+  );
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().objdirs,
+    undefined,
+    "The initial state has the default objdirs."
+  );
+  Assert.notEqual(
+    getRecordingPreferencesFromBrowser().duration,
+    undefined,
+    "The duration is initialized to the duration."
+  );
 });
 
 add_task(function test() {
-  info("Test that the state and features are properly validated.");
+  info(
+    "Test that the state and features are properly validated. This ensures that as " +
+      "we add and remove features, the stored preferences do not cause the Gecko " +
+      "Profiler interface to crash with invalid values."
+  );
   const {
-    getState,
-    adjustState,
-    revertPrefs,
-    initializeState,
-    DEFAULT_STACKWALK_FEATURE,
-  } = setupBackgroundJsm().forTestsOnly;
+    getRecordingPreferencesFromBrowser,
+    setRecordingPreferencesOnBrowser,
+    revertRecordingPreferences,
+  } = setupBackgroundJsm();
 
-  info("Manipulate the state.");
-  const state = getState();
-  state.features.stackwalk = !DEFAULT_STACKWALK_FEATURE;
-  state.features.UNKNOWN_FEATURE_FOR_TESTS = true;
-  adjustState(state);
-  adjustState(initializeState());
+  Assert.ok(
+    getRecordingPreferencesFromBrowser().features.includes("js"),
+    "The js preference is present initially."
+  );
 
-  Assert.equal(
-    getState().features.UNKNOWN_FEATURE_FOR_TESTS,
-    undefined,
+  const settings = getRecordingPreferencesFromBrowser();
+  settings.features = settings.features.filter(feature => feature !== "js");
+  settings.features.push("UNKNOWN_FEATURE_FOR_TESTS");
+  setRecordingPreferencesOnBrowser(settings);
+
+  Assert.ok(
+    !getRecordingPreferencesFromBrowser().features.includes(
+      "UNKNOWN_FEATURE_FOR_TESTS"
+    ),
     "The unknown feature is removed."
   );
-  Assert.equal(
-    getState().features.stackwalk,
-    !DEFAULT_STACKWALK_FEATURE,
-    "The stackwalk preference is still flipped from the default."
+  Assert.ok(
+    !getRecordingPreferencesFromBrowser().features.includes("js"),
+    "The js preference is still flipped from the default."
   );
-  revertPrefs();
+  revertRecordingPreferences();
 });

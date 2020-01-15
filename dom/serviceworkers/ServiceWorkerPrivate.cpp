@@ -20,7 +20,6 @@
 #include "nsINetworkInterceptController.h"
 #include "nsIPushErrorReporter.h"
 #include "nsISupportsImpl.h"
-#include "nsITimedChannel.h"
 #include "nsIUploadChannel2.h"
 #include "nsNetUtil.h"
 #include "nsProxyRelease.h"
@@ -124,7 +123,7 @@ ServiceWorkerPrivate::~ServiceWorkerPrivate() {
 
 namespace {
 
-class CheckScriptEvaluationWithCallback final : public WorkerRunnable {
+class CheckScriptEvaluationWithCallback final : public WorkerDebuggeeRunnable {
   nsMainThreadPtrHandle<ServiceWorkerPrivate> mServiceWorkerPrivate;
   nsMainThreadPtrHandle<KeepAliveToken> mKeepAliveToken;
 
@@ -142,7 +141,7 @@ class CheckScriptEvaluationWithCallback final : public WorkerRunnable {
       ServiceWorkerPrivate* aServiceWorkerPrivate,
       KeepAliveToken* aKeepAliveToken,
       LifeCycleEventCallback* aScriptEvaluationCallback)
-      : WorkerRunnable(aWorkerPrivate),
+      : WorkerDebuggeeRunnable(aWorkerPrivate, WorkerThreadModifyBusyCount),
         mServiceWorkerPrivate(new nsMainThreadPtrHolder<ServiceWorkerPrivate>(
             "CheckScriptEvaluationWithCallback::mServiceWorkerPrivate",
             aServiceWorkerPrivate)),
@@ -475,6 +474,7 @@ class SendMessageEventRunnable final : public ExtendableEventWorkerRunnable {
     bool deserializationFailed = rv.ErrorCodeIs(NS_ERROR_DOM_DATA_CLONE_ERR);
 
     if (!deserializationFailed && NS_WARN_IF(rv.Failed())) {
+      rv.SuppressException();
       return true;
     }
 
@@ -498,18 +498,14 @@ class SendMessageEventRunnable final : public ExtendableEventWorkerRunnable {
     init.mSource.SetValue().SetAsClient() =
         new Client(sgo, mClientInfoAndState);
 
-    rv = NS_OK;
+    rv.SuppressException();
     RefPtr<EventTarget> target = aWorkerPrivate->GlobalScope();
     RefPtr<ExtendableMessageEvent> extendableEvent =
         ExtendableMessageEvent::Constructor(
             target,
             deserializationFailed ? NS_LITERAL_STRING("messageerror")
                                   : NS_LITERAL_STRING("message"),
-            init, rv);
-    if (NS_WARN_IF(rv.Failed())) {
-      rv.SuppressException();
-      return false;
-    }
+            init);
 
     extendableEvent->SetTrusted(true);
 
@@ -1125,10 +1121,7 @@ class SendNotificationEventRunnable final
     nei.mCancelable = false;
 
     RefPtr<NotificationEvent> event =
-        NotificationEvent::Constructor(target, mEventName, nei, result);
-    if (NS_WARN_IF(result.Failed())) {
-      return false;
-    }
+        NotificationEvent::Constructor(target, mEventName, nei);
 
     event->SetTrusted(true);
 
@@ -1435,9 +1428,6 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
         mRequestMode, mRequestRedirect, mRequestCredentials, mReferrer,
         mReferrerPolicy, mContentPolicyType, mIntegrity);
     internalReq->SetBody(mUploadStream, mUploadStreamContentLength);
-    // For Telemetry, note that this Request object was created by a Fetch
-    // event.
-    internalReq->SetCreatedByFetchEvent();
 
     nsCOMPtr<nsIChannel> channel;
     nsresult rv = mInterceptedChannel->GetChannel(getter_AddRefs(channel));
@@ -1490,12 +1480,8 @@ class FetchEventRunnable : public ExtendableFunctionalEventWorkerRunnable,
     }
 
     init.mIsReload = mIsReload;
-    RefPtr<FetchEvent> event = FetchEvent::Constructor(
-        globalObj, NS_LITERAL_STRING("fetch"), init, result);
-    if (NS_WARN_IF(result.Failed())) {
-      result.SuppressException();
-      return false;
-    }
+    RefPtr<FetchEvent> event =
+        FetchEvent::Constructor(globalObj, NS_LITERAL_STRING("fetch"), init);
 
     event->PostInit(mInterceptedChannel, mRegistration, mScriptSpec);
     event->SetTrusted(true);
@@ -1755,6 +1741,8 @@ nsresult ServiceWorkerPrivate::SpawnWorkerIfNeeded(WakeUpReason aWhy,
   if (NS_WARN_IF(NS_FAILED(rv))) {
     return rv;
   }
+
+  info.mAgentClusterId = reg->AgentClusterId();
 
   AutoJSAPI jsapi;
   jsapi.Init();
@@ -2039,9 +2027,9 @@ void ServiceWorkerPrivate::NoteIdleWorkerCallback(nsITimer* aTimer) {
     // There sould only be EITHER mWorkerPrivate or mInner (but not both).
     MOZ_ASSERT(!(mWorkerPrivate && mInner));
 
-    // If we still have a workerPrivate at this point it means there are pending
-    // waitUntil promises. Wait a bit more until we forcibly terminate the
-    // worker.
+    // If we still have a living worker at this point it means that either there
+    // are pending waitUntil promises or the worker is doing some long-running
+    // computation. Wait a bit more until we forcibly terminate the worker.
     uint32_t timeout =
         Preferences::GetInt("dom.serviceWorkers.idle_extended_timeout");
     nsCOMPtr<nsITimerCallback> cb = new ServiceWorkerPrivateTimerCallback(

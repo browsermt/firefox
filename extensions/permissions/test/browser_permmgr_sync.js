@@ -1,96 +1,77 @@
-function addPerm(aURI, aName) {
-  Services.perms.add(
-    Services.io.newURI(aURI),
-    aName,
-    Services.perms.ALLOW_ACTION
+function addPerm(aOrigin, aName) {
+  let principal = Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+    aOrigin
   );
-}
-
-function hasPerm(aURI, aName) {
-  return (
-    Services.perms.testPermission(Services.io.newURI(aURI), aName) ==
+  Services.perms.addFromPrincipal(
+    principal,
+    aName,
     Services.perms.ALLOW_ACTION
   );
 }
 
 add_task(async function() {
   // Make sure that we get a new process for the tab which we create. This is
-  // important, becuase we wanto to assert information about the initial state
+  // important, because we want to assert information about the initial state
   // of the local permissions cache.
-  //
-  // We use the same approach here as was used in the e10s-multi localStorage
-  // tests (dom/tests/browser/browser_localStorage_e10s.js (bug )). This ensures
-  // that our tab has its own process.
-  //
-  // Bug 1345990 tracks implementing a better tool for ensuring this.
-  let keepAliveCount = 0;
-  try {
-    keepAliveCount = SpecialPowers.getIntPref("dom.ipc.keepProcessesAlive.web");
-  } catch (ex) {
-    // Then zero is correct.
-  }
-  let safeProcessCount = keepAliveCount + 2;
-  info(
-    "dom.ipc.keepProcessesAlive.web is " +
-      keepAliveCount +
-      ", boosting " +
-      "process count temporarily to " +
-      safeProcessCount
-  );
-  await SpecialPowers.pushPrefEnv({
-    set: [
-      ["dom.ipc.processCount", safeProcessCount],
-      ["dom.ipc.processCount.web", safeProcessCount],
-    ],
-  });
 
   addPerm("http://example.com", "perm1");
   addPerm("http://foo.bar.example.com", "perm2");
   addPerm("about:home", "perm3");
   addPerm("https://example.com", "perm4");
-  // NOTE: This permission is a preload permission, so it should be avaliable in the content process from startup.
+  // NOTE: This permission is a preload permission, so it should be available in
+  // the content process from startup.
   addPerm("https://somerandomwebsite.com", "document");
 
   await BrowserTestUtils.withNewTab(
-    { gBrowser, url: "about:blank" },
+    { gBrowser, url: "about:blank", forceNewProcess: true },
     async function(aBrowser) {
-      await ContentTask.spawn(aBrowser, null, async function() {
+      await SpecialPowers.spawn(aBrowser, [], async function() {
         // Before the load http URIs shouldn't have been sent down yet
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "perm1"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm1-1"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "perm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm2-1"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "perm3"
           ),
           Services.perms.ALLOW_ACTION,
           "perm3-1"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "perm4"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm4-1"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://somerandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://somerandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,
@@ -107,40 +88,50 @@ add_task(async function() {
 
         // After the load finishes, we should know about example.com, but not foo.bar.example.com
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "perm1"
           ),
           Services.perms.ALLOW_ACTION,
           "perm1-2"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "perm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm2-2"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "perm3"
           ),
           Services.perms.ALLOW_ACTION,
           "perm3-2"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "perm4"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm4-2"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://somerandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://somerandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,
@@ -154,84 +145,104 @@ add_task(async function() {
       addPerm("https://example.com", "newperm4");
       addPerm("https://someotherrandomwebsite.com", "document");
 
-      await ContentTask.spawn(aBrowser, null, async function() {
-        // The new permissions should be avaliable, but only for
+      await SpecialPowers.spawn(aBrowser, [], async function() {
+        // The new permissions should be available, but only for
         // http://example.com, and about:home
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "perm1"
           ),
           Services.perms.ALLOW_ACTION,
           "perm1-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "newperm1"
           ),
           Services.perms.ALLOW_ACTION,
           "newperm1-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "perm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm2-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "newperm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "newperm2-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "perm3"
           ),
           Services.perms.ALLOW_ACTION,
           "perm3-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "newperm3"
           ),
           Services.perms.ALLOW_ACTION,
           "newperm3-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "perm4"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm4-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "newperm4"
           ),
           Services.perms.UNKNOWN_ACTION,
           "newperm4-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://somerandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://somerandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,
           "document-3"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://someotherrandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://someotherrandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,
@@ -247,82 +258,102 @@ add_task(async function() {
         });
 
         // Now that the https subdomain has loaded, we want to make sure that the
-        // permissions are also avaliable for its parent domain, https://example.com!
+        // permissions are also available for its parent domain, https://example.com!
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "perm1"
           ),
           Services.perms.ALLOW_ACTION,
           "perm1-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://example.com"
+            ),
             "newperm1"
           ),
           Services.perms.ALLOW_ACTION,
           "newperm1-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "perm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "perm2-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("http://foo.bar.example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "http://foo.bar.example.com"
+            ),
             "newperm2"
           ),
           Services.perms.UNKNOWN_ACTION,
           "newperm2-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "perm3"
           ),
           Services.perms.ALLOW_ACTION,
           "perm3-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("about:home"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "about:home"
+            ),
             "newperm3"
           ),
           Services.perms.ALLOW_ACTION,
           "newperm3-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "perm4"
           ),
           Services.perms.ALLOW_ACTION,
           "perm4-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://example.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://example.com"
+            ),
             "newperm4"
           ),
           Services.perms.ALLOW_ACTION,
           "newperm4-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://somerandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://somerandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,
           "document-4"
         );
         is(
-          Services.perms.testPermission(
-            Services.io.newURI("https://someotherrandomwebsite.com"),
+          Services.perms.testPermissionFromPrincipal(
+            Services.scriptSecurityManager.createContentPrincipalFromOrigin(
+              "https://someotherrandomwebsite.com"
+            ),
             "document"
           ),
           Services.perms.ALLOW_ACTION,

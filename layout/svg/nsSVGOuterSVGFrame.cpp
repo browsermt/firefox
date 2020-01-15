@@ -134,7 +134,7 @@ void nsSVGOuterSVGFrame::Init(nsIContent* aContent, nsContainerFrame* aParent,
           bool dependsOnIntrinsicSize = DependsOnIntrinsicSize(embeddingFrame);
           if (dependsOnIntrinsicSize ||
               embeddingFrame->StylePosition()->mObjectFit !=
-                  NS_STYLE_OBJECT_FIT_FILL) {
+                  StyleObjectFit::Fill) {
             // Looks like this document is loading after the embedding element
             // has had its first reflow, and it cares about our intrinsic size
             // (either for determining its own size, or for sizing/positioning
@@ -708,7 +708,7 @@ nsresult nsSVGOuterSVGFrame::AttributeChanged(int32_t aNameSpaceID,
         bool dependsOnIntrinsicSize = DependsOnIntrinsicSize(embeddingFrame);
         if (dependsOnIntrinsicSize ||
             embeddingFrame->StylePosition()->mObjectFit !=
-                NS_STYLE_OBJECT_FIT_FILL) {
+                StyleObjectFit::Fill) {
           // Tell embeddingFrame's presShell it needs to be reflowed (which
           // takes care of reflowing us too). And if it depends on our
           // intrinsic size, then we need to invalidate its intrinsic sizes
@@ -764,12 +764,20 @@ void nsSVGOuterSVGFrame::BuildDisplayList(nsDisplayListBuilder* aBuilder,
 
   DisplayBorderBackgroundOutline(aBuilder, aLists);
 
+  nsRect visibleRect = aBuilder->GetVisibleRect();
+  nsRect dirtyRect = aBuilder->GetDirtyRect();
+
   // Per-spec, we always clip root-<svg> even when 'overflow' has its initial
   // value of 'visible'. See also the "visual overflow" comments in Reflow.
   DisplayListClipState::AutoSaveRestore autoSR(aBuilder);
   if (mIsRootContent || StyleDisplay()->IsScrollableOverflow()) {
     autoSR.ClipContainingBlockDescendantsToContentBox(aBuilder, this);
+    visibleRect = visibleRect.Intersect(GetContentRectRelativeToSelf());
+    dirtyRect = dirtyRect.Intersect(GetContentRectRelativeToSelf());
   }
+
+  nsDisplayListBuilder::AutoBuildingDisplayList building(
+      aBuilder, this, visibleRect, dirtyRect);
 
   if ((aBuilder->IsForEventDelivery() &&
        NS_SVGDisplayListHitTestingEnabled()) ||

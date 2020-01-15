@@ -23,6 +23,7 @@ interface URI;
 interface nsIDocShell;
 interface nsILoadGroup;
 interface nsIReferrerInfo;
+interface nsIPermissionDelegateHandler;
 interface XULCommandDispatcher;
 
 enum VisibilityState { "hidden", "visible" };
@@ -36,8 +37,11 @@ dictionary ElementCreationOptions {
 };
 
 /* https://dom.spec.whatwg.org/#interface-document */
-[Constructor]
+[Exposed=Window]
 interface Document : Node {
+  [Throws]
+  constructor();
+
   [Throws]
   readonly attribute DOMImplementation implementation;
   [Pure, Throws, BinaryName="documentURIFromJS", NeedsCallerType]
@@ -284,24 +288,22 @@ partial interface Document {
 partial interface Document {
   // Note: Per spec the 'S' in these two is lowercase, but the "Moz"
   // versions have it uppercase.
-  [LenientSetter, Unscopable, Func="Document::IsUnprefixedFullscreenEnabled"]
+  [LenientSetter, Unscopable]
   readonly attribute boolean fullscreen;
   [BinaryName="fullscreen"]
   readonly attribute boolean mozFullScreen;
-  [LenientSetter, Func="Document::IsUnprefixedFullscreenEnabled", NeedsCallerType]
+  [LenientSetter, NeedsCallerType]
   readonly attribute boolean fullscreenEnabled;
   [BinaryName="fullscreenEnabled", NeedsCallerType]
   readonly attribute boolean mozFullScreenEnabled;
 
-  [Throws, Func="Document::IsUnprefixedFullscreenEnabled"]
+  [Throws]
   Promise<void> exitFullscreen();
   [Throws, BinaryName="exitFullscreen"]
   Promise<void> mozCancelFullScreen();
 
   // Events handlers
-  [Func="Document::IsUnprefixedFullscreenEnabled"]
   attribute EventHandler onfullscreenchange;
-  [Func="Document::IsUnprefixedFullscreenEnabled"]
   attribute EventHandler onfullscreenerror;
 };
 
@@ -315,9 +317,16 @@ partial interface Document {
   attribute EventHandler onpointerlockerror;
 };
 
+// Mozilla-internal document extensions specific to error pages.
 partial interface Document {
+  [Func="Document::CallerIsTrustedAboutCertError"]
+  Promise<any> addCertException(boolean isTemporary);
+
   [Func="Document::CallerIsTrustedAboutCertError", Throws]
   FailedCertSecurityInfo getFailedCertSecurityInfo();
+
+  [Func="Document::CallerIsTrustedAboutNetError", Throws]
+  NetErrorInfo getNetErrorInfo();
 };
 
 // https://w3c.github.io/page-visibility/#extensions-to-the-document-interface
@@ -359,8 +368,6 @@ partial interface Document {
 partial interface Document {
   [Func="Document::AreWebAnimationsTimelinesEnabled"]
   readonly attribute DocumentTimeline timeline;
-  [Func="Document::IsWebAnimationsGetAnimationsEnabled"]
-  sequence<Animation> getAnimations();
 };
 
 // https://svgwg.org/svg2-draft/struct.html#InterfaceDocumentExtensions
@@ -371,17 +378,6 @@ partial interface Document {
 
 //  Mozilla extensions of various sorts
 partial interface Document {
-  // XBL support.  Wish we could make these [ChromeOnly], but
-  // that would likely break bindings running with the page principal.
-  [Func="IsChromeOrXBL"]
-  NodeList? getAnonymousNodes(Element elt);
-  [Func="IsChromeOrXBL"]
-  Element? getAnonymousElementByAttribute(Element elt, DOMString attrName,
-                                          DOMString attrValue);
-  [Func="IsChromeOrXBL"]
-  Element? getBindingParent(Node node);
-  [Throws, Func="IsChromeOrXBL", NeedsSubjectPrincipal]
-  void loadBindingDocument(DOMString documentURL);
   // Creates a new XUL element regardless of the document's default type.
   [CEReactions, NewObject, Throws, Func="IsChromeOrXBL"]
   Element createXULElement(DOMString localName, optional (ElementCreationOptions or DOMString) options = {});
@@ -567,6 +563,8 @@ partial interface Document {
   readonly attribute boolean hasBeenUserGestureActivated;
   [ChromeOnly]
   readonly attribute boolean hasValidTransientUserGestureActivation;
+  [ChromeOnly]
+  boolean consumeTransientUserGestureActivation();
 };
 
 // Extension to give chrome JS the ability to set an event handler which is
@@ -609,34 +607,20 @@ partial interface Document {
   [Func="Document::DocumentSupportsL10n"] readonly attribute DocumentL10n? l10n;
 };
 
-Document implements XPathEvaluator;
+Document includes XPathEvaluatorMixin;
 Document includes GlobalEventHandlers;
 Document includes DocumentAndElementEventHandlers;
-Document implements TouchEventHandlers;
-Document implements ParentNode;
-Document implements OnErrorEventHandlerForNodes;
-Document implements GeometryUtils;
-Document implements FontFaceSource;
-Document implements DocumentOrShadowRoot;
+Document includes TouchEventHandlers;
+Document includes ParentNode;
+Document includes OnErrorEventHandlerForNodes;
+Document includes GeometryUtils;
+Document includes  FontFaceSource;
+Document includes DocumentOrShadowRoot;
 
 // https://w3c.github.io/webappsec-feature-policy/#idl-index
 partial interface Document {
     [SameObject, Pref="dom.security.featurePolicy.webidl.enabled"]
     readonly attribute FeaturePolicy featurePolicy;
-};
-
-/**
- * Document extensions to support devtools.
- */
-partial interface Document {
-  // Is the Document embedded in a Responsive Design Mode pane. This property
-  // is not propegated to descendant Documents upon settting.
-  [ChromeOnly]
-  attribute boolean inRDMPane;
-  // Extension to give chrome JS the ability to set the window screen
-  // orientation while in RDM.
-  [ChromeOnly]
-  void setRDMPaneOrientation(OrientationType type, float rotationAngle);
 };
 
 // Extension to give chrome JS the ability to specify a non-default keypress
@@ -692,4 +676,10 @@ partial interface Document {
 partial interface Document {
   [ChromeOnly, BinaryName="setUserHasInteracted"]
   void userInteractionForTesting();
+};
+
+// Extension for permission delegation.
+partial interface Document {
+  [ChromeOnly, Pure]
+  readonly attribute nsIPermissionDelegateHandler permDelegateHandler;
 };

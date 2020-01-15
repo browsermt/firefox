@@ -34,6 +34,16 @@ loader.lazyRequireGetter(
   "devtools/server/actors/object/stringifiers"
 );
 
+// ContentDOMReference requires ChromeUtils, which isn't available in worker context.
+if (!isWorker) {
+  loader.lazyRequireGetter(
+    this,
+    "ContentDOMReference",
+    "resource://gre/modules/ContentDOMReference.jsm",
+    true
+  );
+}
+
 const {
   getArrayLength,
   getPromiseState,
@@ -78,7 +88,6 @@ const proto = {
       getGripDepth,
       incrementGripDepth,
       decrementGripDepth,
-      getGlobalDebugObject,
     },
     conn
   ) {
@@ -98,9 +107,7 @@ const proto = {
       getGripDepth,
       incrementGripDepth,
       decrementGripDepth,
-      getGlobalDebugObject,
     };
-    this._originalDescriptors = new Map();
   },
 
   rawValue: function() {
@@ -108,72 +115,15 @@ const proto = {
   },
 
   addWatchpoint(property, label, watchpointType) {
-    // We promote the object actor to the thread pool
-    // so that it lives for the lifetime of the watchpoint.
-    this.thread.threadObjectGrip(this);
-
-    if (this._originalDescriptors.has(property)) {
-      return;
-    }
-    const desc = this.obj.getOwnPropertyDescriptor(property);
-
-    if (desc.set || desc.get) {
-      return;
-    }
-
-    this._originalDescriptors.set(property, { desc, watchpointType });
-
-    const pauseAndRespond = () => {
-      const frame = this.thread.dbg.getNewestFrame();
-      this.thread._pauseAndRespond(frame, {
-        type: "watchpoint",
-        message: label,
-      });
-    };
-
-    if (watchpointType === "get") {
-      this.obj.defineProperty(property, {
-        configurable: desc.configurable,
-        enumerable: desc.enumerable,
-        set: this.obj.makeDebuggeeValue(v => {
-          desc.value = v;
-        }),
-        get: this.obj.makeDebuggeeValue(() => {
-          pauseAndRespond();
-          return desc.value;
-        }),
-      });
-    }
-
-    if (watchpointType === "set") {
-      this.obj.defineProperty(property, {
-        configurable: desc.configurable,
-        enumerable: desc.enumerable,
-        set: this.obj.makeDebuggeeValue(v => {
-          pauseAndRespond();
-          desc.value = v;
-        }),
-        get: this.obj.makeDebuggeeValue(v => {
-          return desc.value;
-        }),
-      });
-    }
+    this.thread.addWatchpoint(this, { property, label, watchpointType });
   },
 
   removeWatchpoint(property) {
-    if (!this._originalDescriptors.has(property)) {
-      return;
-    }
-
-    const desc = this._originalDescriptors.get(property).desc;
-    this._originalDescriptors.delete(property);
-    this.obj.defineProperty(property, desc);
+    this.thread.removeWatchpoint(this, property);
   },
 
   removeWatchpoints() {
-    this._originalDescriptors.forEach(property =>
-      this.removeWatchpoint(property)
-    );
+    this.thread.removeWatchpoint(this);
   },
 
   /**
@@ -191,6 +141,7 @@ const proto = {
       g.class = "CPOW";
       return g;
     }
+
     const unwrapped = DevToolsUtils.unwrap(this.obj);
     if (unwrapped === undefined) {
       // Objects belonging to an invisible-to-debugger compartment might be proxies,
@@ -198,6 +149,7 @@ const proto = {
       g.class = "InvisibleToDebugger: " + this.obj.class;
       return g;
     }
+
     if (unwrapped && unwrapped.isProxy) {
       // Proxy objects can run traps when accessed, so just create a preview with
       // the target and the handler.
@@ -208,45 +160,78 @@ const proto = {
       return g;
     }
 
-    // If the debuggee does not subsume the object's compartment, most properties won't
-    // be accessible. Cross-orgin Window and Location objects might expose some, though.
-    // Change the displayed class, but when creating the preview use the original one.
-    if (unwrapped === null) {
-      g.class = "Restricted";
-    } else {
-      g.class = this.obj.class;
-    }
+    const ownPropertyLength = this._getOwnPropertyLength();
+
+    Object.assign(g, {
+      // If the debuggee does not subsume the object's compartment, most properties won't
+      // be accessible. Cross-orgin Window and Location objects might expose some, though.
+      // Change the displayed class, but when creating the preview use the original one.
+      class: unwrapped === null ? "Restricted" : this.obj.class,
+      ownPropertyLength: Number.isFinite(ownPropertyLength)
+        ? ownPropertyLength
+        : undefined,
+      extensible: this.obj.isExtensible(),
+      frozen: this.obj.isFrozen(),
+      sealed: this.obj.isSealed(),
+    });
 
     this.hooks.incrementGripDepth();
-
-    g.extensible = this.obj.isExtensible();
-    g.frozen = this.obj.isFrozen();
-    g.sealed = this.obj.isSealed();
 
     if (g.class == "Promise") {
       g.promiseState = this._createPromiseState();
     }
 
-    // FF40+: Allow to know how many properties an object has to lazily display them
-    // when there is a bunch.
-    if (isTypedArray(g)) {
-      // Bug 1348761: getOwnPropertyNames is unnecessary slow on TypedArrays
-      g.ownPropertyLength = getArrayLength(this.obj);
-    } else if (isStorage(g)) {
-      g.ownPropertyLength = getStorageLength(this.obj);
-    } else if (isReplaying) {
-      // When replaying we can get the number of properties directly, to avoid
-      // needing to enumerate all of them.
-      g.ownPropertyLength = this.obj.getOwnPropertyNamesCount();
-    } else {
-      try {
-        g.ownPropertyLength = this.obj.getOwnPropertyNames().length;
-      } catch (err) {
-        // The above can throw when the debuggee does not subsume the object's
-        // compartment, or for some WrappedNatives like Cu.Sandbox.
-      }
+    if (g.class == "Function") {
+      g.isClassConstructor = this.obj.isClassConstructor;
     }
 
+    const raw = this.getRawObject();
+    this._populateGripPreview(g, raw);
+    this.hooks.decrementGripDepth();
+
+    if (raw && Node.isInstance(raw) && ContentDOMReference) {
+      // ContentDOMReference.get takes a DOM element and returns an object with
+      // its browsing context id, as well as a unique identifier. We are putting it in
+      // the grip here in order to be able to retrieve the node later, potentially from a
+      // different DebuggerServer running in the same process.
+      // If ContentDOMReference.get throws, we simply don't add the property to the grip.
+      try {
+        g.contentDomReference = ContentDOMReference.get(raw);
+      } catch (e) {}
+    }
+
+    return g;
+  },
+
+  _getOwnPropertyLength: function() {
+    // FF40+: Allow to know how many properties an object has to lazily display them
+    // when there is a bunch.
+    if (isTypedArray(this.obj)) {
+      // Bug 1348761: getOwnPropertyNames is unnecessary slow on TypedArrays
+      return getArrayLength(this.obj);
+    }
+
+    if (isStorage(this.obj)) {
+      return getStorageLength(this.obj);
+    }
+
+    if (isReplaying) {
+      // When replaying we can get the number of properties directly, to avoid
+      // needing to enumerate all of them.
+      return this.obj.getOwnPropertyNamesCount();
+    }
+
+    try {
+      return this.obj.getOwnPropertyNames().length;
+    } catch (err) {
+      // The above can throw when the debuggee does not subsume the object's
+      // compartment, or for some WrappedNatives like Cu.Sandbox.
+    }
+
+    return null;
+  },
+
+  getRawObject: function() {
     let raw = this.obj.unsafeDereference();
 
     // If Cu is not defined, we are running on a worker thread, where xrays
@@ -260,19 +245,25 @@ const proto = {
       raw = null;
     }
 
-    for (const fn of previewers[this.obj.class] || previewers.Object) {
+    return raw;
+  },
+
+  /**
+   * Populate the `preview` property on `grip` given its type.
+   */
+  _populateGripPreview: function(grip, raw) {
+    for (const previewer of previewers[this.obj.class] || previewers.Object) {
       try {
-        if (fn(this, g, raw)) {
-          break;
+        const previewerResult = previewer(this, grip, raw);
+        if (previewerResult) {
+          return;
         }
       } catch (e) {
-        const msg = "ObjectActor.prototype.grip previewer function";
+        const msg =
+          "ObjectActor.prototype._populateGripPreview previewer function";
         DevToolsUtils.reportException(msg, e);
       }
     }
-
-    this.hooks.decrementGripDepth();
-    return g;
   },
 
   /**
@@ -431,7 +422,7 @@ const proto = {
    *         An object that maps property names to safe getter descriptors as
    *         defined by the remote debugging protocol.
    */
-  /* eslint-disable complexity */
+  // eslint-disable-next-line complexity
   _findSafeGetterValues: function(ownProperties, limit = 0) {
     const safeGetterValues = Object.create(null);
     let obj = this.obj;
@@ -483,7 +474,12 @@ const proto = {
           continue;
         }
 
-        const result = getter.call(this.obj);
+        let result;
+        if (isReplaying && this.obj.replayHasPropertyValue(name)) {
+          result = this.obj.replayPropertyValue(name);
+        } else {
+          result = getter.call(this.obj);
+        }
         if (!result || "throw" in result) {
           continue;
         }
@@ -535,7 +531,6 @@ const proto = {
 
     return safeGetterValues;
   },
-  /* eslint-enable complexity */
 
   /**
    * Find the safe getters for a given Debugger.Object. Safe getters are native
@@ -789,15 +784,17 @@ const proto = {
       configurable: desc.configurable,
       enumerable: desc.enumerable,
     };
+    const obj = this.rawValue();
 
     if ("value" in desc) {
       retval.writable = desc.writable;
       retval.value = this.hooks.createValueGrip(desc.value);
-    } else if (this._originalDescriptors.has(name)) {
-      const watchpointType = this._originalDescriptors.get(name).watchpointType;
-      desc = this._originalDescriptors.get(name).desc;
-      retval.value = this.hooks.createValueGrip(desc.value);
-      retval.watchpoint = watchpointType;
+    } else if (this.thread.getWatchpoint(obj, name.toString())) {
+      const watchpoint = this.thread.getWatchpoint(obj, name.toString());
+      retval.value = this.hooks.createValueGrip(
+        this.obj.makeDebuggeeValue(watchpoint.desc.value)
+      );
+      retval.watchpoint = watchpoint.watchpointType;
     } else {
       if ("get" in desc) {
         retval.get = this.hooks.createValueGrip(desc.get);
@@ -870,144 +867,6 @@ const proto = {
   },
 
   /**
-   * Handle a protocol request to get the list of dependent promises of a
-   * promise.
-   *
-   * @return object
-   *         Returns an object containing an array of object grips of the
-   *         dependent promises
-   */
-  dependentPromises: function() {
-    if (this.obj.class != "Promise") {
-      return this.throwError(
-        "objectNotPromise",
-        "'dependentPromises' request is only valid for grips with a 'Promise' class."
-      );
-    }
-
-    const promises = this.obj.promiseDependentPromises.map(p =>
-      this.hooks.createValueGrip(p)
-    );
-
-    return { promises };
-  },
-
-  /**
-   * Handle a protocol request to get the allocation stack of a promise.
-   */
-  allocationStack: function() {
-    if (this.obj.class != "Promise") {
-      return this.throwError(
-        "objectNotPromise",
-        "'allocationStack' request is only valid for grips with a 'Promise' class."
-      );
-    }
-
-    let stack = this.obj.promiseAllocationSite;
-    const allocationStacks = [];
-
-    while (stack) {
-      if (stack.source) {
-        const source = this._getSourceOriginalLocation(stack);
-
-        if (source) {
-          allocationStacks.push(source);
-        }
-      }
-      stack = stack.parent;
-    }
-
-    return Promise.all(allocationStacks);
-  },
-
-  /**
-   * Handle a protocol request to get the fulfillment stack of a promise.
-   */
-  fulfillmentStack: function() {
-    if (this.obj.class != "Promise") {
-      return this.throwError(
-        "objectNotPromise",
-        "'fulfillmentStack' request is only valid for grips with a 'Promise' class."
-      );
-    }
-
-    let stack = this.obj.promiseResolutionSite;
-    const fulfillmentStacks = [];
-
-    while (stack) {
-      if (stack.source) {
-        const source = this._getSourceOriginalLocation(stack);
-
-        if (source) {
-          fulfillmentStacks.push(source);
-        }
-      }
-      stack = stack.parent;
-    }
-
-    return Promise.all(fulfillmentStacks);
-  },
-
-  /**
-   * Handle a protocol request to get the rejection stack of a promise.
-   */
-  rejectionStack: function() {
-    if (this.obj.class != "Promise") {
-      return this.throwError(
-        "objectNotPromise",
-        "'rejectionStack' request is only valid for grips with a 'Promise' class."
-      );
-    }
-
-    let stack = this.obj.promiseResolutionSite;
-    const rejectionStacks = [];
-
-    while (stack) {
-      if (stack.source) {
-        const source = this._getSourceOriginalLocation(stack);
-
-        if (source) {
-          rejectionStacks.push(source);
-        }
-      }
-      stack = stack.parent;
-    }
-
-    return Promise.all(rejectionStacks);
-  },
-
-  /**
-   * Helper function for fetching the source location of a SavedFrame stack.
-   *
-   * @param SavedFrame stack
-   *        The promise allocation stack frame
-   * @return object
-   *         Returns an object containing the source location of the SavedFrame
-   *         stack.
-   */
-  _getSourceOriginalLocation: function(stack) {
-    let source;
-
-    // Catch any errors if the source actor cannot be found
-    try {
-      source = this.hooks.sources().getSourceActorsByURL(stack.source)[0];
-    } catch (e) {
-      // ignored
-    }
-
-    if (!source) {
-      return null;
-    }
-
-    return {
-      source,
-      line: stack.line,
-      column: stack.column,
-      functionDisplayName: stack.functionDisplayName,
-    };
-  },
-
-  /**
    * Handle a protocol request to get the target and handler internal slots of a proxy.
    */
   proxySlots: function() {
@@ -1031,9 +890,7 @@ const proto = {
    * Release the actor, when it isn't needed anymore.
    * Protocol.js uses this release method to call the destroy method.
    */
-  release: function() {
-    this.removeWatchpoints();
-  },
+  release: function() {},
 };
 
 exports.ObjectActor = protocol.ActorClassWithSpec(objectSpec, proto);

@@ -16,12 +16,8 @@
 #include "nsContentList.h"
 #include "mozilla/dom/HTMLInputElement.h"
 #include "mozilla/dom/HTMLTextAreaElement.h"
-#include "nsIEditor.h"
 #include "nsIFormControl.h"
 #include "nsIPersistentProperties2.h"
-#include "nsISelectionController.h"
-#include "nsIServiceManager.h"
-#include "nsITextControlElement.h"
 #include "nsITextControlFrame.h"
 #include "nsNameSpaceManager.h"
 #include "mozilla/dom/ScriptSettings.h"
@@ -373,13 +369,20 @@ void HTMLTextFieldAccessible::ActionNameAt(uint8_t aIndex, nsAString& aName) {
 bool HTMLTextFieldAccessible::DoAction(uint8_t aIndex) const {
   if (aIndex != 0) return false;
 
-  TakeFocus();
+  if (FocusMgr()->IsFocused(this)) {
+    // This already has focus, so TakeFocus()will do nothing. However, the user
+    // might be activating this element because they dismissed a touch keyboard
+    // and want to bring it back.
+    DoCommand();
+  } else {
+    TakeFocus();
+  }
   return true;
 }
 
 already_AddRefed<TextEditor> HTMLTextFieldAccessible::GetEditor() const {
-  nsCOMPtr<nsITextControlElement> textControlElement =
-      do_QueryInterface(mContent);
+  RefPtr<TextControlElement> textControlElement =
+      TextControlElement::FromNodeOrNull(mContent);
   if (!textControlElement) {
     return nullptr;
   }
@@ -410,9 +413,9 @@ HTMLFileInputAccessible::HTMLFileInputAccessible(nsIContent* aContent,
 }
 
 role HTMLFileInputAccessible::NativeRole() const {
-  // JAWS wants a text container, others don't mind. No specific role in
-  // AT APIs.
-  return roles::TEXT_CONTAINER;
+  // No specific role in AT APIs. We use GROUPING so that the label will be
+  // reported by screen readers when focus enters this control .
+  return roles::GROUPING;
 }
 
 nsresult HTMLFileInputAccessible::HandleAccEvent(AccEvent* aEvent) {
@@ -437,6 +440,23 @@ nsresult HTMLFileInputAccessible::HandleAccEvent(AccEvent* aEvent) {
   }
 
   return NS_OK;
+}
+
+Accessible* HTMLFileInputAccessible::CurrentItem() const {
+  // Allow aria-activedescendant to override.
+  if (Accessible* item = HyperTextAccessibleWrap::CurrentItem()) {
+    return item;
+  }
+
+  // The HTML file input itself gets DOM focus, not the button inside it.
+  // For a11y, we want the button to get focus.
+  Accessible* button = FirstChild();
+  if (!button) {
+    MOZ_ASSERT_UNREACHABLE("File input doesn't contain a button");
+    return nullptr;
+  }
+  MOZ_ASSERT(button->IsButton());
+  return button;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -26,7 +26,6 @@
 #include "nsIUploadChannel2.h"
 #include "nsIProgressEventSink.h"
 #include "nsIURI.h"
-#include "nsIEffectiveTLDService.h"
 #include "nsIStringEnumerator.h"
 #include "nsISupportsPriority.h"
 #include "nsIClassOfService.h"
@@ -34,7 +33,6 @@
 #include "nsIApplicationCache.h"
 #include "nsIResumableChannel.h"
 #include "nsITraceableChannel.h"
-#include "nsILoadContext.h"
 #include "nsILoadInfo.h"
 #include "mozilla/net/NeckoCommon.h"
 #include "nsThreadUtils.h"
@@ -141,6 +139,8 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD SetLoadGroup(nsILoadGroup* aLoadGroup) override;
   NS_IMETHOD GetLoadFlags(nsLoadFlags* aLoadFlags) override;
   NS_IMETHOD SetLoadFlags(nsLoadFlags aLoadFlags) override;
+  NS_IMETHOD GetTRRMode(nsIRequest::TRRMode* aTRRMode) override;
+  NS_IMETHOD SetTRRMode(nsIRequest::TRRMode aTRRMode) override;
   NS_IMETHOD SetDocshellUserAgentOverride();
 
   // nsIChannel
@@ -173,6 +173,7 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD Open(nsIInputStream** aResult) override;
   NS_IMETHOD GetBlockAuthPrompt(bool* aValue) override;
   NS_IMETHOD SetBlockAuthPrompt(bool aValue) override;
+  NS_IMETHOD GetCanceled(bool* aCanceled) override;
 
   // nsIEncodedChannel
   NS_IMETHOD GetApplyConversion(bool* value) override;
@@ -219,12 +220,10 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD GetResponseStatusText(nsACString& aValue) override;
   NS_IMETHOD GetRequestSucceeded(bool* aValue) override;
   NS_IMETHOD RedirectTo(nsIURI* newURI) override;
-  NS_IMETHOD SwitchProcessTo(mozilla::dom::Promise* aBrowserParent,
-                             uint64_t aIdentifier) override;
-  NS_IMETHOD HasCrossOriginOpenerPolicyMismatch(bool* aMismatch) override;
   NS_IMETHOD UpgradeToSecure() override;
   NS_IMETHOD GetRequestContextID(uint64_t* aRCID) override;
   NS_IMETHOD GetTransferSize(uint64_t* aTransferSize) override;
+  NS_IMETHOD GetRequestSize(uint64_t* aRequestSize) override;
   NS_IMETHOD GetDecodedBodySize(uint64_t* aDecodedBodySize) override;
   NS_IMETHOD GetEncodedBodySize(uint64_t* aEncodedBodySize) override;
   NS_IMETHOD SetRequestContextID(uint64_t aRCID) override;
@@ -237,17 +236,15 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD SetTopLevelContentWindowId(uint64_t aContentWindowId) override;
   NS_IMETHOD GetTopLevelOuterContentWindowId(uint64_t* aWindowId) override;
   NS_IMETHOD SetTopLevelOuterContentWindowId(uint64_t aWindowId) override;
-  NS_IMETHOD IsTrackingResource(bool* aIsTrackingResource) override;
-  NS_IMETHOD IsThirdPartyTrackingResource(bool* aIsTrackingResource) override;
-  NS_IMETHOD GetClassificationFlags(uint32_t* aIsClassificationFlags) override;
-  NS_IMETHOD GetFirstPartyClassificationFlags(
-      uint32_t* aIsClassificationFlags) override;
-  NS_IMETHOD GetThirdPartyClassificationFlags(
-      uint32_t* aIsClassificationFlags) override;
+
   NS_IMETHOD GetFlashPluginState(
       nsIHttpChannel::FlashPluginState* aState) override;
 
-  using nsIHttpChannel::IsThirdPartyTrackingResource;
+  using nsIClassifiedChannel::IsThirdPartyTrackingResource;
+
+  virtual void SetSource(UniqueProfilerBacktrace aSource) override {
+    mSource = std::move(aSource);
+  }
 
   // nsIHttpChannelInternal
   NS_IMETHOD GetDocumentURI(nsIURI** aDocumentURI) override;
@@ -259,7 +256,6 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD SetThirdPartyFlags(uint32_t aForce) override;
   NS_IMETHOD GetForceAllowThirdPartyCookie(bool* aForce) override;
   NS_IMETHOD SetForceAllowThirdPartyCookie(bool aForce) override;
-  NS_IMETHOD GetCanceled(bool* aCanceled) override;
   NS_IMETHOD GetChannelIsForDownload(bool* aChannelIsForDownload) override;
   NS_IMETHOD SetChannelIsForDownload(bool aChannelIsForDownload) override;
   NS_IMETHOD SetCacheKeysRedirectChain(nsTArray<nsCString>* cacheKeys) override;
@@ -318,15 +314,15 @@ class HttpBaseChannel : public nsHashPropertyBag,
   NS_IMETHOD CancelByURLClassifier(nsresult aErrorCode) override;
   virtual void SetIPv4Disabled(void) override;
   virtual void SetIPv6Disabled(void) override;
-  NS_IMETHOD GetCrossOriginOpenerPolicy(
+  NS_IMETHOD ComputeCrossOriginOpenerPolicy(
       nsILoadInfo::CrossOriginOpenerPolicy aInitiatorPolicy,
       nsILoadInfo::CrossOriginOpenerPolicy* aOutPolicy) override;
-  virtual bool GetHasSandboxedAuxiliaryNavigations() override {
-    return mHasSandboxedNavigations;
+  virtual bool GetHasNonEmptySandboxingFlag() override {
+    return mHasNonEmptySandboxingFlag;
   }
-  virtual void SetHasSandboxedAuxiliaryNavigations(
-      bool aHasSandboxedAuxiliaryNavigations) override {
-    mHasSandboxedNavigations = aHasSandboxedAuxiliaryNavigations;
+  virtual void SetHasNonEmptySandboxingFlag(
+      bool aHasNonEmptySandboxingFlag) override {
+    mHasNonEmptySandboxingFlag = aHasNonEmptySandboxingFlag;
   }
 
   inline void CleanRedirectCacheChainIfNecessary() {
@@ -452,8 +448,11 @@ class HttpBaseChannel : public nsHashPropertyBag,
     mUploadStreamHasHeaders = hasHeaders;
   }
 
-  virtual nsresult SetReferrerHeader(const nsACString& aReferrer) {
-    ENSURE_CALLED_BEFORE_CONNECT();
+  virtual nsresult SetReferrerHeader(const nsACString& aReferrer,
+                                     bool aRespectBeforeConnect = true) {
+    if (aRespectBeforeConnect) {
+      ENSURE_CALLED_BEFORE_CONNECT();
+    }
     return mRequestHead.SetHeader(nsHttp::Referer, aReferrer);
   }
 
@@ -462,10 +461,7 @@ class HttpBaseChannel : public nsHashPropertyBag,
     return mRequestHead.ClearHeader(nsHttp::Referer);
   }
 
-  MOZ_MUST_USE nsresult SetTopWindowURI(nsIURI* aTopWindowURI) {
-    mTopWindowURI = aTopWindowURI;
-    return NS_OK;
-  }
+  void SetTopWindowURI(nsIURI* aTopWindowURI) { mTopWindowURI = aTopWindowURI; }
 
   void SetContentBlockingAllowListPrincipal(nsIPrincipal* aPrincipal) {
     mContentBlockingAllowListPrincipal = aPrincipal;
@@ -475,8 +471,8 @@ class HttpBaseChannel : public nsHashPropertyBag,
   // Pass true for aSetOriginal if this is a new referrer and should
   // overwrite the 'original' value, false if this is a mutation (like
   // stripping the path).
-  nsresult SetReferrerInfo(nsIReferrerInfo* aReferrerInfo, bool aClone,
-                           bool aCompute, bool aSetOriginal = true);
+  nsresult SetReferrerInfoInternal(nsIReferrerInfo* aReferrerInfo, bool aClone,
+                                   bool aCompute, bool aRespectBeforeConnect);
 
   struct ReplacementChannelConfig {
     ReplacementChannelConfig() = default;
@@ -490,22 +486,37 @@ class HttpBaseChannel : public nsHashPropertyBag,
     Maybe<nsCString> method;
     nsCOMPtr<nsIReferrerInfo> referrerInfo;
     Maybe<dom::TimedChannelInfo> timedChannel;
+    nsCOMPtr<nsIInputStream> uploadStream;
+    bool uploadStreamHasHeaders;
+    Maybe<nsCString> contentType;
+    Maybe<nsCString> contentLength;
 
     dom::ReplacementChannelConfigInit Serialize();
+  };
+
+  enum class ReplacementReason {
+    Redirect,
+    InternalRedirect,
+    DocumentChannel,
   };
 
   // Create a ReplacementChannelConfig object that can be used to duplicate the
   // current channel.
   ReplacementChannelConfig CloneReplacementChannelConfig(
-      bool aPreserveMethod, uint32_t aRedirectFlags,
+      bool aPreserveMethod, uint32_t aRedirectFlags, ReplacementReason aReason,
       uint32_t aExtraLoadFlags = 0);
 
   static void ConfigureReplacementChannel(nsIChannel*,
-                                          const ReplacementChannelConfig&);
+                                          const ReplacementChannelConfig&,
+                                          ReplacementReason);
 
   // Called before we create the redirect target channel.
   already_AddRefed<nsILoadInfo> CloneLoadInfoForRedirect(
       nsIURI* aNewURI, uint32_t aRedirectFlags);
+
+  // True if we've already applied content conversion to the data
+  // passed to mListener.
+  bool HasAppliedConversion() { return mHasAppliedConversion; }
 
  protected:
   nsresult GetTopWindowURI(nsIURI* aURIBeingLoaded, nsIURI** aTopWindowURI);
@@ -584,10 +595,6 @@ class HttpBaseChannel : public nsHashPropertyBag,
   nsresult GetResponseEmbedderPolicy(
       nsILoadInfo::CrossOriginEmbedderPolicy* aResponseEmbedderPolicy);
 
-  nsresult GetCrossOriginOpenerPolicyWithInitiator(
-      nsILoadInfo::CrossOriginOpenerPolicy aInitiatorPolicy,
-      nsILoadInfo::CrossOriginOpenerPolicy* aOutPolicy);
-
   friend class PrivateBrowsingChannel<HttpBaseChannel>;
   friend class InterceptFailedOnStop;
 
@@ -602,10 +609,6 @@ class HttpBaseChannel : public nsHashPropertyBag,
   nsCOMPtr<nsIInterfaceRequestor> mCallbacks;
   nsCOMPtr<nsIProgressEventSink> mProgressSink;
   nsCOMPtr<nsIReferrerInfo> mReferrerInfo;
-  // We cache the original value of mReferrerInfo, since
-  // we trim the referrer to not expose the full path to remote
-  // usage.
-  nsCOMPtr<nsIReferrerInfo> mOriginalReferrerInfo;
   nsCOMPtr<nsIApplicationCache> mApplicationCache;
   nsCOMPtr<nsIURI> mAPIRedirectToURI;
   nsCOMPtr<nsIURI> mProxyURI;
@@ -620,8 +623,8 @@ class HttpBaseChannel : public nsHashPropertyBag,
   // Proxy release all members above on main thread.
   void ReleaseMainThreadOnlyReferences();
 
-  nsresult ExplicitSetUploadStreamLength(uint64_t aContentLength,
-                                         bool aStreamHasHeaders);
+  void ExplicitSetUploadStreamLength(uint64_t aContentLength,
+                                     bool aStreamHasHeaders);
 
   void MaybeResumeAsyncOpen();
 
@@ -701,6 +704,7 @@ class HttpBaseChannel : public nsHashPropertyBag,
 
   uint64_t mStartPos;
   uint64_t mTransferSize;
+  uint64_t mRequestSize;
   uint64_t mDecodedBodySize;
   uint64_t mEncodedBodySize;
   uint64_t mRequestContextID;
@@ -721,12 +725,17 @@ class HttpBaseChannel : public nsHashPropertyBag,
   Atomic<uint32_t, ReleaseAcquire> mThirdPartyClassificationFlags;
   Atomic<uint32_t, ReleaseAcquire> mFlashPluginState;
 
+  UniqueProfilerBacktrace mSource;
+
   uint32_t mLoadFlags;
   uint32_t mCaps;
   uint32_t mClassOfService;
 
   uint32_t mUpgradeToSecure : 1;
   uint32_t mApplyConversion : 1;
+  // Set to true if DoApplyContentConversions has been applied to
+  // our default mListener.
+  uint32_t mHasAppliedConversion : 1;
   uint32_t mIsPending : 1;
   uint32_t mWasOpened : 1;
   // if 1 all "http-on-{opening|modify|etc}-request" observers have been called
@@ -790,8 +799,8 @@ class HttpBaseChannel : public nsHashPropertyBag,
   // to upgrade the request to a secure channel.
   uint32_t mUpgradableToSecure : 1;
 
-  // Is true if the docshell has the SANDBOXED_AUXILIARY_NAVIGATION flag set.
-  uint32_t mHasSandboxedNavigations : 1;
+  // True if the docshell's sandboxing flag set is not empty.
+  uint32_t mHasNonEmptySandboxingFlag : 1;
 
   // An opaque flags for non-standard behavior of the TLS system.
   // It is unlikely this will need to be set outside of telemetry studies

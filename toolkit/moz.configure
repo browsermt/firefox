@@ -8,6 +8,8 @@
 # were passed somehow (environment, command line, mozconfig)
 @dependable
 @imports(_from='mozbuild.shellutil', _import='quote')
+@imports(_from='mozbuild.util', _import='ensure_unicode')
+@imports(_from='mozbuild.util', _import='system_encoding')
 @imports('__sandbox__')
 def all_configure_options():
     result = []
@@ -27,13 +29,20 @@ def all_configure_options():
         # defaults.
         if (value is not None and value.origin not in ('default', 'implied') and
                 value != option.default):
-            result.append(__sandbox__._raw_options[option])
+            result.append(ensure_unicode(__sandbox__._raw_options[option],
+                                         system_encoding))
         # We however always include options that are sent to old configure
         # because we don't know their actual defaults. (Keep the conditions
         # separate for ease of understanding and ease of removal)
         elif (option.help == 'Help missing for old configure options' and
                 option in __sandbox__._raw_options):
-            result.append(__sandbox__._raw_options[option])
+            result.append(ensure_unicode(__sandbox__._raw_options[option],
+                                         system_encoding))
+
+    # We shouldn't need this, but currently, quote will return a byte string
+    # if result is empty, and that's not wanted here.
+    if not result:
+        return ''
 
     return quote(*result)
 
@@ -725,21 +734,19 @@ option('--enable-webrender-debugger',
 set_config('MOZ_WEBRENDER_DEBUGGER',
            depends_if('--enable-webrender-debugger')(lambda _: True))
 
-# SIMD acceleration for Rust code (currently just encoding_rs)
+# Additional system headers defined at the application level
 # ==============================================================
 
-option('--enable-rust-simd', env='MOZ_RUST_SIMD',
-       help='Enable explicit SIMD in Rust code.')
+option('--enable-app-system-headers', env='MOZ_APP_SYSTEM_HEADERS',
+       help='Use additional system headers defined in $MOZ_BUILD_APP/app-system-headers.mozbuild')
 
-@depends('--enable-rust-simd', target)
-def rust_simd(value, target):
-    # As of 2019-03-04, the simd-accel feature of encoding_rs has not
-    # been properly set up outside aarch64, armv7, x86 and x86_64.
-    if target.cpu in ('aarch64', 'arm', 'x86', 'x86_64') and value:
+@depends('--enable-app-system-headers')
+def app_system_headers(value):
+    if value:
         return True
 
-set_config('MOZ_RUST_SIMD', rust_simd)
-set_define('MOZ_RUST_SIMD', rust_simd)
+set_config('MOZ_APP_SYSTEM_HEADERS', app_system_headers)
+set_define('MOZ_APP_SYSTEM_HEADERS', app_system_headers)
 
 # Printing
 # ==============================================================
@@ -808,8 +815,6 @@ option('--enable-ipdl-tests', help='Enable expensive IPDL tests')
 set_config('MOZ_IPDL_TESTS',
            depends_if('--enable-ipdl-tests')(lambda _: True))
 
-include('nss.configure')
-
 # Graphics
 # ==============================================================
 option('--disable-skia', help='Disable use of Skia')
@@ -873,11 +878,7 @@ def skia_includes(skia):
     if skia:
         includes += [
             '/gfx/skia',
-            '/gfx/skia/skia/include/config',
-            '/gfx/skia/skia/include/core',
-            '/gfx/skia/skia/include/docs',
-            '/gfx/skia/skia/include/gpu',
-            '/gfx/skia/skia/include/utils',
+            '/gfx/skia/skia',
         ]
     return includes
 
@@ -921,20 +922,27 @@ add_old_configure_assignment('FT2_CFLAGS',
                              ft2_info.cflags)
 
 
-# Remote agent (part of CDP based remote protocol)
+# Remote agent
+# (partial implementation of Chromium Remote Debugging Protocol)
 # ==============================================================
 #
 # See https://firefox-source-docs.mozilla.org/remote/ for more.
 # The source code lives under ../remote.
 
-@depends(target, milestone)
-def remote_default(target, milestone):
-    return target.os != 'Android' and milestone.is_nightly
+@depends(target, build_project, milestone)
+def remote_default(target, project, milestone):
+    # no support for Android
+    if target.os == 'Android':
+        return False
 
-option('--disable-cdp', default=remote_default,
+    # enable on Firefox Nightly channel only
+    # TODO(ato): https://bugzil.la/1544393
+    return project == 'browser' and milestone.is_nightly
+
+option('--enable-cdp', default=remote_default,
        help='{Enable|Disable} remote agent')
 
-@depends('--disable-cdp')
+@depends('--enable-cdp')
 def remote(value):
     if value:
         return True
@@ -1666,8 +1674,8 @@ with only_when(compile_environment | artifact_builds):
 
     set_config('MOZ_FFVPX', True, when=ffvpx.enable)
     set_define('MOZ_FFVPX', True, when=ffvpx.enable)
-    set_config('MOZ_FFVPX_FLACONLY', True, when=ffvpx.flac_only)
-    set_define('MOZ_FFVPX_FLACONLY', True, when=ffvpx.flac_only)
+    set_config('MOZ_FFVPX_AUDIOONLY', True, when=ffvpx.flac_only)
+    set_define('MOZ_FFVPX_AUDIOONLY', True, when=ffvpx.flac_only)
     set_config('FFVPX_ASFLAGS', ffvpx.flags)
     set_config('FFVPX_USE_YASM', True, when=ffvpx.use_yasm)
 
@@ -1748,11 +1756,153 @@ with only_when(compile_environment & target_is_windows):
 
 @depends(toolkit)
 def has_remote(toolkit):
-    if toolkit in ('gtk', 'windows'):
+    if toolkit in ('gtk', 'windows', 'cocoa'):
         return True
 
 set_config('MOZ_HAS_REMOTE', has_remote)
 set_define('MOZ_HAS_REMOTE', has_remote)
+
+# RLBox Library Sandboxing wasm support
+# ==============================================================
+
+def wasm_sandboxing_libraries():
+    return ('graphite',)
+
+option('--with-wasm-sandboxed-libraries',
+       env='WASM_SANDBOXED_LIBRARIES',
+       help='Enable wasm sandboxing for the selected libraries',
+       nargs='+',
+       choices=dependable(wasm_sandboxing_libraries))
+
+@depends('--with-wasm-sandboxed-libraries')
+def requires_wasm_sandboxing(libraries):
+    if libraries:
+        return True
+
+set_config('MOZ_USING_WASM_SANDBOXING', requires_wasm_sandboxing)
+set_define('MOZ_USING_WASM_SANDBOXING', requires_wasm_sandboxing)
+
+with only_when(requires_wasm_sandboxing & compile_environment):
+    lucetc = check_prog('LUCETC', ['lucetc'],
+                        paths=toolchain_search_path)
+
+    option('--with-wasi-sysroot',
+           env='WASI_SYSROOT',
+           nargs=1,
+           help='Path to wasi sysroot for wasm sandboxing')
+
+    @depends('--with-wasi-sysroot', mozbuild_state_path)
+    @imports('os')
+    def wasi_sysroot(wasi_sysroot, mozbuild_state_path):
+        if not wasi_sysroot:
+            sysroot = os.path.join(mozbuild_state_path, 'wasi-sysroot', 'share',
+                                   'wasi-sysroot')
+            if os.path.isdir(sysroot):
+                return sysroot
+            die('Cannot find a wasi sysroot. Install the sysroot at %s or set '
+                '--with-wasi-sysroot.' % sysroot)
+
+        wasi_sysroot = wasi_sysroot[0]
+        if not os.path.isdir(wasi_sysroot):
+            die('Argument to --with-wasi-sysroot must be a directory')
+        if not os.path.isabs(wasi_sysroot):
+            die('Argument to --with-wasi-sysroot must be an absolute path')
+
+        return wasi_sysroot
+
+    set_config('WASI_SYSROOT', wasi_sysroot)
+
+
+    def wasm_compiler_with_flags(wasm_compiler, provided_wasm_compiler, sysroot,
+                                 compiler_wrapper):
+        if not sysroot:
+            return
+        if provided_wasm_compiler:
+            return ' '.join(
+                list(compiler_wrapper or []) +
+                provided_wasm_compiler.wrapper + [provided_wasm_compiler.program]
+                + provided_wasm_compiler.flags + ['--sysroot=%s' % sysroot])
+        elif wasm_compiler:
+            return ' '.join(
+                list(compiler_wrapper or []) +
+                [wasm_compiler] +
+                ['--target=wasm32-wasi', '--sysroot=%s' % sysroot])
+
+    option(env='WASM_CC', nargs=1, help='Path to the C->WASM compiler')
+    provided_wasm_cc = provided_program('WASM_CC')
+    wasm_cc = check_prog('_WASM_CC', ['clang'], input=provided_wasm_cc.program,
+                         paths=toolchain_search_path, allow_missing=True,
+                         what='the C->WASM compiler')
+    @depends(wasm_cc, provided_wasm_cc, wasi_sysroot, compiler_wrapper)
+    def wasm_cc_with_flags(wasm_cc, provided_wasm_cc, wasi_sysroot,
+                           compiler_wrapper):
+        return wasm_compiler_with_flags(wasm_cc, provided_wasm_cc, wasi_sysroot,
+                                        compiler_wrapper)
+    set_config('WASM_CC', wasm_cc_with_flags)
+
+    option(env='WASM_CXX', nargs=1, help='Path to the C++->WASM compiler')
+    provided_wasm_cxx = provided_program('WASM_CXX')
+    wasm_cxx = check_prog(
+        '_WASM_CXX', ['clang++'], input=provided_wasm_cxx.program,
+        paths=toolchain_search_path, allow_missing=True,
+        what='the C++->WASM compiler')
+    @depends(wasm_cxx, provided_wasm_cxx, wasi_sysroot, compiler_wrapper)
+    def wasm_cxx_with_flags(wasm_cxx, provided_wasm_cxx, wasi_sysroot,
+                            compiler_wrapper):
+        return wasm_compiler_with_flags(wasm_cxx, provided_wasm_cxx, wasi_sysroot,
+                                        compiler_wrapper)
+
+    set_config('WASM_CXX', wasm_cxx_with_flags)
+
+
+    wasm_compile_flags = dependable(['-fno-exceptions', '-fno-strict-aliasing', '-Qunused-arguments'])
+    option(env='WASM_CFLAGS', nargs=1, help='Options to pass to WASM_CC')
+    @depends('WASM_CFLAGS', wasm_compile_flags)
+    def wasm_cflags(value, wasm_compile_flags):
+        if value:
+            return wasm_compile_flags + value
+        else:
+            return wasm_compile_flags
+    set_config('WASM_CFLAGS', wasm_cflags)
+
+    option(env='WASM_CXXFLAGS', nargs=1, help='Options to pass to WASM_CXX')
+    @depends('WASM_CXXFLAGS', wasm_compile_flags)
+    def wasm_cxxflags(value, wasm_compile_flags):
+        if value:
+            return wasm_compile_flags + value
+        else:
+            return wasm_compile_flags
+    set_config('WASM_CXXFLAGS', wasm_cxxflags)
+
+    option(env='WASM_LDFLAGS', nargs=1,
+           help='Options to pass when linking wasm modules')
+    @depends('WASM_LDFLAGS')
+    def wasm_ldflags(value):
+        if value:
+            return value
+    set_config('WASM_LDFLAGS', wasm_ldflags)
+
+
+@depends('--with-wasm-sandboxed-libraries', target)
+def wasm_sandboxing(libraries, target):
+    if not libraries:
+        return
+
+    # Wasm sandboxing is only enabled on specific targets.
+    if not (target.cpu in ('x86_64',) and \
+            target.kernel == 'Linux' and \
+            target.os != 'Android'):
+        die('wasm sandboxing is only enabled on x86-64 Linux')
+
+    return namespace(**{name: True for name in libraries})
+
+@template
+def wasm_sandboxing_config_defines():
+    for lib in wasm_sandboxing_libraries():
+        set_config('MOZ_WASM_SANDBOXING_%s' % lib.upper(), getattr(wasm_sandboxing, lib))
+        set_define('MOZ_WASM_SANDBOXING_%s' % lib.upper(), getattr(wasm_sandboxing, lib))
+
+wasm_sandboxing_config_defines()
 
 
 # new XULStore implementation
@@ -1779,13 +1929,13 @@ set_config('MOZ_NEW_NOTIFICATION_STORE', True, when=new_notification_store)
 set_define('MOZ_NEW_NOTIFICATION_STORE', True, when=new_notification_store)
 
 
-# new Cert Storage implementation
+# FOGotype prototype Glean SDK Integration Crate
 # ==============================================================
 
 @depends(milestone)
-def new_cert_storage(milestone):
+def fogotype(milestone):
     if milestone.is_nightly:
         return True
 
-set_config('MOZ_NEW_CERT_STORAGE', True, when=new_cert_storage)
-set_define('MOZ_NEW_CERT_STORAGE', True, when=new_cert_storage)
+set_config('MOZ_FOGOTYPE', True, when=fogotype)
+set_define('MOZ_FOGOTYPE', True, when=fogotype)

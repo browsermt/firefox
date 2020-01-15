@@ -6,13 +6,9 @@
 
 #ifdef XP_WIN
 #  include "objbase.h"
-// Some Windows header defines this, so undef it as it conflicts with our
-// function of the same name.
-#  undef GetCurrentTime
 #endif
 
 #include "mozilla/dom/HTMLMediaElement.h"
-#include "AudioChannelService.h"
 #include "AudioDeviceInfo.h"
 #include "AudioStreamTrack.h"
 #include "AutoplayPolicy.h"
@@ -23,6 +19,7 @@
 #include "DecoderTraits.h"
 #include "FrameStatistics.h"
 #include "GMPCrashHelper.h"
+#include "GVAutoplayPermissionRequest.h"
 #ifdef MOZ_ANDROID_HLS_SUPPORT
 #  include "HLSDecoder.h"
 #endif
@@ -38,9 +35,10 @@
 #include "MediaShutdownManager.h"
 #include "MediaSourceDecoder.h"
 #include "MediaStreamError.h"
-#include "MediaStreamGraphImpl.h"
-#include "MediaStreamListener.h"
+#include "MediaTrackGraphImpl.h"
+#include "MediaTrackListener.h"
 #include "MediaStreamWindowCapturer.h"
+#include "MediaTrack.h"
 #include "MediaTrackList.h"
 #include "SVGObserverUtils.h"
 #include "TimeRanges.h"
@@ -53,7 +51,6 @@
 #include "mozilla/AsyncEventDispatcher.h"
 #include "mozilla/EMEUtils.h"
 #include "mozilla/EventDispatcher.h"
-#include "mozilla/EventStateManager.h"
 #include "mozilla/FloatingPoint.h"
 #include "mozilla/MathAlgorithms.h"
 #include "mozilla/NotNull.h"
@@ -65,18 +62,21 @@
 #include "mozilla/dom/AudioTrack.h"
 #include "mozilla/dom/AudioTrackList.h"
 #include "mozilla/dom/BlobURLProtocolHandler.h"
+#include "mozilla/dom/ContentMediaController.h"
 #include "mozilla/dom/ElementInlines.h"
 #include "mozilla/dom/HTMLAudioElement.h"
 #include "mozilla/dom/HTMLInputElement.h"
 #include "mozilla/dom/HTMLMediaElementBinding.h"
 #include "mozilla/dom/HTMLSourceElement.h"
 #include "mozilla/dom/HTMLVideoElement.h"
+#include "mozilla/dom/MediaControlUtils.h"
 #include "mozilla/dom/MediaEncryptedEvent.h"
 #include "mozilla/dom/MediaErrorBinding.h"
 #include "mozilla/dom/MediaSource.h"
 #include "mozilla/dom/PlayPromise.h"
 #include "mozilla/dom/Promise.h"
 #include "mozilla/dom/TextTrack.h"
+#include "mozilla/dom/UserActivation.h"
 #include "mozilla/dom/VideoPlaybackQuality.h"
 #include "mozilla/dom/VideoTrack.h"
 #include "mozilla/dom/VideoTrackList.h"
@@ -93,24 +93,17 @@
 #include "nsGenericHTMLElement.h"
 #include "nsGkAtoms.h"
 #include "nsIAsyncVerifyRedirectCallback.h"
-#include "nsIAutoplay.h"
 #include "nsICachingChannel.h"
-#include "nsICategoryManager.h"
 #include "nsIClassOfService.h"
 #include "nsIContentPolicy.h"
-#include "nsIContentSecurityPolicy.h"
 #include "nsIDocShell.h"
 #include "mozilla/dom/Document.h"
 #include "nsIFrame.h"
 #include "nsIObserverService.h"
-#include "nsIPermissionManager.h"
 #include "nsIRequest.h"
 #include "nsIScriptError.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsISupportsPrimitives.h"
-#include "nsIThreadInternal.h"
 #include "nsITimer.h"
-#include "nsIXPConnect.h"
 #include "nsJSUtils.h"
 #include "nsLayoutUtils.h"
 #include "nsMediaFragmentURIParser.h"
@@ -137,6 +130,12 @@ extern mozilla::LazyLogModule gAutoplayPermissionLog;
 #define AUTOPLAY_LOG(msg, ...) \
   MOZ_LOG(gAutoplayPermissionLog, LogLevel::Debug, (msg, ##__VA_ARGS__))
 
+// avoid redefined macro in unified build
+#undef MEDIACONTROL_LOG
+#define MEDIACONTROL_LOG(msg, ...)           \
+  MOZ_LOG(gMediaControlLog, LogLevel::Debug, \
+          ("HTMLMediaElement=%p, " msg, this, ##__VA_ARGS__))
+
 #define LOG(type, msg) MOZ_LOG(gMediaElementLog, type, msg)
 #define LOG_EVENT(type, msg) MOZ_LOG(gMediaElementEventsLog, type, msg)
 
@@ -146,6 +145,8 @@ using namespace mozilla::dom::HTMLMediaElement_Binding;
 
 namespace mozilla {
 namespace dom {
+
+using AudibleState = AudioChannelService::AudibleState;
 
 // Number of milliseconds between progress events as defined by spec
 static const uint32_t PROGRESS_MS = 350;
@@ -373,6 +374,268 @@ class nsSourceErrorEventRunner : public nsMediaEvent {
 };
 
 /**
+ * We use MediaControlEventListener to listen MediaControlKeysEvent in order to
+ * play and pause media element when user press media control keys and update
+ * media's playback and audible state to the media controller.
+ *
+ * Use `Start()` to start listening event and use `Stop()` to stop listening
+ * event. In addition, notifying any change to media controller MUST be done
+ * after successfully calling `Start()`.
+ */
+class HTMLMediaElement::MediaControlEventListener final
+    : public MediaControlKeysEventListener {
+ public:
+  NS_INLINE_DECL_REFCOUNTING(MediaControlEventListener, override)
+
+  MOZ_INIT_OUTSIDE_CTOR explicit MediaControlEventListener(
+      HTMLMediaElement* aElement)
+      : mElement(aElement) {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(aElement);
+  }
+
+  void Start() {
+    MOZ_ASSERT(NS_IsMainThread());
+    if (IsStarted()) {
+      // We have already been started, do not notify start twice.
+      return;
+    }
+
+    // Fail to init media agent, we are not able to notify the media controller
+    // any update and also are not able to receive media control key events.
+    if (!InitMediaAgent()) {
+      MEDIACONTROL_LOG("Fail to init content media agent!");
+      return;
+    }
+
+    NotifyMediaStateChanged(ControlledMediaState::eStarted);
+  }
+
+  void Stop() {
+    MOZ_ASSERT(NS_IsMainThread());
+    if (!IsStarted()) {
+      // We have already been stopped, do not notify stop twice.
+      return;
+    }
+    NotifyMediaStateChanged(ControlledMediaState::eStopped);
+
+    // Remove ourselves from media agent, which would stop receiving event.
+    mControlAgent->RemoveListener(this);
+    mControlAgent = nullptr;
+  }
+
+  void NotifyMediaStartedPlaying() {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(IsStarted());
+    if (mState == ControlledMediaState::eStarted ||
+        mState == ControlledMediaState::ePaused) {
+      NotifyMediaStateChanged(ControlledMediaState::ePlayed);
+      NotifyAudibleStateChanged();
+    }
+  }
+
+  void NotifyMediaStoppedPlaying() {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(IsStarted());
+    if (mState == ControlledMediaState::ePlayed) {
+      NotifyMediaStateChanged(ControlledMediaState::ePaused);
+    }
+  }
+
+  void UpdateMediaAudibleState(bool aIsOwnerAudible) {
+    MOZ_ASSERT(NS_IsMainThread());
+    if (mIsOwnerAudible == aIsOwnerAudible) {
+      return;
+    }
+    mIsOwnerAudible = aIsOwnerAudible;
+    // If media hasn't started playing, it doesn't make sense to update media
+    // audible state. Therefore, in that case we would noitfy the audible state
+    // when media starts playing.
+    if (mState == ControlledMediaState::ePlayed) {
+      NotifyAudibleStateChanged();
+    }
+  }
+
+  void OnKeyPressed(MediaControlKeysEvent aEvent) override {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(IsStarted());
+    MEDIACONTROL_LOG("OnKeyPressed '%s'", ToMediaControlKeysEventStr(aEvent));
+    if (aEvent == MediaControlKeysEvent::ePlay) {
+      Owner()->Play();
+    } else if (aEvent == MediaControlKeysEvent::ePause ||
+               aEvent == MediaControlKeysEvent::eStop) {
+      Owner()->Pause();
+    }
+  }
+
+  bool IsStarted() const { return mState != ControlledMediaState::eStopped; }
+
+ private:
+  ~MediaControlEventListener() = default;
+
+  bool InitMediaAgent() {
+    MOZ_ASSERT(NS_IsMainThread());
+    nsPIDOMWindowInner* window = Owner()->OwnerDoc()->GetInnerWindow();
+    if (!window) {
+      return false;
+    }
+
+    mControlAgent = ContentMediaAgent::Get(window->GetBrowsingContext());
+    if (!mControlAgent) {
+      return false;
+    }
+    mControlAgent->AddListener(this);
+    return true;
+  }
+
+  HTMLMediaElement* Owner() const { return mElement.get(); }
+
+  void NotifyMediaStateChanged(ControlledMediaState aState) {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(mControlAgent);
+    MEDIACONTROL_LOG("NotifyMediaState from state='%s' to state='%s'",
+                     ToControlledMediaStateStr(mState),
+                     ToControlledMediaStateStr(aState));
+    MOZ_ASSERT(mState != aState, "Should not notify same state again!");
+    mState = aState;
+    mControlAgent->NotifyMediaStateChanged(this, mState);
+  }
+
+  void NotifyAudibleStateChanged() {
+    MOZ_ASSERT(NS_IsMainThread());
+    MOZ_ASSERT(IsStarted());
+    mControlAgent->NotifyAudibleStateChanged(this, mIsOwnerAudible);
+  }
+
+  ControlledMediaState mState = ControlledMediaState::eStopped;
+  WeakPtr<HTMLMediaElement> mElement;
+  RefPtr<ContentMediaAgent> mControlAgent;
+  bool mIsOwnerAudible = false;
+};
+
+class HTMLMediaElement::MediaStreamTrackListener
+    : public DOMMediaStream::TrackListener {
+ public:
+  explicit MediaStreamTrackListener(HTMLMediaElement* aElement)
+      : mElement(aElement) {}
+
+  void NotifyTrackAdded(const RefPtr<MediaStreamTrack>& aTrack) override {
+    if (!mElement) {
+      return;
+    }
+    mElement->NotifyMediaStreamTrackAdded(aTrack);
+  }
+
+  void NotifyTrackRemoved(const RefPtr<MediaStreamTrack>& aTrack) override {
+    if (!mElement) {
+      return;
+    }
+    mElement->NotifyMediaStreamTrackRemoved(aTrack);
+  }
+
+  void OnActive() {
+    MOZ_ASSERT(mElement);
+
+    // mediacapture-main says:
+    // Note that once ended equals true the HTMLVideoElement will not play media
+    // even if new MediaStreamTracks are added to the MediaStream (causing it to
+    // return to the active state) unless autoplay is true or the web
+    // application restarts the element, e.g., by calling play().
+    //
+    // This is vague on exactly how to go from becoming active to playing, when
+    // autoplaying. However, per the media element spec, to play an autoplaying
+    // media element, we must load the source and reach readyState
+    // HAVE_ENOUGH_DATA [1]. Hence, a MediaStream being assigned to a media
+    // element and becoming active runs the load algorithm, so that it can
+    // eventually be played.
+    //
+    // [1]
+    // https://html.spec.whatwg.org/multipage/media.html#ready-states:event-media-play
+
+    LOG(LogLevel::Debug, ("%p, mSrcStream %p became active, checking if we "
+                          "need to run the load algorithm",
+                          mElement.get(), mElement->mSrcStream.get()));
+    if (!mElement->IsPlaybackEnded()) {
+      return;
+    }
+    if (!mElement->Autoplay()) {
+      return;
+    }
+    LOG(LogLevel::Info, ("%p, mSrcStream %p became active on autoplaying, "
+                         "ended element. Reloading.",
+                         mElement.get(), mElement->mSrcStream.get()));
+    mElement->DoLoad();
+  }
+
+  void NotifyActive() override {
+    if (!mElement) {
+      return;
+    }
+
+    if (!mElement->IsVideo()) {
+      // Audio elements use NotifyAudible().
+      return;
+    }
+
+    OnActive();
+  }
+
+  void NotifyAudible() override {
+    if (!mElement) {
+      return;
+    }
+
+    if (mElement->IsVideo()) {
+      // Video elements use NotifyActive().
+      return;
+    }
+
+    OnActive();
+  }
+
+  void OnInactive() {
+    MOZ_ASSERT(mElement);
+
+    if (mElement->IsPlaybackEnded()) {
+      return;
+    }
+    LOG(LogLevel::Debug, ("%p, mSrcStream %p became inactive", mElement.get(),
+                          mElement->mSrcStream.get()));
+
+    mElement->PlaybackEnded();
+  }
+
+  void NotifyInactive() override {
+    if (!mElement) {
+      return;
+    }
+
+    if (!mElement->IsVideo()) {
+      // Audio elements use NotifyInaudible().
+      return;
+    }
+
+    OnInactive();
+  }
+
+  void NotifyInaudible() override {
+    if (!mElement) {
+      return;
+    }
+
+    if (mElement->IsVideo()) {
+      // Video elements use NotifyInactive().
+      return;
+    }
+
+    OnInactive();
+  }
+
+ protected:
+  const WeakPtr<HTMLMediaElement> mElement;
+};
+
+/**
  * This listener observes the first video frame to arrive with a non-empty size,
  * and renders it to its VideoFrameContainer.
  */
@@ -387,8 +650,7 @@ class HTMLMediaElement::FirstFrameListener : public VideoOutput {
   // NB that this overrides VideoOutput::NotifyRealtimeTrackData, so we can
   // filter out all frames but the first one with a real size. This allows us to
   // later re-use the logic in VideoOutput for rendering that frame.
-  void NotifyRealtimeTrackData(MediaStreamGraph* aGraph,
-                               StreamTime aTrackOffset,
+  void NotifyRealtimeTrackData(MediaTrackGraph* aGraph, TrackTime aTrackOffset,
                                const MediaSegment& aMedia) override {
     MOZ_ASSERT(aMedia.GetType() == MediaSegment::VIDEO);
 
@@ -415,7 +677,7 @@ class HTMLMediaElement::FirstFrameListener : public VideoOutput {
 
  private:
   // Whether a frame with a concrete size has been received. May only be
-  // accessed on the MSG's appending thread. (this is a direct listener so we
+  // accessed on the MTG's appending thread. (this is a direct listener so we
   // get called by whoever is producing this track's data)
   bool mInitialSizeFound = false;
 };
@@ -437,9 +699,39 @@ class HTMLMediaElement::MediaStreamRenderer
         mAudioOutputKey(aAudioOutputKey),
         mWatchManager(this, aMainThread) {}
 
+  void Shutdown() {
+    for (const auto& t : nsTArray<WeakPtr<MediaStreamTrack>>(mAudioTracks)) {
+      if (t) {
+        RemoveTrack(t->AsAudioStreamTrack());
+      }
+    }
+    if (mVideoTrack) {
+      RemoveTrack(mVideoTrack->AsVideoStreamTrack());
+    }
+    mWatchManager.Shutdown();
+  }
+
   void UpdateGraphTime() {
     mGraphTime =
-        mGraphTimeDummy->mStream->Graph()->CurrentTime() - *mGraphTimeOffset;
+        mGraphTimeDummy->mTrack->Graph()->CurrentTime() - *mGraphTimeOffset;
+  }
+
+  void SetProgressingCurrentTime(bool aProgress) {
+    if (aProgress == mProgressingCurrentTime) {
+      return;
+    }
+
+    MOZ_DIAGNOSTIC_ASSERT(mGraphTimeDummy);
+    mProgressingCurrentTime = aProgress;
+    MediaTrackGraph* graph = mGraphTimeDummy->mTrack->Graph();
+    if (mProgressingCurrentTime) {
+      mGraphTimeOffset = Some(graph->CurrentTime().Ref() - mGraphTime);
+      mWatchManager.Watch(graph->CurrentTime(),
+                          &MediaStreamRenderer::UpdateGraphTime);
+    } else {
+      mWatchManager.Unwatch(graph->CurrentTime(),
+                            &MediaStreamRenderer::UpdateGraphTime);
+    }
   }
 
   void Start() {
@@ -452,11 +744,6 @@ class HTMLMediaElement::MediaStreamRenderer
     if (!mGraphTimeDummy) {
       return;
     }
-
-    MediaStreamGraph* graph = mGraphTimeDummy->mStream->Graph();
-    mGraphTimeOffset = Some(graph->CurrentTime().Ref() - mGraphTime);
-    mWatchManager.Watch(graph->CurrentTime(),
-                        &MediaStreamRenderer::UpdateGraphTime);
 
     for (const auto& t : mAudioTracks) {
       if (t) {
@@ -481,9 +768,6 @@ class HTMLMediaElement::MediaStreamRenderer
     if (!mGraphTimeDummy) {
       return;
     }
-
-    mWatchManager.Unwatch(mGraphTimeDummy->mStream->Graph()->CurrentTime(),
-                          &MediaStreamRenderer::UpdateGraphTime);
 
     for (const auto& t : mAudioTracks) {
       if (t) {
@@ -556,8 +840,7 @@ class HTMLMediaElement::MediaStreamRenderer
       return 0.0;
     }
 
-    return mGraphTimeDummy->mStream->GraphImpl()->MediaTimeToSeconds(
-        mGraphTime);
+    return mGraphTimeDummy->mTrack->GraphImpl()->MediaTimeToSeconds(mGraphTime);
   }
 
   Watchable<GraphTime>& CurrentGraphTime() { return mGraphTime; }
@@ -569,26 +852,14 @@ class HTMLMediaElement::MediaStreamRenderer
   void* const mAudioOutputKey;
 
  private:
-  ~MediaStreamRenderer() {
-    for (const auto& t : nsTArray<WeakPtr<MediaStreamTrack>>(mAudioTracks)) {
-      if (t) {
-        RemoveTrack(t->AsAudioStreamTrack());
-      }
-    }
-    if (mVideoTrack) {
-      RemoveTrack(mVideoTrack->AsVideoStreamTrack());
-    }
-
-    MOZ_DIAGNOSTIC_ASSERT(mAudioTracks.IsEmpty());
-    MOZ_DIAGNOSTIC_ASSERT(!mVideoTrack);
-  }
+  ~MediaStreamRenderer() { Shutdown(); }
 
   void EnsureGraphTimeDummy() {
     if (mGraphTimeDummy) {
       return;
     }
 
-    MediaStreamGraph* graph = nullptr;
+    MediaTrackGraph* graph = nullptr;
     for (const auto& t : mAudioTracks) {
       if (t && !t->Ended()) {
         graph = t->Graph();
@@ -605,19 +876,16 @@ class HTMLMediaElement::MediaStreamRenderer
     }
 
     // This dummy keeps `graph` alive and ensures access to it.
-    mGraphTimeDummy =
-        MakeRefPtr<SharedDummyStream>(graph->CreateSourceStream());
-
-    if (mRendering) {
-      mGraphTimeOffset = Some(graph->CurrentTime() - mGraphTime);
-      mWatchManager.Watch(graph->CurrentTime(),
-                          &MediaStreamRenderer::UpdateGraphTime);
-    }
+    mGraphTimeDummy = MakeRefPtr<SharedDummyTrack>(
+        graph->CreateSourceTrack(MediaSegment::AUDIO));
   }
 
   // True when all tracks are being rendered, i.e., when the media element is
   // playing.
   bool mRendering = false;
+
+  // True while we're progressing mGraphTime. False otherwise.
+  bool mProgressingCurrentTime = false;
 
   // The audio output volume for all audio tracks.
   float mAudioOutputVolume = 1.0f;
@@ -625,10 +893,10 @@ class HTMLMediaElement::MediaStreamRenderer
   // WatchManager for mGraphTime.
   WatchManager<MediaStreamRenderer> mWatchManager;
 
-  // A dummy MediaStream to guarantee a MediaStreamGraph is kept alive while
+  // A dummy MediaTrack to guarantee a MediaTrackGraph is kept alive while
   // we're actively rendering, so we can track the graph's current time. Set
   // when the first track is added, never unset.
-  RefPtr<SharedDummyStream> mGraphTimeDummy;
+  RefPtr<SharedDummyTrack> mGraphTimeDummy;
 
   // Watchable that relays the graph's currentTime updates to the media element
   // only while we're rendering. This is the current time of the rendering in
@@ -646,45 +914,88 @@ class HTMLMediaElement::MediaStreamRenderer
   WeakPtr<MediaStreamTrack> mVideoTrack;
 };
 
-class HTMLMediaElement::StreamCaptureTrackSource
+class HTMLMediaElement::MediaElementTrackSource
     : public MediaStreamTrackSource,
-      public MediaStreamTrackSource::Sink {
+      public MediaStreamTrackSource::Sink,
+      public MediaStreamTrackConsumer {
  public:
   NS_DECL_ISUPPORTS_INHERITED
-  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(StreamCaptureTrackSource,
+  NS_DECL_CYCLE_COLLECTION_CLASS_INHERITED(MediaElementTrackSource,
                                            MediaStreamTrackSource)
 
-  StreamCaptureTrackSource(MediaStreamTrackSource* aCapturedTrackSource,
-                           ProcessedMediaStream* aStream, MediaInputPort* aPort)
+  /* MediaDecoder track source */
+  MediaElementTrackSource(nsISerialEventTarget* aMainThreadEventTarget,
+                          ProcessedMediaTrack* aTrack, nsIPrincipal* aPrincipal,
+                          OutputMuteState aMuteState)
+      : MediaStreamTrackSource(aPrincipal, nsString()),
+        mMainThreadEventTarget(aMainThreadEventTarget),
+        mTrack(aTrack),
+        mIntendedElementMuteState(aMuteState),
+        mElementMuteState(aMuteState) {
+    MOZ_ASSERT(mTrack);
+  }
+
+  /* MediaStream track source */
+  MediaElementTrackSource(nsISerialEventTarget* aMainThreadEventTarget,
+                          MediaStreamTrack* aCapturedTrack,
+                          MediaStreamTrackSource* aCapturedTrackSource,
+                          ProcessedMediaTrack* aTrack, MediaInputPort* aPort,
+                          OutputMuteState aMuteState)
       : MediaStreamTrackSource(aCapturedTrackSource->GetPrincipal(),
                                nsString()),
+        mMainThreadEventTarget(aMainThreadEventTarget),
+        mCapturedTrack(aCapturedTrack),
         mCapturedTrackSource(aCapturedTrackSource),
-        mStream(aStream),
-        mPort(aPort) {
+        mTrack(aTrack),
+        mPort(aPort),
+        mIntendedElementMuteState(aMuteState),
+        mElementMuteState(aMuteState) {
+    MOZ_ASSERT(mTrack);
+    MOZ_ASSERT(mCapturedTrack);
     MOZ_ASSERT(mCapturedTrackSource);
-    MOZ_ASSERT(mStream);
     MOZ_ASSERT(mPort);
 
+    mCapturedTrack->AddConsumer(this);
     mCapturedTrackSource->RegisterSink(this);
   }
 
   void SetEnabled(bool aEnabled) {
-    if (!mStream) {
+    if (!mTrack) {
       return;
     }
-    mStream->SetTrackEnabled(mPort->GetDestinationTrackId(),
-                             aEnabled ? DisabledTrackMode::ENABLED
-                                      : DisabledTrackMode::SILENCE_FREEZE);
+    mTrack->SetEnabled(aEnabled ? DisabledTrackMode::ENABLED
+                                : DisabledTrackMode::SILENCE_FREEZE);
+  }
+
+  void SetPrincipal(RefPtr<nsIPrincipal> aPrincipal) {
+    mPrincipal = std::move(aPrincipal);
+    MediaStreamTrackSource::PrincipalChanged();
+  }
+
+  void SetMutedByElement(OutputMuteState aMuteState) {
+    if (mIntendedElementMuteState == aMuteState) {
+      return;
+    }
+    mIntendedElementMuteState = aMuteState;
+    mMainThreadEventTarget->Dispatch(NS_NewRunnableFunction(
+        "MediaElementTrackSource::SetMutedByElement",
+        [self = RefPtr<MediaElementTrackSource>(this), this, aMuteState] {
+          mElementMuteState = aMuteState;
+          MediaStreamTrackSource::MutedChanged(Muted());
+        }));
   }
 
   void Destroy() override {
+    if (mCapturedTrack) {
+      mCapturedTrack->RemoveConsumer(this);
+      mCapturedTrack = nullptr;
+    }
     if (mCapturedTrackSource) {
       mCapturedTrackSource->UnregisterSink(this);
       mCapturedTrackSource = nullptr;
     }
-    if (mStream) {
-      mStream->Destroy();
-      mStream = nullptr;
+    if (mTrack && !mTrack->IsDestroyed()) {
+      mTrack->Destroy();
     }
     if (mPort) {
       mPort->Destroy();
@@ -696,7 +1007,11 @@ class HTMLMediaElement::StreamCaptureTrackSource
     return MediaSourceEnum::Other;
   }
 
-  void Stop() override { Destroy(); }
+  void Stop() override {
+    // Do nothing. There may appear new output streams
+    // that need tracks sourced from this source, so we
+    // cannot destroy things yet.
+  }
 
   /**
    * Do not keep the track source alive. The source lifetime is controlled by
@@ -719,50 +1034,91 @@ class HTMLMediaElement::StreamCaptureTrackSource
       return;
     }
 
-    mPrincipal = mCapturedTrackSource->GetPrincipal();
-    MediaStreamTrackSource::PrincipalChanged();
+    SetPrincipal(mCapturedTrackSource->GetPrincipal());
   }
 
   void MutedChanged(bool aNewState) override {
-    if (!mCapturedTrackSource) {
-      // This could happen during shutdown.
-      return;
-    }
-
-    MediaStreamTrackSource::MutedChanged(aNewState);
+    MediaStreamTrackSource::MutedChanged(Muted());
   }
 
   void OverrideEnded() override {
-    if (!mCapturedTrackSource) {
-      // This could happen during shutdown.
-      return;
-    }
-
     Destroy();
     MediaStreamTrackSource::OverrideEnded();
   }
 
- private:
-  virtual ~StreamCaptureTrackSource() {
-    MOZ_ASSERT(!mCapturedTrackSource);
-    MOZ_ASSERT(!mStream);
-    MOZ_ASSERT(!mPort);
-  };
+  void NotifyEnabledChanged(MediaStreamTrack* aTrack, bool aEnabled) override {
+    MediaStreamTrackSource::MutedChanged(Muted());
+  }
 
+  bool Muted() const {
+    return mElementMuteState == OutputMuteState::Muted ||
+           (mCapturedTrack &&
+            (mCapturedTrack->Muted() || !mCapturedTrack->Enabled()));
+  }
+
+  ProcessedMediaTrack* Track() const { return mTrack; }
+
+ private:
+  virtual ~MediaElementTrackSource() { Destroy(); };
+
+  const RefPtr<nsISerialEventTarget> mMainThreadEventTarget;
+  RefPtr<MediaStreamTrack> mCapturedTrack;
   RefPtr<MediaStreamTrackSource> mCapturedTrackSource;
-  RefPtr<ProcessedMediaStream> mStream;
+  const RefPtr<ProcessedMediaTrack> mTrack;
   RefPtr<MediaInputPort> mPort;
+  // The mute state as intended by the media element.
+  OutputMuteState mIntendedElementMuteState;
+  // The mute state as applied to this track source. It is applied async, so
+  // needs to be tracked separately from the intended state.
+  OutputMuteState mElementMuteState;
 };
 
-NS_IMPL_ADDREF_INHERITED(HTMLMediaElement::StreamCaptureTrackSource,
+HTMLMediaElement::OutputMediaStream::OutputMediaStream(
+    RefPtr<DOMMediaStream> aStream, bool aCapturingAudioOnly,
+    bool aFinishWhenEnded)
+    : mStream(std::move(aStream)),
+      mCapturingAudioOnly(aCapturingAudioOnly),
+      mFinishWhenEnded(aFinishWhenEnded) {}
+HTMLMediaElement::OutputMediaStream::~OutputMediaStream() = default;
+
+void ImplCycleCollectionTraverse(nsCycleCollectionTraversalCallback& aCallback,
+                                 HTMLMediaElement::OutputMediaStream& aField,
+                                 const char* aName, uint32_t aFlags) {
+  ImplCycleCollectionTraverse(aCallback, aField.mStream, "mStream", aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mLiveTracks, "mLiveTracks",
+                              aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mFinishWhenEndedLoadingSrc,
+                              "mFinishWhenEndedLoadingSrc", aFlags);
+  ImplCycleCollectionTraverse(aCallback, aField.mFinishWhenEndedAttrStream,
+                              "mFinishWhenEndedAttrStream", aFlags);
+}
+
+void ImplCycleCollectionUnlink(HTMLMediaElement::OutputMediaStream& aField) {
+  ImplCycleCollectionUnlink(aField.mStream);
+  ImplCycleCollectionUnlink(aField.mLiveTracks);
+  ImplCycleCollectionUnlink(aField.mFinishWhenEndedLoadingSrc);
+  ImplCycleCollectionUnlink(aField.mFinishWhenEndedAttrStream);
+}
+
+NS_IMPL_ADDREF_INHERITED(HTMLMediaElement::MediaElementTrackSource,
                          MediaStreamTrackSource)
-NS_IMPL_RELEASE_INHERITED(HTMLMediaElement::StreamCaptureTrackSource,
+NS_IMPL_RELEASE_INHERITED(HTMLMediaElement::MediaElementTrackSource,
                           MediaStreamTrackSource)
 NS_INTERFACE_MAP_BEGIN_CYCLE_COLLECTION(
-    HTMLMediaElement::StreamCaptureTrackSource)
+    HTMLMediaElement::MediaElementTrackSource)
 NS_INTERFACE_MAP_END_INHERITING(MediaStreamTrackSource)
-NS_IMPL_CYCLE_COLLECTION_INHERITED(HTMLMediaElement::StreamCaptureTrackSource,
-                                   MediaStreamTrackSource, mCapturedTrackSource)
+NS_IMPL_CYCLE_COLLECTION_CLASS(HTMLMediaElement::MediaElementTrackSource)
+NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(
+    HTMLMediaElement::MediaElementTrackSource, MediaStreamTrackSource)
+  tmp->Destroy();
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mCapturedTrack)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mCapturedTrackSource)
+NS_IMPL_CYCLE_COLLECTION_UNLINK_END
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(
+    HTMLMediaElement::MediaElementTrackSource, MediaStreamTrackSource)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mCapturedTrack)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mCapturedTrackSource)
+NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 /**
  * There is a reference cycle involving this class: MediaLoadListener
@@ -855,10 +1211,7 @@ HTMLMediaElement::MediaLoadListener::OnStartRequest(nsIRequest* aRequest) {
       // array of blocked tracking nodes under its parent document.
       if (net::UrlClassifierFeatureFactory::IsClassifierBlockingErrorCode(
               status)) {
-        Document* ownerDoc = element->OwnerDoc();
-        if (ownerDoc) {
-          ownerDoc->AddBlockedNodeByClassifier(element);
-        }
+        element->OwnerDoc()->AddBlockedNodeByClassifier(element);
       }
       element->NotifyLoadError(
           nsPrintfCString("%u: %s", uint32_t(status), "Request failed"));
@@ -986,7 +1339,6 @@ class HTMLMediaElement::AudioChannelAgentCallback final
       : mOwner(aOwner),
         mAudioChannelVolume(1.0),
         mPlayingThroughTheAudioChannel(false),
-        mAudioCapturedByWindow(false),
         mSuspended(nsISuspendedTypes::NONE_SUSPENDED),
         mIsOwnerAudible(IsOwnerAudible()),
         mIsShutDown(false) {
@@ -994,10 +1346,9 @@ class HTMLMediaElement::AudioChannelAgentCallback final
     MaybeCreateAudioChannelAgent();
   }
 
-  void UpdateAudioChannelPlayingState(bool aForcePlaying = false) {
+  void UpdateAudioChannelPlayingState() {
     MOZ_ASSERT(!mIsShutDown);
-    bool playingThroughTheAudioChannel =
-        aForcePlaying || IsPlayingThroughTheAudioChannel();
+    bool playingThroughTheAudioChannel = IsPlayingThroughTheAudioChannel();
 
     if (playingThroughTheAudioChannel != mPlayingThroughTheAudioChannel) {
       if (!MaybeCreateAudioChannelAgent()) {
@@ -1005,24 +1356,18 @@ class HTMLMediaElement::AudioChannelAgentCallback final
       }
 
       mPlayingThroughTheAudioChannel = playingThroughTheAudioChannel;
-      NotifyAudioChannelAgent(mPlayingThroughTheAudioChannel);
+      if (mPlayingThroughTheAudioChannel) {
+        StartAudioChannelAgent();
+      } else {
+        StopAudioChanelAgent();
+      }
     }
   }
 
   bool ShouldResetSuspend() const {
     // The disposable-pause should be clear after media starts playing.
-    if (!mOwner->Paused() &&
-        mSuspended == nsISuspendedTypes::SUSPENDED_PAUSE_DISPOSABLE) {
-      return true;
-    }
-
-    // If the blocked media is paused, we don't need to resume it. We reset the
-    // mSuspended in order to unregister the agent.
-    if (mOwner->Paused() && mSuspended == nsISuspendedTypes::SUSPENDED_BLOCK) {
-      return true;
-    }
-
-    return false;
+    return !mOwner->Paused() &&
+           mSuspended == nsISuspendedTypes::SUSPENDED_PAUSE_DISPOSABLE;
   }
 
   void NotifyPlayStateChanged() {
@@ -1074,7 +1419,6 @@ class HTMLMediaElement::AudioChannelAgentCallback final
         break;
       case nsISuspendedTypes::SUSPENDED_PAUSE:
       case nsISuspendedTypes::SUSPENDED_PAUSE_DISPOSABLE:
-      case nsISuspendedTypes::SUSPENDED_BLOCK:
         Suspend(aSuspend);
         break;
       case nsISuspendedTypes::SUSPENDED_STOP_DISPOSABLE:
@@ -1092,25 +1436,19 @@ class HTMLMediaElement::AudioChannelAgentCallback final
 
   NS_IMETHODIMP WindowAudioCaptureChanged(bool aCapture) override {
     MOZ_ASSERT(mAudioChannelAgent);
-
-    if (mAudioCapturedByWindow != aCapture) {
-      mAudioCapturedByWindow = aCapture;
-      AudioCaptureStreamChangeIfNeeded();
-    }
+    AudioCaptureTrackChangeIfNeeded();
     return NS_OK;
   }
 
-  void AudioCaptureStreamChangeIfNeeded() {
+  void AudioCaptureTrackChangeIfNeeded() {
     MOZ_ASSERT(!mIsShutDown);
     if (!IsPlayingStarted()) {
       return;
     }
 
-    if (!mOwner->HasAudio()) {
-      return;
-    }
-
-    mOwner->AudioCaptureStreamChange(mAudioCapturedByWindow);
+    MOZ_ASSERT(mAudioChannelAgent);
+    bool isCapturing = mAudioChannelAgent->IsWindowAudioCapturingEnabled();
+    mOwner->AudioCaptureTrackChange(isCapturing);
   }
 
   void NotifyAudioPlaybackChanged(AudibleChangedReasons aReason) {
@@ -1128,27 +1466,12 @@ class HTMLMediaElement::AudioChannelAgentCallback final
     mAudioChannelAgent->NotifyStartedAudible(mIsOwnerAudible, aReason);
   }
 
-  bool IsPlaybackBlocked() {
-    MOZ_ASSERT(!mIsShutDown);
-    // If the tab hasn't been activated yet, the media element in that tab can't
-    // be playback now until the tab goes to foreground first time or user
-    // clicks the unblocking tab icon.
-    if (!IsTabActivated()) {
-      // Even we haven't start playing yet, we still need to notify the audio
-      // channe system because we need to receive the resume notification later.
-      UpdateAudioChannelPlayingState(true /* force to start */);
-      return true;
-    }
-
-    return false;
-  }
-
   void Shutdown() {
     MOZ_ASSERT(!mIsShutDown);
-    if (mAudioChannelAgent) {
-      mAudioChannelAgent->NotifyStoppedPlaying();
-      mAudioChannelAgent = nullptr;
+    if (mAudioChannelAgent && mAudioChannelAgent->IsPlayingStarted()) {
+      StopAudioChanelAgent();
     }
+    mAudioChannelAgent = nullptr;
     mIsShutDown = true;
   }
 
@@ -1186,22 +1509,23 @@ class HTMLMediaElement::AudioChannelAgentCallback final
     return true;
   }
 
-  void NotifyAudioChannelAgent(bool aPlaying) {
+  void StartAudioChannelAgent() {
     MOZ_ASSERT(mAudioChannelAgent);
-
-    if (aPlaying) {
-      AudioPlaybackConfig config;
-      nsresult rv =
-          mAudioChannelAgent->NotifyStartedPlaying(&config, IsOwnerAudible());
-      if (NS_WARN_IF(NS_FAILED(rv))) {
-        return;
-      }
-
-      WindowVolumeChanged(config.mVolume, config.mMuted);
-      WindowSuspendChanged(config.mSuspend);
-    } else {
-      mAudioChannelAgent->NotifyStoppedPlaying();
+    MOZ_ASSERT(!mAudioChannelAgent->IsPlayingStarted());
+    if (NS_WARN_IF(NS_FAILED(
+            mAudioChannelAgent->NotifyStartedPlaying(IsOwnerAudible())))) {
+      return;
     }
+    mAudioChannelAgent->PullInitialUpdate();
+  }
+
+  void StopAudioChanelAgent() {
+    MOZ_ASSERT(mAudioChannelAgent);
+    MOZ_ASSERT(mAudioChannelAgent->IsPlayingStarted());
+    mAudioChannelAgent->NotifyStoppedPlaying();
+    // If we have started audio capturing before, we have to tell media element
+    // to clear the output capturing track.
+    mOwner->AudioCaptureTrackChange(false);
   }
 
   void SetSuspended(SuspendTypes aSuspend) {
@@ -1307,43 +1631,18 @@ class HTMLMediaElement::AudioChannelAgentCallback final
         }));
   }
 
-  bool IsTabActivated() {
-    if (MaybeCreateAudioChannelAgent()) {
-      return !mAudioChannelAgent->ShouldBlockMedia();
-    }
-    return false;
-  }
-
   bool IsSuspended() const {
     return (mSuspended == nsISuspendedTypes::SUSPENDED_PAUSE ||
-            mSuspended == nsISuspendedTypes::SUSPENDED_PAUSE_DISPOSABLE ||
-            mSuspended == nsISuspendedTypes::SUSPENDED_BLOCK);
+            mSuspended == nsISuspendedTypes::SUSPENDED_PAUSE_DISPOSABLE);
   }
 
   AudibleState IsOwnerAudible() const {
-    // Muted or the volume should not be ~0
-    if (mOwner->mMuted || (std::fabs(mOwner->Volume()) <= 1e-7)) {
-      return mOwner->HasAudio()
-                 ? AudioChannelService::AudibleState::eMaybeAudible
-                 : AudioChannelService::AudibleState::eNotAudible;
-    }
-
-    // No audio track.
-    if (!mOwner->HasAudio()) {
-      return AudioChannelService::AudibleState::eNotAudible;
-    }
-
-    // Might be audible but not yet.
-    if (mOwner->HasAudio() && !mOwner->mIsAudioTrackAudible) {
-      return AudioChannelService::AudibleState::eMaybeAudible;
-    }
-
     // Suspended or paused media doesn't produce any sound.
     if (mSuspended != nsISuspendedTypes::NONE_SUSPENDED || mOwner->mPaused) {
-      return AudioChannelService::AudibleState::eNotAudible;
+      return AudibleState::eNotAudible;
     }
-
-    return AudioChannelService::AudibleState::eAudible;
+    return mOwner->IsAudible() ? AudibleState::eAudible
+                               : AudibleState::eNotAudible;
   }
 
   bool IsPlayingThroughTheAudioChannel() const {
@@ -1397,8 +1696,6 @@ class HTMLMediaElement::AudioChannelAgentCallback final
   float mAudioChannelVolume;
   // Is this media element playing?
   bool mPlayingThroughTheAudioChannel;
-  // True if the sound is being captured by the window.
-  bool mAudioCapturedByWindow;
   // We have different kinds of suspended cases,
   // - SUSPENDED_PAUSE
   // It's used when we temporary lost platform audio focus. MediaElement can
@@ -1406,10 +1703,6 @@ class HTMLMediaElement::AudioChannelAgentCallback final
   // - SUSPENDED_PAUSE_DISPOSABLE
   // It's used when user press the pause button on the remote media-control.
   // MediaElement can be resumed by remote media-control or via play().
-  // - SUSPENDED_BLOCK
-  // It's used to reduce the power consumption, we won't play the auto-play
-  // audio/video in the page we have never visited before. MediaElement would
-  // be resumed when the page is active. See bug647429 for more details.
   // - SUSPENDED_STOP_DISPOSABLE
   // When we permanently lost platform audio focus, we should stop playing
   // and stop the audio channel agent. MediaElement can only be restarted by
@@ -1685,9 +1978,8 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLMediaElement,
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSourceLoadCandidate)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAudioChannelWrapper)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mErrorSink->mError)
-  for (uint32_t i = 0; i < tmp->mOutputStreams.Length(); ++i) {
-    NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mOutputStreams[i].mStream)
-  }
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mOutputStreams)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mOutputTrackSources);
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mPlayed);
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mTextTrackManager)
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mAudioTrackList)
@@ -1704,10 +1996,21 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLMediaElement,
                                                 nsGenericHTMLElement)
   tmp->RemoveMutationObserver(tmp);
   if (tmp->mSrcStream) {
-    // Need to EndMediaStreamPlayback to clear mSrcStream and make sure
-    // everything gets unhooked correctly.
-    tmp->EndSrcMediaStreamPlayback();
+    // Need to unhook everything that EndSrcMediaStreamPlayback would normally
+    // do, without creating any new strong references.
+    if (tmp->mSelectedVideoStreamTrack) {
+      tmp->mSelectedVideoStreamTrack->RemovePrincipalChangeObserver(tmp);
+    }
+    if (tmp->mFirstFrameListener) {
+      tmp->mSelectedVideoStreamTrack->RemoveVideoOutput(
+          tmp->mFirstFrameListener);
+    }
+    if (tmp->mMediaStreamTrackListener) {
+      tmp->mSrcStream->UnregisterTrackListener(
+          tmp->mMediaStreamTrackListener.get());
+    }
   }
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mSrcStream)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mSrcAttrStream)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mMediaSource)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mSrcMediaSource)
@@ -1719,10 +2022,8 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLMediaElement,
   }
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mAudioChannelWrapper)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mErrorSink->mError)
-  for (OutputMediaStream& s : tmp->mOutputStreams) {
-    s.mStream->SetFinishedOnInactive(true);
-  }
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mOutputStreams)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mOutputTrackSources)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mPlayed)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mTextTrackManager)
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mAudioTrackList)
@@ -1737,6 +2038,21 @@ NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED_0(HTMLMediaElement,
                                                nsGenericHTMLElement)
+
+void HTMLMediaElement::AddSizeOfExcludingThis(nsWindowSizes& aSizes,
+                                              size_t* aNodeSize) const {
+  nsGenericHTMLElement::AddSizeOfExcludingThis(aSizes, aNodeSize);
+
+  // There are many other fields that might be worth reporting, but as seen in
+  // bug 1595603, mPendingEvents can grow to be very large sometimes, so at
+  // least report that.
+  *aNodeSize +=
+      mPendingEvents.ShallowSizeOfExcludingThis(aSizes.mState.mMallocSizeOf);
+  for (const nsString& event : mPendingEvents) {
+    *aNodeSize +=
+        event.SizeOfExcludingThisIfUnshared(aSizes.mState.mMallocSizeOf);
+  }
+}
 
 void HTMLMediaElement::ContentRemoved(nsIContent* aChild,
                                       nsIContent* aPreviousSibling) {
@@ -1772,7 +2088,9 @@ already_AddRefed<Promise> HTMLMediaElement::MozRequestDebugInfo(
             [promise, ptr = std::move(result)]() {
               promise->MaybeResolve(ptr.get());
             },
-            []() { UNREACHABLE(); });
+            []() {
+              MOZ_ASSERT_UNREACHABLE("Unexpected RequestDebugInfo() rejection");
+            });
   } else {
     promise->MaybeResolve(result.get());
   }
@@ -1851,7 +2169,7 @@ void HTMLMediaElement::SetSrcObject(DOMMediaStream* aValue) {
 
 bool HTMLMediaElement::Ended() {
   return (mDecoder && mDecoder->IsEnded()) ||
-         (mSrcStream && mSrcStreamPlaybackEnded);
+         (mSrcStream && mSrcStreamReportPlaybackEnded);
 }
 
 void HTMLMediaElement::GetCurrentSrc(nsAString& aCurrentSrc) {
@@ -1875,7 +2193,6 @@ void HTMLMediaElement::ShutdownDecoder() {
   if (mMediaSource) {
     mMediaSource->CompletePendingTransactions();
   }
-  DiscardFinishWhenEndedOutputStreams();
   mDecoder->Shutdown();
   DDUNLINKCHILD(mDecoder.get());
   mDecoder = nullptr;
@@ -1954,19 +2271,11 @@ void HTMLMediaElement::AbortExistingLoads() {
 
   // We need to remove FirstFrameListener before VideoTracks get emptied.
   if (mFirstFrameListener) {
-    mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    if (mSelectedVideoStreamTrack) {
+      // Unlink might have removed the selected video track.
+      mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    }
     mFirstFrameListener = nullptr;
-  }
-
-  // When aborting the existing loads, empty the objects in audio track list and
-  // video track list, no events (in particular, no removetrack events) are
-  // fired as part of this. Ending MediaStream sends track ended notifications,
-  // so we empty the track lists prior.
-  if (AudioTracks()) {
-    AudioTracks()->EmptyTracks();
-  }
-  if (VideoTracks()) {
-    VideoTracks()->EmptyTracks();
   }
 
   if (mDecoder) {
@@ -1976,8 +2285,6 @@ void HTMLMediaElement::AbortExistingLoads() {
   if (mSrcStream) {
     EndSrcMediaStreamPlayback();
   }
-
-  DiscardFinishWhenEndedOutputStreams();
 
   RemoveMediaElementFromURITable();
   mLoadingSrc = nullptr;
@@ -2006,6 +2313,7 @@ void HTMLMediaElement::AbortExistingLoads() {
   mPendingEncryptedInitData.Reset();
   mWaitingForKey = NOT_WAITING_FOR_KEY;
   mSourcePointer = nullptr;
+  mIsBlessed = false;
 
   mTags = nullptr;
   mAudioTrackSilenceStartedTime = 0.0;
@@ -2020,6 +2328,7 @@ void HTMLMediaElement::AbortExistingLoads() {
       RejectPromises(TakePendingPlayPromises(), NS_ERROR_DOM_MEDIA_ABORT_ERR);
     }
     ChangeNetworkState(NETWORK_EMPTY);
+    RemoveMediaTracks();
     ChangeReadyState(HAVE_NOTHING);
 
     // TODO: Apply the rules for text track cue rendering Bug 865407
@@ -2044,6 +2353,10 @@ void HTMLMediaElement::AbortExistingLoads() {
     Invalidate(true, size, false);
   }
 
+  // As aborting current load would stop current playback, so we have no need to
+  // resume a paused media element.
+  ClearResumeDelayedMediaPlaybackAgentIfNeeded();
+
   // We may have changed mPaused, mAutoplaying, and other
   // things which can affect AddRemoveSelfReference
   AddRemoveSelfReference();
@@ -2063,6 +2376,7 @@ void HTMLMediaElement::NoSupportedMediaSourceError(
     ShutdownDecoder();
   }
   mErrorSink->SetError(MEDIA_ERR_SRC_NOT_SUPPORTED, aErrorDetails);
+  RemoveMediaTracks();
   ChangeDelayLoadStatus(false);
   UpdateAudioChannelPlayingState();
   RejectPromises(TakePendingPlayPromises(),
@@ -2163,12 +2477,11 @@ void HTMLMediaElement::Load() {
        "ownerDoc=%p (%s) ownerDocUserActivated=%d "
        "muted=%d volume=%f",
        this, !!mSrcAttrStream, HasAttr(kNameSpaceID_None, nsGkAtoms::src),
-       HasSourceChildren(this), EventStateManager::IsHandlingUserInput(),
+       HasSourceChildren(this), UserActivation::IsHandlingUserInput(),
        HasAttr(kNameSpaceID_None, nsGkAtoms::autoplay),
        AutoplayPolicy::IsAllowedToPlay(*this), OwnerDoc(),
        DocumentOrigin(OwnerDoc()).get(),
-       OwnerDoc() ? OwnerDoc()->HasBeenUserGestureActivated() : 0, mMuted,
-       mVolume));
+       OwnerDoc()->HasBeenUserGestureActivated(), mMuted, mVolume));
 
   if (mIsRunningLoadMethod) {
     return;
@@ -2190,7 +2503,7 @@ void HTMLMediaElement::DoLoad() {
     return;
   }
 
-  if (EventStateManager::IsHandlingUserInput()) {
+  if (UserActivation::IsHandlingUserInput()) {
     // Detect if user has interacted with element so that play will not be
     // blocked when initiated by a script. This enables sites to capture user
     // intent to play by calling load() in the click handler of a "catalog
@@ -2221,8 +2534,11 @@ void HTMLMediaElement::ResetState() {
     mVideoFrameContainer->ForgetElement();
     mVideoFrameContainer = nullptr;
   }
-  // mMediaStreamRenderer, has a strong reference to mVideoFrameContainer.
-  mMediaStreamRenderer = nullptr;
+  if (mMediaStreamRenderer) {
+    // mMediaStreamRenderer, has a strong reference to mVideoFrameContainer.
+    mMediaStreamRenderer->Shutdown();
+    mMediaStreamRenderer = nullptr;
+  }
 }
 
 void HTMLMediaElement::SelectResourceWrapper() {
@@ -2317,7 +2633,7 @@ void HTMLMediaElement::NotifyLoadError(const nsACString& aErrorDetails) {
   }
 }
 
-void HTMLMediaElement::NotifyMediaTrackEnabled(MediaTrack* aTrack) {
+void HTMLMediaElement::NotifyMediaTrackEnabled(dom::MediaTrack* aTrack) {
   MOZ_ASSERT(aTrack);
   if (!aTrack) {
     return;
@@ -2347,15 +2663,18 @@ void HTMLMediaElement::NotifyMediaTrackEnabled(MediaTrack* aTrack) {
   }
 
   if (mSrcStream) {
-    MOZ_ASSERT(mMediaStreamRenderer);
     if (AudioTrack* t = aTrack->AsAudioTrack()) {
-      mMediaStreamRenderer->AddTrack(t->GetAudioStreamTrack());
+      if (mMediaStreamRenderer) {
+        mMediaStreamRenderer->AddTrack(t->GetAudioStreamTrack());
+      }
     } else if (VideoTrack* t = aTrack->AsVideoTrack()) {
       MOZ_ASSERT(!mSelectedVideoStreamTrack);
 
       mSelectedVideoStreamTrack = t->GetVideoStreamTrack();
       mSelectedVideoStreamTrack->AddPrincipalChangeObserver(this);
-      mMediaStreamRenderer->AddTrack(mSelectedVideoStreamTrack);
+      if (mMediaStreamRenderer) {
+        mMediaStreamRenderer->AddTrack(mSelectedVideoStreamTrack);
+      }
       nsContentUtils::CombineResourcePrincipals(
           &mSrcStreamVideoPrincipal, mSelectedVideoStreamTrack->GetPrincipal());
       if (VideoFrameContainer* container = GetVideoFrameContainer()) {
@@ -2374,41 +2693,33 @@ void HTMLMediaElement::NotifyMediaTrackEnabled(MediaTrack* aTrack) {
         }
       }
     }
-
-    if (mReadyState == HAVE_NOTHING) {
-      // No MediaStreamTracks are captured until we have metadata.
-      return;
-    }
-    for (OutputMediaStream& ms : mOutputStreams) {
-      if (aTrack->AsVideoTrack() && ms.mCapturingAudioOnly) {
-        // If the output stream is for audio only we ignore video tracks.
-        continue;
-      }
-      AddCaptureMediaTrackToOutputStream(aTrack, ms);
-    }
   }
+
+  // The set of enabled/selected tracks changed.
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateOutputTrackSources);
 }
 
-void HTMLMediaElement::NotifyMediaTrackDisabled(MediaTrack* aTrack) {
+void HTMLMediaElement::NotifyMediaTrackDisabled(dom::MediaTrack* aTrack) {
   MOZ_ASSERT(aTrack);
   if (!aTrack) {
     return;
   }
-#ifdef DEBUG
+
   nsString id;
   aTrack->GetId(id);
 
   LOG(LogLevel::Debug, ("MediaElement %p %sTrack with id %s disabled", this,
                         aTrack->AsAudioTrack() ? "Audio" : "Video",
                         NS_ConvertUTF16toUTF8(id).get()));
-#endif
 
   MOZ_ASSERT((!aTrack->AsAudioTrack() || !aTrack->AsAudioTrack()->Enabled()) &&
              (!aTrack->AsVideoTrack() || !aTrack->AsVideoTrack()->Selected()));
 
   if (AudioTrack* t = aTrack->AsAudioTrack()) {
-    if (mMediaStreamRenderer) {
-      mMediaStreamRenderer->RemoveTrack(t->GetAudioStreamTrack());
+    if (mSrcStream) {
+      if (mMediaStreamRenderer) {
+        mMediaStreamRenderer->RemoveTrack(t->GetAudioStreamTrack());
+      }
     }
     // If we don't have any live tracks, we don't need to mute MediaElement.
     MOZ_DIAGNOSTIC_ASSERT(AudioTracks(), "Element can't have been unlinked");
@@ -2426,58 +2737,23 @@ void HTMLMediaElement::NotifyMediaTrackDisabled(MediaTrack* aTrack) {
       }
     }
   } else if (aTrack->AsVideoTrack()) {
-    if (mMediaStreamRenderer) {
+    if (mSrcStream) {
       MOZ_DIAGNOSTIC_ASSERT(mSelectedVideoStreamTrack ==
                             aTrack->AsVideoTrack()->GetVideoStreamTrack());
       if (mFirstFrameListener) {
         mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
         mFirstFrameListener = nullptr;
       }
-      mMediaStreamRenderer->RemoveTrack(mSelectedVideoStreamTrack);
+      if (mMediaStreamRenderer) {
+        mMediaStreamRenderer->RemoveTrack(mSelectedVideoStreamTrack);
+      }
       mSelectedVideoStreamTrack->RemovePrincipalChangeObserver(this);
       mSelectedVideoStreamTrack = nullptr;
     }
   }
 
-  if (mReadyState == HAVE_NOTHING) {
-    // No MediaStreamTracks are captured until we have metadata, and code
-    // below doesn't do anything for captured decoders.
-    return;
-  }
-
-  for (OutputMediaStream& ms : mOutputStreams) {
-    if (ms.mCapturingDecoder) {
-      MOZ_ASSERT(!ms.mCapturingMediaStream);
-      continue;
-    }
-    if (ms.mCapturingAudioOnly && aTrack->AsVideoTrack()) {
-      continue;
-    }
-    MOZ_ASSERT(ms.mCapturingMediaStream);
-    for (int32_t i = ms.mTracks.Length() - 1; i >= 0; --i) {
-      if (ms.mTracks[i].first() != aTrack->GetId()) {
-        continue;
-      }
-      // The source of this track just ended. Force-notify that it ended.
-      // If we bounce it to the MediaStreamGraph it might not be picked up,
-      // for instance if the MediaInputPort was destroyed in the same
-      // iteration as it was added.
-      mMainThreadEventTarget->Dispatch(NewRunnableMethod(
-          "StreamCaptureTrackSource::OverrideEnded",
-          static_cast<StreamCaptureTrackSource*>(ms.mTracks[i].second().get()),
-          &StreamCaptureTrackSource::OverrideEnded));
-
-      ms.mTracks.RemoveElementAt(i);
-      break;
-    }
-#ifdef DEBUG
-    for (auto pair : ms.mTracks) {
-      MOZ_ASSERT(pair.first() != aTrack->GetId(),
-                 "The same MediaTrack was forwarded to the output stream more "
-                 "than once. This shouldn't happen.");
-    }
-#endif
-  }
+  // The set of enabled/selected tracks changed.
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateOutputTrackSources);
 }
 
 void HTMLMediaElement::DealWithFailedElement(nsIContent* aSourceElement) {
@@ -2498,6 +2774,8 @@ void HTMLMediaElement::LoadFromSourceChildren() {
                "Must remember we're loading from source children");
 
   AddMutationObserverUnlessExists(this);
+
+  RemoveMediaTracks();
 
   while (true) {
     Element* child = GetNextSource();
@@ -2521,7 +2799,8 @@ void HTMLMediaElement::LoadFromSourceChildren() {
 
     // If we have a type attribute, it must be a supported type.
     nsAutoString type;
-    if (child->GetAttr(kNameSpaceID_None, nsGkAtoms::type, type)) {
+    if (child->GetAttr(kNameSpaceID_None, nsGkAtoms::type, type) &&
+        !type.IsEmpty()) {
       DecoderDoctorDiagnostics diagnostics;
       CanPlayStatus canPlay = GetCanPlay(type, &diagnostics);
       diagnostics.StoreFormatDiagnostics(OwnerDoc(), type,
@@ -2534,7 +2813,8 @@ void HTMLMediaElement::LoadFromSourceChildren() {
 
         while (nextChild) {
           if (nextChild && nextChild->IsHTMLElement(nsGkAtoms::source)) {
-            ReportLoadError("MediaLoadUnsupportedTypeAttributeLoadingNextChild", params);
+            ReportLoadError("MediaLoadUnsupportedTypeAttributeLoadingNextChild",
+                            params);
             break;
           }
 
@@ -2898,7 +3178,7 @@ void HTMLMediaElement::Seek(double aTime, SeekTarget::Type aSeekType,
 
   // Detect if user has interacted with element by seeking so that
   // play will not be blocked when initiated by a script.
-  if (EventStateManager::IsHandlingUserInput()) {
+  if (UserActivation::IsHandlingUserInput()) {
     mIsBlessed = true;
   }
 
@@ -3075,6 +3355,9 @@ void HTMLMediaElement::Pause(ErrorResult& aRv) {
     mAudioChannelWrapper->NotifyPlayStateChanged();
   }
 
+  // We don't need to resume media which is paused explicitly by user.
+  ClearResumeDelayedMediaPlaybackAgentIfNeeded();
+
   if (!oldPaused) {
     FireTimeUpdate(false);
     DispatchAsyncEvent(NS_LITERAL_STRING("pause"));
@@ -3190,106 +3473,295 @@ void HTMLMediaElement::SetMuted(bool aMuted) {
   PauseIfShouldNotBePlaying();
 }
 
-void HTMLMediaElement::SetCapturedOutputStreamsEnabled(bool aEnabled) {
-  for (OutputMediaStream& ms : mOutputStreams) {
-    if (ms.mCapturingDecoder) {
-      MOZ_ASSERT(!ms.mCapturingMediaStream);
-      continue;
+void HTMLMediaElement::GetAllEnabledMediaTracks(
+    nsTArray<RefPtr<MediaTrack>>& aTracks) {
+  if (AudioTrackList* tracks = AudioTracks()) {
+    for (size_t i = 0; i < tracks->Length(); ++i) {
+      AudioTrack* track = (*tracks)[i];
+      if (track->Enabled()) {
+        aTracks.AppendElement(track);
+      }
     }
-    for (auto pair : ms.mTracks) {
-      static_cast<StreamCaptureTrackSource*>(pair.second().get())
-          ->SetEnabled(aEnabled);
-
-      LOG(LogLevel::Debug, ("%s track %p for captured MediaStream %p",
-                            aEnabled ? "Enabled" : "Disabled",
-                            pair.second().get(), ms.mStream.get()));
+  }
+  if (IsVideo()) {
+    if (VideoTrackList* tracks = VideoTracks()) {
+      for (size_t i = 0; i < tracks->Length(); ++i) {
+        VideoTrack* track = (*tracks)[i];
+        if (track->Selected()) {
+          aTracks.AppendElement(track);
+        }
+      }
     }
   }
 }
 
-void HTMLMediaElement::AddCaptureMediaTrackToOutputStream(
-    MediaTrack* aTrack, OutputMediaStream& aOutputStream, bool aAsyncAddtrack) {
-  if (aOutputStream.mCapturingDecoder) {
-    MOZ_ASSERT(!aOutputStream.mCapturingMediaStream);
-    return;
+void HTMLMediaElement::SetCapturedOutputStreamsEnabled(bool aEnabled) {
+  for (auto& entry : mOutputTrackSources) {
+    entry.GetData()->SetEnabled(aEnabled);
   }
-  aOutputStream.mCapturingMediaStream = true;
+}
 
+HTMLMediaElement::OutputMuteState HTMLMediaElement::OutputTracksMuted() {
+  return mPaused || mReadyState <= HAVE_CURRENT_DATA ? OutputMuteState::Muted
+                                                     : OutputMuteState::Unmuted;
+}
+
+void HTMLMediaElement::UpdateOutputTracksMuting() {
+  for (auto& entry : mOutputTrackSources) {
+    entry.GetData()->SetMutedByElement(OutputTracksMuted());
+  }
+}
+
+void HTMLMediaElement::AddOutputTrackSourceToOutputStream(
+    MediaElementTrackSource* aSource, OutputMediaStream& aOutputStream,
+    AddTrackMode aMode) {
   if (aOutputStream.mStream == mSrcStream) {
     // Cycle detected. This can happen since tracks are added async.
     // We avoid forwarding it to the output here or we'd get into an infloop.
+    LOG(LogLevel::Warning,
+        ("NOT adding output track source %p to output stream "
+         "%p -- cycle detected",
+         aSource, aOutputStream.mStream.get()));
     return;
   }
 
-  if (!aTrack) {
-    MOZ_ASSERT(false, "Bad MediaTrack");
-    return;
+  LOG(LogLevel::Debug, ("Adding output track source %p to output stream %p",
+                        aSource, aOutputStream.mStream.get()));
+
+  RefPtr<MediaStreamTrack> domTrack;
+  if (aSource->Track()->mType == MediaSegment::AUDIO) {
+    domTrack = new AudioStreamTrack(
+        aOutputStream.mStream->GetParentObject(), aSource->Track(), aSource,
+        MediaStreamTrackState::Live, aSource->Muted());
+  } else {
+    domTrack = new VideoStreamTrack(
+        aOutputStream.mStream->GetParentObject(), aSource->Track(), aSource,
+        MediaStreamTrackState::Live, aSource->Muted());
   }
 
-  MediaStreamTrack* inputTrack = mSrcStream->GetTrackById(aTrack->GetId());
-  MOZ_ASSERT(inputTrack);
-  if (!inputTrack) {
-    NS_ERROR("Input track not found in source stream");
-    return;
-  }
-  MOZ_DIAGNOSTIC_ASSERT(!inputTrack->Ended());
+  aOutputStream.mLiveTracks.AppendElement(domTrack);
 
+  switch (aMode) {
+    case AddTrackMode::ASYNC:
+      mMainThreadEventTarget->Dispatch(
+          NewRunnableMethod<StoreRefPtrPassByPtr<MediaStreamTrack>>(
+              "DOMMediaStream::AddTrackInternal", aOutputStream.mStream,
+              &DOMMediaStream::AddTrackInternal, domTrack));
+      break;
+    case AddTrackMode::SYNC:
+      aOutputStream.mStream->AddTrackInternal(domTrack);
+      break;
+    default:
+      MOZ_CRASH("Unexpected mode");
+  }
+
+  LOG(LogLevel::Debug,
+      ("Created capture %s track %p",
+       domTrack->AsAudioStreamTrack() ? "audio" : "video", domTrack.get()));
+}
+
+void HTMLMediaElement::UpdateOutputTrackSources() {
+  // This updates the track sources in mOutputTrackSources so they're in sync
+  // with the tracks being currently played, and state saying whether we should
+  // be capturing tracks. This method is long so here is a breakdown:
+  // - Figure out the tracks that should be captured
+  // - Diff those against currently captured tracks (mOutputTrackSources), into
+  //   tracks-to-add, and tracks-to-remove
+  // - Remove the tracks in tracks-to-remove and dispatch "removetrack" and
+  //   "ended" events for them
+  // - If playback has ended, or there is no longer a media provider object,
+  //   remove any OutputMediaStreams that have the finish-when-ended flag set
+  // - Create track sources for, and add to OutputMediaStreams, the tracks in
+  //   tracks-to-add
+
+  const bool shouldHaveTrackSources = mTracksCaptured.Ref() &&
+                                      !IsPlaybackEnded() &&
+                                      mReadyState >= HAVE_METADATA;
+
+  // Add track sources for all enabled/selected MediaTracks.
   nsPIDOMWindowInner* window = OwnerDoc()->GetInnerWindow();
   if (!window) {
     return;
   }
 
-  ProcessedMediaStream* stream = inputTrack->Graph()->CreateTrackUnionStream();
-  RefPtr<MediaInputPort> port = inputTrack->ForwardTrackContentsTo(stream);
-  auto source = MakeRefPtr<StreamCaptureTrackSource>(&inputTrack->GetSource(),
-                                                     stream, port);
-
-  // Track is muted initially, so we don't leak data if it's added while paused
-  // and an MSG iteration passes before the mute comes into effect.
-  source->SetEnabled(mSrcStreamIsPlaying);
-
-  RefPtr<MediaStreamTrack> track;
-  if (inputTrack->AsAudioStreamTrack()) {
-    track =
-        new AudioStreamTrack(window, stream, inputTrack->GetTrackID(), source);
-  } else {
-    track =
-        new VideoStreamTrack(window, stream, inputTrack->GetTrackID(), source);
+  if (mDecoder) {
+    mDecoder->SetOutputCaptured(mTracksCaptured.Ref());
   }
 
-  aOutputStream.mTracks.AppendElement(
-      Pair<nsString, RefPtr<MediaStreamTrackSource>>(aTrack->GetId(),
-                                                     source.get()));
+  // Start with all MediaTracks
+  AutoTArray<RefPtr<MediaTrack>, 4> mediaTracksToAdd;
+  if (shouldHaveTrackSources) {
+    GetAllEnabledMediaTracks(mediaTracksToAdd);
+  }
 
-  if (aAsyncAddtrack) {
+  // ...and all MediaElementTrackSources.
+  AutoTArray<nsString, 4> trackSourcesToRemove;
+  for (const auto& entry : mOutputTrackSources) {
+    trackSourcesToRemove.AppendElement(entry.GetKey());
+  }
+
+  // Then work out the differences.
+  for (const auto& track :
+       AutoTArray<RefPtr<MediaTrack>, 4>(mediaTracksToAdd)) {
+    if (mOutputTrackSources.GetWeak(track->GetId())) {
+      mediaTracksToAdd.RemoveElement(track);
+      trackSourcesToRemove.RemoveElement(track->GetId());
+    }
+  }
+
+  // First remove stale track sources.
+  for (const auto& id : trackSourcesToRemove) {
+    RefPtr<MediaElementTrackSource> source = mOutputTrackSources.GetWeak(id);
+
+    LOG(LogLevel::Debug, ("Removing output track source %p for track %s",
+                          source.get(), NS_ConvertUTF16toUTF8(id).get()));
+
+    if (mDecoder) {
+      mDecoder->RemoveOutputTrack(source->Track());
+    }
+
+    // The source of this track just ended. Force-notify that it ended.
+    // If we bounce it to the MediaTrackGraph it might not be picked up,
+    // for instance if the MediaInputPort was destroyed in the same
+    // iteration as it was added.
     mMainThreadEventTarget->Dispatch(
-        NewRunnableMethod<StoreRefPtrPassByPtr<MediaStreamTrack>>(
-            "DOMMediaStream::AddTrackInternal", aOutputStream.mStream,
-            &DOMMediaStream::AddTrackInternal, track));
-  } else {
-    aOutputStream.mStream->AddTrackInternal(track);
+        NewRunnableMethod("MediaElementTrackSource::OverrideEnded", source,
+                          &MediaElementTrackSource::OverrideEnded));
+
+    // Remove the track from the MediaStream after it ended.
+    for (OutputMediaStream& ms : mOutputStreams) {
+      if (source->Track()->mType == MediaSegment::VIDEO &&
+          ms.mCapturingAudioOnly) {
+        continue;
+      }
+      DebugOnly<size_t> length = ms.mLiveTracks.Length();
+      ms.mLiveTracks.RemoveElementsBy(
+          [&](const RefPtr<MediaStreamTrack>& aTrack) {
+            if (&aTrack->GetSource() != source) {
+              return false;
+            }
+            mMainThreadEventTarget->Dispatch(
+                NewRunnableMethod<RefPtr<MediaStreamTrack>>(
+                    "DOMMediaStream::RemoveTrackInternal", ms.mStream,
+                    &DOMMediaStream::RemoveTrackInternal, aTrack));
+            return true;
+          });
+      MOZ_ASSERT(ms.mLiveTracks.Length() == length - 1);
+    }
+
+    mOutputTrackSources.Remove(id);
   }
 
-  LOG(LogLevel::Debug,
-      ("Created %s track %p from track %p through MediaInputPort %p",
-       inputTrack->AsAudioStreamTrack() ? "audio" : "video", track.get(),
-       inputTrack, port.get()));
-}
-
-void HTMLMediaElement::DiscardFinishWhenEndedOutputStreams() {
-  // Discard all output streams that have finished now.
+  // Then update finish-when-ended output streams as needed.
   for (int32_t i = mOutputStreams.Length() - 1; i >= 0; --i) {
     if (!mOutputStreams[i].mFinishWhenEnded) {
       continue;
     }
-    LOG(LogLevel::Debug,
-        ("Playback ended. Letting output stream %p go inactive",
-         mOutputStreams[i].mStream.get()));
-    mOutputStreams[i].mStream->SetFinishedOnInactive(true);
-    if (mOutputStreams[i].mCapturingDecoder) {
-      mDecoder->RemoveOutputStream(mOutputStreams[i].mStream);
+
+    if (!mOutputStreams[i].mFinishWhenEndedLoadingSrc &&
+        !mOutputStreams[i].mFinishWhenEndedAttrStream) {
+      // This finish-when-ended stream has not seen any source loaded yet.
+      // Update the loading src if it's time.
+      if (!IsPlaybackEnded()) {
+        if (mLoadingSrc) {
+          mOutputStreams[i].mFinishWhenEndedLoadingSrc = mLoadingSrc;
+        } else if (mSrcAttrStream) {
+          mOutputStreams[i].mFinishWhenEndedAttrStream = mSrcAttrStream;
+        }
+      }
+      continue;
     }
+
+    // Discard finish-when-ended output streams with a loading src set as
+    // needed.
+    if (!IsPlaybackEnded() &&
+        mLoadingSrc == mOutputStreams[i].mFinishWhenEndedLoadingSrc) {
+      continue;
+    }
+    if (!IsPlaybackEnded() &&
+        mSrcAttrStream == mOutputStreams[i].mFinishWhenEndedAttrStream) {
+      continue;
+    }
+    LOG(LogLevel::Debug,
+        ("Playback ended or source changed. Discarding stream %p",
+         mOutputStreams[i].mStream.get()));
     mOutputStreams.RemoveElementAt(i);
+    if (mOutputStreams.IsEmpty()) {
+      mTracksCaptured = nullptr;
+    }
+  }
+
+  // Finally add new MediaTracks.
+  for (const auto& mediaTrack : mediaTracksToAdd) {
+    nsAutoString id;
+    mediaTrack->GetId(id);
+
+    MediaSegment::Type type;
+    if (mediaTrack->AsAudioTrack()) {
+      type = MediaSegment::AUDIO;
+    } else if (mediaTrack->AsVideoTrack()) {
+      type = MediaSegment::VIDEO;
+    } else {
+      MOZ_CRASH("Unknown track type");
+    }
+
+    RefPtr<ProcessedMediaTrack> track;
+    RefPtr<MediaElementTrackSource> source;
+    if (mDecoder) {
+      track = mTracksCaptured.Ref()->mTrack->Graph()->CreateForwardedInputTrack(
+          type);
+      RefPtr<nsIPrincipal> principal = GetCurrentPrincipal();
+      if (!principal || IsCORSSameOrigin()) {
+        principal = NodePrincipal();
+      }
+      source = MakeAndAddRef<MediaElementTrackSource>(
+          mMainThreadEventTarget, track, principal, OutputTracksMuted());
+      mDecoder->AddOutputTrack(track);
+    } else if (mSrcStream) {
+      MediaStreamTrack* inputTrack;
+      if (AudioTrack* t = mediaTrack->AsAudioTrack()) {
+        inputTrack = t->GetAudioStreamTrack();
+      } else if (VideoTrack* t = mediaTrack->AsVideoTrack()) {
+        inputTrack = t->GetVideoStreamTrack();
+      } else {
+        MOZ_CRASH("Unknown track type");
+      }
+      MOZ_ASSERT(inputTrack);
+      if (!inputTrack) {
+        NS_ERROR("Input track not found in source stream");
+        return;
+      }
+      MOZ_DIAGNOSTIC_ASSERT(!inputTrack->Ended());
+
+      track = inputTrack->Graph()->CreateForwardedInputTrack(type);
+      RefPtr<MediaInputPort> port = inputTrack->ForwardTrackContentsTo(track);
+      source = MakeAndAddRef<MediaElementTrackSource>(
+          mMainThreadEventTarget, inputTrack, &inputTrack->GetSource(), track,
+          port, OutputTracksMuted());
+
+      // Track is muted initially, so we don't leak data if it's added while
+      // paused and an MTG iteration passes before the mute comes into effect.
+      source->SetEnabled(mSrcStreamIsPlaying);
+    } else {
+      MOZ_CRASH("Unknown source");
+    }
+
+    LOG(LogLevel::Debug, ("Adding output track source %p for track %s",
+                          source.get(), NS_ConvertUTF16toUTF8(id).get()));
+
+    track->QueueSetAutoend(false);
+    MOZ_DIAGNOSTIC_ASSERT(!mOutputTrackSources.GetWeak(id));
+    mOutputTrackSources.Put(id, source);
+
+    // Add the new track source to any existing output streams
+    for (OutputMediaStream& ms : mOutputStreams) {
+      if (source->Track()->mType == MediaSegment::VIDEO &&
+          ms.mCapturingAudioOnly) {
+        // If the output stream is for audio only we ignore video sources.
+        continue;
+      }
+      AddOutputTrackSourceToOutputStream(source, ms);
+    }
   }
 }
 
@@ -3310,32 +3782,49 @@ bool HTMLMediaElement::CanBeCaptured(StreamCaptureType aCaptureType) {
 
 already_AddRefed<DOMMediaStream> HTMLMediaElement::CaptureStreamInternal(
     StreamCaptureBehavior aFinishBehavior, StreamCaptureType aStreamCaptureType,
-    MediaStreamGraph* aGraph) {
-  MOZ_RELEASE_ASSERT(aGraph);
+    MediaTrackGraph* aGraph) {
   MOZ_ASSERT(CanBeCaptured(aStreamCaptureType));
 
   MarkAsContentSource(CallerAPI::CAPTURE_STREAM);
   MarkAsTainted();
 
-  // We don't support routing to a different graph.
-  if (!mOutputStreams.IsEmpty() &&
-      aGraph !=
-          mOutputStreams[0].mGraphKeepAliveDummyStream->mStream->Graph()) {
+  if (mTracksCaptured.Ref() &&
+      aGraph != mTracksCaptured.Ref()->mTrack->Graph()) {
     return nullptr;
   }
 
-  OutputMediaStream* out = mOutputStreams.AppendElement();
+  if (!mTracksCaptured.Ref()) {
+    // This is the first output stream, or there are no tracks. If the former,
+    // start capturing all tracks. If the latter, they will be added later.
+    mTracksCaptured = MakeRefPtr<SharedDummyTrack>(
+        aGraph->CreateSourceTrack(MediaSegment::AUDIO));
+    UpdateOutputTrackSources();
+  }
+
   nsPIDOMWindowInner* window = OwnerDoc()->GetInnerWindow();
-  out->mGraphKeepAliveDummyStream =
-      mOutputStreams.Length() == 1
-          ? MakeRefPtr<SharedDummyStream>(aGraph->CreateSourceStream())
-          : mOutputStreams[0].mGraphKeepAliveDummyStream;
-  out->mStream = MakeAndAddRef<DOMMediaStream>(window);
-  out->mStream->SetFinishedOnInactive(false);
-  out->mFinishWhenEnded =
-      aFinishBehavior == StreamCaptureBehavior::FINISH_WHEN_ENDED;
-  out->mCapturingAudioOnly =
-      aStreamCaptureType == StreamCaptureType::CAPTURE_AUDIO;
+  OutputMediaStream* out = mOutputStreams.AppendElement(OutputMediaStream(
+      MakeRefPtr<DOMMediaStream>(window),
+      aStreamCaptureType == StreamCaptureType::CAPTURE_AUDIO,
+      aFinishBehavior == StreamCaptureBehavior::FINISH_WHEN_ENDED));
+
+  if (aFinishBehavior == StreamCaptureBehavior::FINISH_WHEN_ENDED &&
+      !mOutputTrackSources.IsEmpty()) {
+    // This output stream won't receive any more tracks when playback of the
+    // current src of this media element ends, or when the src of this media
+    // element changes. If we're currently playing something (i.e., if there are
+    // tracks currently captured), set the current src on the output stream so
+    // this can be tracked. If we're not playing anything,
+    // UpdateOutputTrackSources will set the current src when it becomes
+    // available later.
+    if (mLoadingSrc) {
+      out->mFinishWhenEndedLoadingSrc = mLoadingSrc;
+    }
+    if (mSrcAttrStream) {
+      out->mFinishWhenEndedAttrStream = mSrcAttrStream;
+    }
+    MOZ_ASSERT(out->mFinishWhenEndedLoadingSrc ||
+               out->mFinishWhenEndedAttrStream);
+  }
 
   if (aStreamCaptureType == StreamCaptureType::CAPTURE_AUDIO) {
     if (mSrcStream) {
@@ -3351,45 +3840,26 @@ already_AddRefed<DOMMediaStream> HTMLMediaElement::CaptureStreamInternal(
     mAudioCaptured = true;
   }
 
-  if (mDecoder) {
-    out->mCapturingDecoder = true;
-    mDecoder->AddOutputStream(out->mStream, out->mGraphKeepAliveDummyStream);
-  } else if (mSrcStream) {
-    out->mCapturingMediaStream = true;
-  }
-
-  if (mReadyState == HAVE_NOTHING) {
-    // Do not expose the tracks until we have metadata.
-    RefPtr<DOMMediaStream> result = out->mStream;
-    return result.forget();
-  }
-
-  if (mSrcStream) {
-    MOZ_DIAGNOSTIC_ASSERT(AudioTracks(), "Element can't have been unlinked");
-    for (size_t i = 0; i < AudioTracks()->Length(); ++i) {
-      AudioTrack* t = (*AudioTracks())[i];
-      if (t->Enabled()) {
-        AddCaptureMediaTrackToOutputStream(t, *out, false);
-      }
-    }
-    if (IsVideo() && !out->mCapturingAudioOnly) {
-      MOZ_DIAGNOSTIC_ASSERT(VideoTracks(), "Element can't have been unlinked");
+  for (const auto& entry : mOutputTrackSources) {
+    const RefPtr<MediaElementTrackSource>& source = entry.GetData();
+    if (source->Track()->mType == MediaSegment::VIDEO) {
       // Only add video tracks if we're a video element and the output stream
       // wants video.
-      for (size_t i = 0; i < VideoTracks()->Length(); ++i) {
-        VideoTrack* t = (*VideoTracks())[i];
-        if (t->Selected()) {
-          AddCaptureMediaTrackToOutputStream(t, *out, false);
-        }
+      if (!IsVideo()) {
+        continue;
+      }
+      if (out->mCapturingAudioOnly) {
+        continue;
       }
     }
+    AddOutputTrackSourceToOutputStream(source, *out, AddTrackMode::SYNC);
   }
-  RefPtr<DOMMediaStream> result = out->mStream;
-  return result.forget();
+
+  return do_AddRef(out->mStream);
 }
 
 already_AddRefed<DOMMediaStream> HTMLMediaElement::CaptureAudio(
-    ErrorResult& aRv, MediaStreamGraph* aGraph) {
+    ErrorResult& aRv, MediaTrackGraph* aGraph) {
   MOZ_RELEASE_ASSERT(aGraph);
 
   if (!CanBeCaptured(StreamCaptureType::CAPTURE_AUDIO)) {
@@ -3422,9 +3892,9 @@ RefPtr<GenericNonExclusivePromise> HTMLMediaElement::GetAllowedToPlayPromise() {
 
 already_AddRefed<DOMMediaStream> HTMLMediaElement::MozCaptureStream(
     ErrorResult& aRv) {
-  MediaStreamGraph::GraphDriverType graphDriverType =
-      HasAudio() ? MediaStreamGraph::AUDIO_THREAD_DRIVER
-                 : MediaStreamGraph::SYSTEM_THREAD_DRIVER;
+  MediaTrackGraph::GraphDriverType graphDriverType =
+      HasAudio() ? MediaTrackGraph::AUDIO_THREAD_DRIVER
+                 : MediaTrackGraph::SYSTEM_THREAD_DRIVER;
 
   nsPIDOMWindowInner* window = OwnerDoc()->GetInnerWindow();
   if (!window) {
@@ -3437,8 +3907,8 @@ already_AddRefed<DOMMediaStream> HTMLMediaElement::MozCaptureStream(
     return nullptr;
   }
 
-  MediaStreamGraph* graph = MediaStreamGraph::GetInstance(
-      graphDriverType, window, MediaStreamGraph::REQUEST_DEFAULT_SAMPLE_RATE);
+  MediaTrackGraph* graph = MediaTrackGraph::GetInstance(
+      graphDriverType, window, MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE);
 
   RefPtr<DOMMediaStream> stream =
       CaptureStreamInternal(StreamCaptureBehavior::CONTINUE_WHEN_ENDED,
@@ -3453,9 +3923,9 @@ already_AddRefed<DOMMediaStream> HTMLMediaElement::MozCaptureStream(
 
 already_AddRefed<DOMMediaStream> HTMLMediaElement::MozCaptureStreamUntilEnded(
     ErrorResult& aRv) {
-  MediaStreamGraph::GraphDriverType graphDriverType =
-      HasAudio() ? MediaStreamGraph::AUDIO_THREAD_DRIVER
-                 : MediaStreamGraph::SYSTEM_THREAD_DRIVER;
+  MediaTrackGraph::GraphDriverType graphDriverType =
+      HasAudio() ? MediaTrackGraph::AUDIO_THREAD_DRIVER
+                 : MediaTrackGraph::SYSTEM_THREAD_DRIVER;
 
   nsPIDOMWindowInner* window = OwnerDoc()->GetInnerWindow();
   if (!window) {
@@ -3468,8 +3938,8 @@ already_AddRefed<DOMMediaStream> HTMLMediaElement::MozCaptureStreamUntilEnded(
     return nullptr;
   }
 
-  MediaStreamGraph* graph = MediaStreamGraph::GetInstance(
-      graphDriverType, window, MediaStreamGraph::REQUEST_DEFAULT_SAMPLE_RATE);
+  MediaTrackGraph* graph = MediaTrackGraph::GetInstance(
+      graphDriverType, window, MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE);
 
   RefPtr<DOMMediaStream> stream =
       CaptureStreamInternal(StreamCaptureBehavior::FINISH_WHEN_ENDED,
@@ -3671,7 +4141,7 @@ HTMLMediaElement::HTMLMediaElement(
           OwnerDoc()->AbstractMainThreadFor(TaskCategory::Other)),
       mShutdownObserver(new ShutdownObserver),
       mPlayed(new TimeRanges(ToSupports(OwnerDoc()))),
-      mPaused(true, "HTMLMediaElement::mPaused"),
+      mTracksCaptured(nullptr, "HTMLMediaElement::mTracksCaptured"),
       mErrorSink(new ErrorSink(this)),
       mAudioChannelWrapper(new AudioChannelAgentCallback(this)),
       mSink(MakePair(nsString(), RefPtr<AudioDeviceInfo>())),
@@ -3698,6 +4168,21 @@ void HTMLMediaElement::Init() {
   DecoderDoctorLogger::LogConstruction(this);
 
   mWatchManager.Watch(mPaused, &HTMLMediaElement::UpdateWakeLock);
+  mWatchManager.Watch(mPaused, &HTMLMediaElement::UpdateOutputTracksMuting);
+  mWatchManager.Watch(
+      mPaused, &HTMLMediaElement::NotifyMediaControlPlaybackStateChanged);
+  mWatchManager.Watch(mReadyState, &HTMLMediaElement::UpdateOutputTracksMuting);
+
+  mWatchManager.Watch(mTracksCaptured,
+                      &HTMLMediaElement::UpdateOutputTrackSources);
+  mWatchManager.Watch(mReadyState, &HTMLMediaElement::UpdateOutputTrackSources);
+
+  mWatchManager.Watch(mDownloadSuspendedByCache,
+                      &HTMLMediaElement::UpdateReadyStateInternal);
+  mWatchManager.Watch(mFirstFrameLoaded,
+                      &HTMLMediaElement::UpdateReadyStateInternal);
+  mWatchManager.Watch(mSrcStreamPlaybackEnded,
+                      &HTMLMediaElement::UpdateReadyStateInternal);
 
   ErrorResult rv;
 
@@ -3713,6 +4198,11 @@ void HTMLMediaElement::Init() {
   // in JS)
   MediaShutdownManager::InitStatics();
 
+#if defined(MOZ_WIDGET_ANDROID)
+  GVAutoplayPermissionRequestor::AskForPermissionIfNeeded(
+      OwnerDoc()->GetInnerWindow());
+#endif
+
   mShutdownObserver->Subscribe(this);
   mInitialized = true;
 }
@@ -3723,6 +4213,8 @@ HTMLMediaElement::~HTMLMediaElement() {
   NS_ASSERTION(
       !mHasSelfReference,
       "How can we be destroyed if we're still holding a self reference?");
+
+  mWatchManager.Shutdown();
 
   mShutdownObserver->Unsubscribe();
 
@@ -3760,6 +4252,14 @@ HTMLMediaElement::~HTMLMediaElement() {
     mAudioChannelWrapper = nullptr;
   }
 
+  if (mResumeDelayedPlaybackAgent) {
+    mResumePlaybackRequest.DisconnectIfExists();
+    mResumeDelayedPlaybackAgent = nullptr;
+  }
+
+  StopListeningMediaControlEventIfNeeded();
+  mMediaControlEventListener = nullptr;
+
   WakeLockRelease();
   ReportPlayedTimeAfterBlockedTelemetry();
 
@@ -3793,16 +4293,13 @@ void HTMLMediaElement::SetPlayedOrSeeked(bool aValue) {
 
 void HTMLMediaElement::NotifyXPCOMShutdown() { ShutdownDecoder(); }
 
-bool HTMLMediaElement::AudioChannelAgentDelayingPlayback() {
-  return mAudioChannelWrapper && mAudioChannelWrapper->IsPlaybackBlocked();
-}
-
 void HTMLMediaElement::UpdateHadAudibleAutoplayState() {
   // If we're audible, and autoplaying...
   if ((Volume() > 0.0 && !Muted()) &&
       (!OwnerDoc()->HasBeenUserGestureActivated() || Autoplay())) {
     OwnerDoc()->SetDocTreeHadAudibleMedia();
-    if (AutoplayPolicy::WouldBeAllowedToPlayIfAutoplayDisabled(*this)) {
+    if (AutoplayPolicyTelemetryUtils::WouldBeAllowedToPlayIfAutoplayDisabled(
+            *this)) {
       ScalarAdd(Telemetry::ScalarID::MEDIA_AUTOPLAY_WOULD_BE_ALLOWED_COUNT, 1);
     } else {
       ScalarAdd(Telemetry::ScalarID::MEDIA_AUTOPLAY_WOULD_NOT_BE_ALLOWED_COUNT,
@@ -3813,7 +4310,7 @@ void HTMLMediaElement::UpdateHadAudibleAutoplayState() {
 
 already_AddRefed<Promise> HTMLMediaElement::Play(ErrorResult& aRv) {
   LOG(LogLevel::Debug,
-      ("%p Play() called by JS readyState=%d", this, mReadyState));
+      ("%p Play() called by JS readyState=%d", this, mReadyState.Ref()));
 
   // 4.8.12.8
   // When the play() method on a media element is invoked, the user agent must
@@ -3846,15 +4343,15 @@ already_AddRefed<Promise> HTMLMediaElement::Play(ErrorResult& aRv) {
   // play promises.
   // Note: Promise appended to list of pending promises as needed below.
 
-  if (AudioChannelAgentDelayingPlayback()) {
-    // The audio channel agent may delay starting playback of a media resource
-    // until the tab the media element is in has been in the foreground.
-    // Save a reference to the promise, and return it. The AudioChannelAgent
-    // will call Play() again if the tab is brought to the foreground, or the
-    // audio tab indicator is clicked, which will resolve the promise if we end
-    // up playing.
-    LOG(LogLevel::Debug, ("%p Play() call delayed by AudioChannelAgent", this));
+  // We may delay starting playback of a media resource for an unvisited tab
+  // until it's going to foreground or being resumed by the play tab icon.
+  if (MediaPlaybackDelayPolicy::ShouldDelayPlayback(this)) {
+    CreateResumeDelayedMediaPlaybackAgentIfNeeded();
+    LOG(LogLevel::Debug, ("%p delay Play() call", this));
     MaybeDoLoad();
+    // When play is delayed, save a reference to the promise, and return it.
+    // The promise will be resolved when we resume play by either the tab is
+    // brought to the foreground, or the audio tab indicator is clicked.
     mPendingPlayPromises.AppendElement(promise);
     return promise.forget();
   }
@@ -3867,7 +4364,7 @@ already_AddRefed<Promise> HTMLMediaElement::Play(ErrorResult& aRv) {
 
   UpdateHadAudibleAutoplayState();
 
-  const bool handlingUserInput = EventStateManager::IsHandlingUserInput();
+  const bool handlingUserInput = UserActivation::IsHandlingUserInput();
   mPendingPlayPromises.AppendElement(promise);
 
   if (AutoplayPolicy::IsAllowedToPlay(*this)) {
@@ -3942,7 +4439,7 @@ void HTMLMediaElement::PlayInternal(bool aHandlingUserInput) {
     if (mDecoder->IsEnded()) {
       SetCurrentTime(0);
     }
-    if (!mPausedForInactiveDocumentOrChannel) {
+    if (!mSuspendedForInactiveDocument) {
       mDecoder->Play();
     }
   }
@@ -3960,6 +4457,8 @@ void HTMLMediaElement::PlayInternal(bool aHandlingUserInput) {
   AddRemoveSelfReference();
   UpdatePreloadAction();
   UpdateSrcMediaStreamPlaying();
+
+  StartListeningMediaControlEventIfNeeded();
 
   // Once play() has been called in a user generated event handler,
   // it is allowed to autoplay. Note: we can reach here when not in
@@ -4064,14 +4563,6 @@ void HTMLMediaElement::ReleaseAudioWakeLockIfExists() {
 }
 
 void HTMLMediaElement::WakeLockRelease() { ReleaseAudioWakeLockIfExists(); }
-
-HTMLMediaElement::OutputMediaStream::OutputMediaStream()
-    : mFinishWhenEnded(false),
-      mCapturingAudioOnly(false),
-      mCapturingDecoder(false),
-      mCapturingMediaStream(false) {}
-
-HTMLMediaElement::OutputMediaStream::~OutputMediaStream() = default;
 
 void HTMLMediaElement::GetEventTargetParent(EventChainPreVisitor& aVisitor) {
   if (!this->Controls() || !aVisitor.mEvent->mFlags.mIsTrusted) {
@@ -4255,9 +4746,7 @@ nsresult HTMLMediaElement::BindToTree(BindContext& aContext, nsINode& aParent) {
     // Construct Shadow Root so web content can be hidden in the DOM.
     AttachAndSetUAShadowRoot();
     NotifyUAWidgetSetupOrChange();
-  }
 
-  if (IsInUncomposedDoc()) {
     // The preload action depends on the value of the autoplay attribute.
     // It's value may have changed, so update it.
     UpdatePreloadAction();
@@ -4439,21 +4928,25 @@ void HTMLMediaElement::UnbindFromTree(bool aNullParent) {
   MOZ_ASSERT(IsHidden());
   NotifyDecoderActivityChanges();
 
+  // https://html.spec.whatwg.org/#playing-the-media-resource:remove-an-element-from-a-document
+  //
   // Dispatch a task to run once we're in a stable state which ensures we're
-  // paused if we're no longer in a document. Note we set a flag here to
-  // ensure we don't dispatch redundant tasks.
-  if (!mDispatchedTaskToPauseIfNotInDocument) {
-    mDispatchedTaskToPauseIfNotInDocument = true;
-    nsCOMPtr<nsIRunnable> task = NS_NewRunnableFunction(
-        "dom::HTMLMediaElement::UnbindFromTree",
-        [self = RefPtr<HTMLMediaElement>(this)]() {
-          self->mDispatchedTaskToPauseIfNotInDocument = false;
-          if (!self->IsInComposedDoc()) {
-            self->Pause();
-          }
-        });
-    RunInStableState(task);
-  }
+  // paused if we're no longer in a document. Note that we need to dispatch this
+  // even if there are other tasks in flight for this because these can be
+  // cancelled if there's a new load.
+  //
+  // FIXME(emilio): Per that spec section, we should only do this if we used to
+  // be connected, though other browsers match our current behavior...
+  //
+  // Also, https://github.com/whatwg/html/issues/4928
+  nsCOMPtr<nsIRunnable> task =
+      NS_NewRunnableFunction("dom::HTMLMediaElement::UnbindFromTree",
+                             [self = RefPtr<HTMLMediaElement>(this)]() {
+                               if (!self->IsInComposedDoc()) {
+                                 self->Pause();
+                               }
+                             });
+  RunInStableState(task);
 }
 
 /* static */
@@ -4663,16 +5156,6 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
 #endif
   }
 
-  for (OutputMediaStream& ms : mOutputStreams) {
-    if (ms.mCapturingMediaStream) {
-      MOZ_ASSERT(!ms.mCapturingDecoder);
-      continue;
-    }
-
-    ms.mCapturingDecoder = true;
-    aDecoder->AddOutputStream(ms.mStream, ms.mGraphKeepAliveDummyStream);
-  }
-
   if (mMediaKeys) {
     if (mMediaKeys->GetCDMProxy()) {
       mDecoder->SetCDMProxy(mMediaKeys->GetCDMProxy());
@@ -4700,13 +5183,13 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
     return NS_ERROR_FAILURE;
   }
 
-  if (mPausedForInactiveDocumentOrChannel) {
+  if (mSuspendedForInactiveDocument) {
     mDecoder->Suspend();
   }
 
   if (!mPaused) {
     SetPlayedOrSeeked(true);
-    if (!mPausedForInactiveDocumentOrChannel) {
+    if (!mSuspendedForInactiveDocument) {
       mDecoder->Play();
     }
   }
@@ -4716,135 +5199,13 @@ nsresult HTMLMediaElement::FinishDecoderSetup(MediaDecoder* aDecoder) {
   return NS_OK;
 }
 
-class HTMLMediaElement::MediaStreamTrackListener
-    : public DOMMediaStream::TrackListener {
- public:
-  explicit MediaStreamTrackListener(HTMLMediaElement* aElement)
-      : mElement(aElement) {}
-
-  void NotifyTrackAdded(const RefPtr<MediaStreamTrack>& aTrack) override {
-    if (!mElement) {
-      return;
-    }
-    mElement->NotifyMediaStreamTrackAdded(aTrack);
-  }
-
-  void NotifyTrackRemoved(const RefPtr<MediaStreamTrack>& aTrack) override {
-    if (!mElement) {
-      return;
-    }
-    mElement->NotifyMediaStreamTrackRemoved(aTrack);
-  }
-
-  void OnActive() {
-    MOZ_ASSERT(mElement);
-
-    // mediacapture-main says:
-    // Note that once ended equals true the HTMLVideoElement will not play media
-    // even if new MediaStreamTracks are added to the MediaStream (causing it to
-    // return to the active state) unless autoplay is true or the web
-    // application restarts the element, e.g., by calling play().
-    //
-    // This is vague on exactly how to go from becoming active to playing, when
-    // autoplaying. However, per the media element spec, to play an autoplaying
-    // media element, we must load the source and reach readyState
-    // HAVE_ENOUGH_DATA [1]. Hence, a MediaStream being assigned to a media
-    // element and becoming active runs the load algorithm, so that it can
-    // eventually be played.
-    //
-    // [1]
-    // https://html.spec.whatwg.org/multipage/media.html#ready-states:event-media-play
-
-    LOG(LogLevel::Debug, ("%p, mSrcStream %p became active, checking if we "
-                          "need to run the load algorithm",
-                          mElement.get(), mElement->mSrcStream.get()));
-    if (!mElement->IsPlaybackEnded()) {
-      return;
-    }
-    if (!mElement->Autoplay()) {
-      return;
-    }
-    LOG(LogLevel::Info, ("%p, mSrcStream %p became active on autoplaying, "
-                         "ended element. Reloading.",
-                         mElement.get(), mElement->mSrcStream.get()));
-    mElement->DoLoad();
-  }
-
-  void NotifyActive() override {
-    if (!mElement) {
-      return;
-    }
-
-    if (!mElement->IsVideo()) {
-      // Audio elements use NotifyAudible().
-      return;
-    }
-
-    OnActive();
-  }
-
-  void NotifyAudible() override {
-    if (!mElement) {
-      return;
-    }
-
-    if (mElement->IsVideo()) {
-      // Video elements use NotifyActive().
-      return;
-    }
-
-    OnActive();
-  }
-
-  void OnInactive() {
-    MOZ_ASSERT(mElement);
-
-    if (mElement->IsPlaybackEnded()) {
-      return;
-    }
-    LOG(LogLevel::Debug, ("%p, mSrcStream %p became inactive", mElement.get(),
-                          mElement->mSrcStream.get()));
-    mElement->PlaybackEnded();
-    mElement->UpdateReadyStateInternal();
-  }
-
-  void NotifyInactive() override {
-    if (!mElement) {
-      return;
-    }
-
-    if (!mElement->IsVideo()) {
-      // Audio elements use NotifyInaudible().
-      return;
-    }
-
-    OnInactive();
-  }
-
-  void NotifyInaudible() override {
-    if (!mElement) {
-      return;
-    }
-
-    if (mElement->IsVideo()) {
-      // Video elements use NotifyInactive().
-      return;
-    }
-
-    OnInactive();
-  }
-
- protected:
-  const WeakPtr<HTMLMediaElement> mElement;
-};
-
 void HTMLMediaElement::UpdateSrcMediaStreamPlaying(uint32_t aFlags) {
   if (!mSrcStream) {
     return;
   }
 
   bool shouldPlay = !(aFlags & REMOVING_SRC_STREAM) && !mPaused &&
-                    !mPausedForInactiveDocumentOrChannel;
+                    !mSuspendedForInactiveDocument;
   if (shouldPlay == mSrcStreamIsPlaying) {
     return;
   }
@@ -4856,8 +5217,12 @@ void HTMLMediaElement::UpdateSrcMediaStreamPlaying(uint32_t aFlags) {
 
   if (shouldPlay) {
     mSrcStreamPlaybackEnded = false;
+    mSrcStreamReportPlaybackEnded = false;
 
-    mMediaStreamRenderer->Start();
+    if (mMediaStreamRenderer) {
+      mMediaStreamRenderer->Start();
+    }
+
     if (mSink.second()) {
       NS_WARNING(
           "setSinkId() when playing a MediaStream is not supported yet and "
@@ -4873,7 +5238,9 @@ void HTMLMediaElement::UpdateSrcMediaStreamPlaying(uint32_t aFlags) {
     // it as audible when it's playing.
     SetAudibleState(true);
   } else {
-    mMediaStreamRenderer->Stop();
+    if (mMediaStreamRenderer) {
+      mMediaStreamRenderer->Stop();
+    }
     VideoFrameContainer* container = GetVideoFrameContainer();
     if (mSelectedVideoStreamTrack && container) {
       HTMLVideoElement* self = static_cast<HTMLVideoElement*>(this);
@@ -4893,6 +5260,15 @@ void HTMLMediaElement::UpdateSrcMediaStreamPlaying(uint32_t aFlags) {
   }
 }
 
+void HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying() {
+  if (!mMediaStreamRenderer) {
+    // Notifications are async, the renderer could have been cleared.
+    return;
+  }
+
+  mMediaStreamRenderer->SetProgressingCurrentTime(IsPotentiallyPlaying());
+}
+
 void HTMLMediaElement::UpdateSrcStreamTime() {
   MOZ_ASSERT(NS_IsMainThread());
 
@@ -4910,18 +5286,22 @@ void HTMLMediaElement::SetupSrcMediaStreamPlayback(DOMMediaStream* aStream) {
 
   mSrcStream = aStream;
 
-  nsPIDOMWindowInner* window = OwnerDoc()->GetInnerWindow();
-  if (!window) {
-    return;
-  }
-
   mMediaStreamRenderer = MakeAndAddRef<MediaStreamRenderer>(
       mAbstractMainThread, GetVideoFrameContainer(), this);
+  mWatchManager.Watch(mPaused,
+                      &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+  mWatchManager.Watch(mReadyState,
+                      &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+  mWatchManager.Watch(mSrcStreamPlaybackEnded,
+                      &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+  mWatchManager.Watch(mSrcStreamPlaybackEnded,
+                      &HTMLMediaElement::UpdateSrcStreamReportPlaybackEnded);
   mWatchManager.Watch(mMediaStreamRenderer->CurrentGraphTime(),
                       &HTMLMediaElement::UpdateSrcStreamTime);
   SetVolumeInternal();
 
   UpdateSrcMediaStreamPlaying();
+  UpdateSrcStreamPotentiallyPlaying();
   mSrcStreamVideoPrincipal = NodePrincipal();
 
   // If we pause this media element, track changes in the underlying stream
@@ -4951,29 +5331,35 @@ void HTMLMediaElement::EndSrcMediaStreamPlayback() {
     mSelectedVideoStreamTrack->RemovePrincipalChangeObserver(this);
   }
   if (mFirstFrameListener) {
-    mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    if (mSelectedVideoStreamTrack) {
+      // Unlink might have removed the selected video track.
+      mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    }
   }
   mSelectedVideoStreamTrack = nullptr;
   mFirstFrameListener = nullptr;
 
   if (mMediaStreamRenderer) {
+    mWatchManager.Unwatch(mPaused,
+                          &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+    mWatchManager.Unwatch(mReadyState,
+                          &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+    mWatchManager.Unwatch(mSrcStreamPlaybackEnded,
+                          &HTMLMediaElement::UpdateSrcStreamPotentiallyPlaying);
+    mWatchManager.Unwatch(
+        mSrcStreamPlaybackEnded,
+        &HTMLMediaElement::UpdateSrcStreamReportPlaybackEnded);
     mWatchManager.Unwatch(mMediaStreamRenderer->CurrentGraphTime(),
                           &HTMLMediaElement::UpdateSrcStreamTime);
+    mMediaStreamRenderer->Shutdown();
     mMediaStreamRenderer = nullptr;
   }
 
   mSrcStream->UnregisterTrackListener(mMediaStreamTrackListener.get());
   mMediaStreamTrackListener = nullptr;
-  mSrcStreamTracksAvailable = false;
   mSrcStreamPlaybackEnded = false;
+  mSrcStreamReportPlaybackEnded = false;
   mSrcStreamVideoPrincipal = nullptr;
-
-#ifdef DEBUG
-  for (OutputMediaStream& ms : mOutputStreams) {
-    // These tracks were removed by clearing AudioTracks() and VideoTracks().
-    MOZ_ASSERT(ms.mTracks.IsEmpty());
-  }
-#endif
 
   mSrcStream = nullptr;
 }
@@ -5011,7 +5397,7 @@ void HTMLMediaElement::NotifyMediaStreamTrackAdded(
   }
 
 #ifdef DEBUG
-  nsString id;
+  nsAutoString id;
   aTrack->GetId(id);
 
   LOG(LogLevel::Debug, ("%p, Adding %sTrack with id %s", this,
@@ -5037,29 +5423,15 @@ void HTMLMediaElement::NotifyMediaStreamTrackAdded(
     // video track when there is no selected track.
     if (VideoTracks()->SelectedIndex() == -1) {
       MOZ_ASSERT(!mSelectedVideoStreamTrack);
-      videoTrack->SetEnabledInternal(true, MediaTrack::FIRE_NO_EVENTS);
+      videoTrack->SetEnabledInternal(true, dom::MediaTrack::FIRE_NO_EVENTS);
     }
   }
 
-  UpdateReadyStateInternal();
-
-  if (!mSrcStreamTracksAvailable) {
-    mAbstractMainThread->Dispatch(NS_NewRunnableFunction(
-        "HTMLMediaElement::NotifyMediaStreamTrackAdded->FirstFrameLoaded",
-        [this, self = RefPtr<HTMLMediaElement>(this), stream = mSrcStream]() {
-          if (!mSrcStream || mSrcStream != stream) {
-            return;
-          }
-
-          LOG(LogLevel::Debug,
-              ("MediaElement %p MediaStream tracks available", this));
-
-          mSrcStreamTracksAvailable = true;
-
-          FirstFrameLoaded();
-          UpdateReadyStateInternal();
-        }));
-  }
+  // The set of enabled AudioTracks and selected video track might have changed.
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
+  mAbstractMainThread->TailDispatcher().AddDirectTask(
+      NewRunnableMethod("HTMLMediaElement::FirstFrameLoaded", this,
+                        &HTMLMediaElement::FirstFrameLoaded));
 }
 
 void HTMLMediaElement::NotifyMediaStreamTrackRemoved(
@@ -5075,9 +5447,9 @@ void HTMLMediaElement::NotifyMediaStreamTrackRemoved(
 
   MOZ_DIAGNOSTIC_ASSERT(AudioTracks() && VideoTracks(),
                         "Element can't have been unlinked");
-  if (MediaTrack* t = AudioTracks()->GetTrackById(id)) {
+  if (dom::MediaTrack* t = AudioTracks()->GetTrackById(id)) {
     AudioTracks()->RemoveTrack(t);
-  } else if (MediaTrack* t = VideoTracks()->GetTrackById(id)) {
+  } else if (dom::MediaTrack* t = VideoTracks()->GetTrackById(id)) {
     VideoTracks()->RemoveTrack(t);
   } else {
     NS_ASSERTION(aTrack->AsVideoStreamTrack() && !IsVideo(),
@@ -5105,6 +5477,10 @@ void HTMLMediaElement::MetadataLoaded(const MediaInfo* aInfo,
                                       UniquePtr<const MetadataTags> aTags) {
   MOZ_ASSERT(NS_IsMainThread());
 
+  if (mDecoder) {
+    ConstructMediaTracks(aInfo);
+  }
+
   SetMediaInfo(*aInfo);
 
   mIsEncrypted =
@@ -5112,6 +5488,10 @@ void HTMLMediaElement::MetadataLoaded(const MediaInfo* aInfo,
   mTags = std::move(aTags);
   mLoadedDataFired = false;
   ChangeReadyState(HAVE_METADATA);
+
+  // Add output tracks synchronously now to be sure they're available in
+  // "loadedmetadata" event handlers.
+  UpdateOutputTrackSources();
 
   DispatchAsyncEvent(NS_LITERAL_STRING("durationchange"));
   if (IsVideo() && HasVideo()) {
@@ -5153,44 +5533,18 @@ void HTMLMediaElement::MetadataLoaded(const MediaInfo* aInfo,
     mDefaultPlaybackStartPosition = 0.0;
   }
 
-  UpdateReadyStateInternal();
-
-  if (!mSrcStream) {
-    return;
-  }
-
-  for (OutputMediaStream& ms : mOutputStreams) {
-    if (AudioTracks()) {
-      for (size_t i = 0; i < AudioTracks()->Length(); ++i) {
-        AudioTrack* t = (*AudioTracks())[i];
-        if (t->Enabled()) {
-          AddCaptureMediaTrackToOutputStream(t, ms);
-        }
-      }
-    }
-    if (VideoTracks() && IsVideo() && !ms.mCapturingAudioOnly) {
-      // Only add video tracks if we're a video element and the output stream
-      // wants video.
-      for (size_t i = 0; i < VideoTracks()->Length(); ++i) {
-        VideoTrack* t = (*VideoTracks())[i];
-        if (t->Selected()) {
-          AddCaptureMediaTrackToOutputStream(t, ms);
-        }
-      }
-    }
-  }
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
 }
 
 void HTMLMediaElement::FirstFrameLoaded() {
   LOG(LogLevel::Debug,
       ("%p, FirstFrameLoaded() mFirstFrameLoaded=%d mWaitingForKey=%d", this,
-       mFirstFrameLoaded, mWaitingForKey));
+       mFirstFrameLoaded.Ref(), mWaitingForKey));
 
   NS_ASSERTION(!mSuspendedAfterFirstFrame, "Should not have already suspended");
 
   if (!mFirstFrameLoaded) {
     mFirstFrameLoaded = true;
-    UpdateReadyStateInternal();
   }
 
   ChangeDelayLoadStatus(false);
@@ -5220,12 +5574,6 @@ void HTMLMediaElement::DecodeError(const MediaResult& aError) {
   DecoderDoctorDiagnostics diagnostics;
   diagnostics.StoreDecodeError(OwnerDoc(), aError, src, __func__);
 
-  if (AudioTracks()) {
-    AudioTracks()->EmptyTracks();
-  }
-  if (VideoTracks()) {
-    VideoTracks()->EmptyTracks();
-  }
   if (mIsLoadingFromSourceChildren) {
     mErrorSink->ResetError();
     if (mSourceLoadCandidate) {
@@ -5266,7 +5614,8 @@ void HTMLMediaElement::PlaybackEnded() {
   NS_ASSERTION(!mDecoder || mDecoder->IsEnded(),
                "Decoder fired ended, but not in ended state");
 
-  DiscardFinishWhenEndedOutputStreams();
+  // IsPlaybackEnded() became true.
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateOutputTrackSources);
 
   if (mSrcStream) {
     LOG(LogLevel::Debug,
@@ -5296,6 +5645,10 @@ void HTMLMediaElement::PlaybackEnded() {
   }
 
   DispatchAsyncEvent(NS_LITERAL_STRING("ended"));
+}
+
+void HTMLMediaElement::UpdateSrcStreamReportPlaybackEnded() {
+  mSrcStreamReportPlaybackEnded = mSrcStreamPlaybackEnded;
 }
 
 void HTMLMediaElement::SeekStarted() {
@@ -5344,7 +5697,6 @@ void HTMLMediaElement::SeekAborted() {
 
 void HTMLMediaElement::NotifySuspendedByCache(bool aSuspendedByCache) {
   mDownloadSuspendedByCache = aSuspendedByCache;
-  UpdateReadyStateInternal();
 }
 
 void HTMLMediaElement::DownloadSuspended() {
@@ -5399,7 +5751,7 @@ void HTMLMediaElement::CheckProgress(bool aHaveNewProgress) {
     }
     // Download statistics may have been updated, force a recheck of the
     // readyState.
-    UpdateReadyStateInternal();
+    mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
   }
 
   if (now - mDataTime >= TimeDuration::FromMilliseconds(STALL_MS)) {
@@ -5492,14 +5844,12 @@ void HTMLMediaElement::UpdateReadyStateInternal() {
     return;
   }
 
-  if (mSrcStream && mReadyState < HAVE_METADATA) {
-    if (!mSrcStreamTracksAvailable) {
-      LOG(LogLevel::Debug, ("MediaElement %p UpdateReadyStateInternal() "
-                            "MediaStreamTracks not available yet",
-                            this));
-      return;
-    }
+  if (mDecoder) {
+    // IsPlaybackEnded() might have become false.
+    mWatchManager.ManualNotify(&HTMLMediaElement::UpdateOutputTrackSources);
+  }
 
+  if (mSrcStream && mReadyState < HAVE_METADATA) {
     bool hasAudioTracks = AudioTracks() && !AudioTracks()->IsEmpty();
     bool hasVideoTracks = VideoTracks() && !VideoTracks()->IsEmpty();
     if (!hasAudioTracks && !hasVideoTracks) {
@@ -5729,7 +6079,7 @@ void HTMLMediaElement::ChangeReadyState(nsMediaReadyState aState) {
   if (oldState < HAVE_FUTURE_DATA && mReadyState >= HAVE_FUTURE_DATA) {
     DispatchAsyncEvent(NS_LITERAL_STRING("canplay"));
     if (!mPaused) {
-      if (mDecoder && !mPausedForInactiveDocumentOrChannel) {
+      if (mDecoder && !mSuspendedForInactiveDocument) {
         MOZ_ASSERT(AutoplayPolicy::IsAllowedToPlay(*this));
         mDecoder->Play();
       }
@@ -5804,7 +6154,7 @@ bool HTMLMediaElement::CanActivateAutoplay() {
     return false;
   }
 
-  if (mPausedForInactiveDocumentOrChannel) {
+  if (mSuspendedForInactiveDocument) {
     return false;
   }
 
@@ -5814,16 +6164,15 @@ bool HTMLMediaElement::CanActivateAutoplay() {
     return false;
   }
 
-  if (mAudioChannelWrapper) {
-    // Note: SUSPENDED_PAUSE and SUSPENDED_BLOCK will be merged into one single
-    // state.
-    if (mAudioChannelWrapper->GetSuspendType() ==
-            nsISuspendedTypes::SUSPENDED_PAUSE ||
-        mAudioChannelWrapper->GetSuspendType() ==
-            nsISuspendedTypes::SUSPENDED_BLOCK ||
-        mAudioChannelWrapper->IsPlaybackBlocked()) {
-      return false;
-    }
+  if (MediaPlaybackDelayPolicy::ShouldDelayPlayback(this)) {
+    CreateResumeDelayedMediaPlaybackAgentIfNeeded();
+    LOG(LogLevel::Debug, ("%p delay playing from autoplay", this));
+    return false;
+  }
+
+  if (mAudioChannelWrapper && mAudioChannelWrapper->GetSuspendType() ==
+                                  nsISuspendedTypes::SUSPENDED_PAUSE) {
+    return false;
   }
 
   return mReadyState >= HAVE_ENOUGH_DATA;
@@ -5847,12 +6196,14 @@ void HTMLMediaElement::CheckAutoplayDataReady() {
   UpdateSrcMediaStreamPlaying();
   UpdateAudioChannelPlayingState();
 
+  StartListeningMediaControlEventIfNeeded();
+
   if (mDecoder) {
     SetPlayedOrSeeked(true);
     if (mCurrentPlayRangeStart == -1.0) {
       mCurrentPlayRangeStart = CurrentTime();
     }
-    MOZ_ASSERT(!mPausedForInactiveDocumentOrChannel);
+    MOZ_ASSERT(!mSuspendedForInactiveDocument);
     mDecoder->Play();
   } else if (mSrcStream) {
     SetPlayedOrSeeked(true);
@@ -5874,7 +6225,7 @@ void HTMLMediaElement::CheckAutoplayDataReady() {
 
 bool HTMLMediaElement::IsActive() const {
   Document* ownerDoc = OwnerDoc();
-  return ownerDoc && ownerDoc->IsActive() && ownerDoc->IsVisible();
+  return ownerDoc->IsActive() && ownerDoc->IsVisible();
 }
 
 bool HTMLMediaElement::IsHidden() const {
@@ -6088,8 +6439,14 @@ void HTMLMediaElement::NotifyDecoderPrincipalChanged() {
   RefPtr<nsIPrincipal> principal = GetCurrentPrincipal();
   bool isSameOrigin = !principal || IsCORSSameOrigin();
   mDecoder->UpdateSameOriginStatus(isSameOrigin);
-  mDecoder->SetOutputStreamPrincipal(isSameOrigin ? NodePrincipal()
-                                                  : principal.get());
+
+  if (isSameOrigin) {
+    principal = NodePrincipal();
+  }
+  for (const auto& entry : mOutputTrackSources) {
+    entry.GetData()->SetPrincipal(principal);
+  }
+  mDecoder->SetOutputTracksPrincipal(principal);
 }
 
 void HTMLMediaElement::Invalidate(bool aImageSizeChanged,
@@ -6130,72 +6487,89 @@ void HTMLMediaElement::UpdateMediaSize(const nsIntSize& aSize) {
   }
 
   mMediaInfo.mVideo.mDisplay = aSize;
-  UpdateReadyStateInternal();
+  mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
 
   if (mFirstFrameListener) {
-    mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    if (mSelectedVideoStreamTrack) {
+      // Unlink might have removed the selected video track.
+      mSelectedVideoStreamTrack->RemoveVideoOutput(mFirstFrameListener);
+    }
     // The first-frame listener won't be needed again for this stream.
     mFirstFrameListener = nullptr;
   }
 }
 
-void HTMLMediaElement::SuspendOrResumeElement(bool aPauseElement,
-                                              bool aSuspendEvents) {
-  LOG(LogLevel::Debug,
-      ("%p SuspendOrResumeElement(pause=%d, suspendEvents=%d) hidden=%d", this,
-       aPauseElement, aSuspendEvents, OwnerDoc()->Hidden()));
+void HTMLMediaElement::SuspendOrResumeElement(bool aSuspendElement) {
+  LOG(LogLevel::Debug, ("%p SuspendOrResumeElement(suspend=%d) hidden=%d", this,
+                        aSuspendElement, OwnerDoc()->Hidden()));
+  if (aSuspendElement == mSuspendedForInactiveDocument) {
+    return;
+  }
 
-  if (aPauseElement != mPausedForInactiveDocumentOrChannel) {
-    mPausedForInactiveDocumentOrChannel = aPauseElement;
-    UpdateSrcMediaStreamPlaying();
-    UpdateAudioChannelPlayingState();
-    if (aPauseElement) {
-      mCurrentLoadPlayTime.Pause();
-      ReportTelemetry();
+  mSuspendedForInactiveDocument = aSuspendElement;
+  UpdateSrcMediaStreamPlaying();
+  UpdateAudioChannelPlayingState();
 
-      // For EME content, we may force destruction of the CDM client (and CDM
-      // instance if this is the last client for that CDM instance) and
-      // the CDM's decoder. This ensures the CDM gets reliable and prompt
-      // shutdown notifications, as it may have book-keeping it needs
-      // to do on shutdown.
-      if (mMediaKeys) {
-        nsAutoString keySystem;
-        mMediaKeys->GetKeySystem(keySystem);
+  if (aSuspendElement) {
+    mCurrentLoadPlayTime.Pause();
+    ReportTelemetry();
+
+    // For EME content, we may force destruction of the CDM client (and CDM
+    // instance if this is the last client for that CDM instance) and
+    // the CDM's decoder. This ensures the CDM gets reliable and prompt
+    // shutdown notifications, as it may have book-keeping it needs
+    // to do on shutdown.
+    if (mMediaKeys) {
+      nsAutoString keySystem;
+      mMediaKeys->GetKeySystem(keySystem);
+    }
+    if (mDecoder) {
+      mDecoder->Pause();
+      mDecoder->Suspend();
+      mDecoder->SetDelaySeekMode(true);
+    }
+    mEventDeliveryPaused = true;
+    // We won't want to resume media element from the bfcache.
+    ClearResumeDelayedMediaPlaybackAgentIfNeeded();
+    StopListeningMediaControlEventIfNeeded();
+  } else {
+    if (!mPaused) {
+      mCurrentLoadPlayTime.Start();
+    }
+    if (mDecoder) {
+      mDecoder->Resume();
+      if (!mPaused && !mDecoder->IsEnded()) {
+        mDecoder->Play();
       }
-      if (mDecoder) {
-        mDecoder->Pause();
-        mDecoder->Suspend();
-      }
-      mEventDeliveryPaused = aSuspendEvents;
-    } else {
+      mDecoder->SetDelaySeekMode(false);
+    }
+    if (mEventDeliveryPaused) {
+      mEventDeliveryPaused = false;
+      DispatchPendingMediaEvents();
+    }
+    // If the media element has been blocked and isn't still allowed to play
+    // when it comes back from the bfcache, we would notify front end to show
+    // the blocking icon in order to inform user that the site is still being
+    // blocked.
+    if (mHasEverBeenBlockedForAutoplay &&
+        !AutoplayPolicy::IsAllowedToPlay(*this)) {
+      MaybeNotifyAutoplayBlocked();
+    }
+    if (mMediaControlEventListener) {
+      MOZ_ASSERT(!mMediaControlEventListener->IsStarted(),
+                 "We didn't stop listening event when we were in bfcache?");
+      mMediaControlEventListener->Start();
+      // As resuming media from bfcache won't change `mPaused`, so we have to
+      // update the playback state manually,
       if (!mPaused) {
-        mCurrentLoadPlayTime.Start();
-      }
-      if (mDecoder) {
-        mDecoder->Resume();
-        if (!mPaused && !mDecoder->IsEnded()) {
-          mDecoder->Play();
-        }
-      }
-      if (mEventDeliveryPaused) {
-        mEventDeliveryPaused = false;
-        DispatchPendingMediaEvents();
-      }
-      // If the media element has been blocked and isn't still allowed to play
-      // when it comes back from the bfcache, we would notify front end to show
-      // the blocking icon in order to inform user that the site is still being
-      // blocked.
-      if (mHasEverBeenBlockedForAutoplay &&
-          !AutoplayPolicy::IsAllowedToPlay(*this)) {
-        MaybeNotifyAutoplayBlocked();
+        mMediaControlEventListener->NotifyMediaStartedPlaying();
       }
     }
   }
 }
 
 bool HTMLMediaElement::IsBeingDestroyed() {
-  Document* ownerDoc = OwnerDoc();
-  nsIDocShell* docShell = ownerDoc ? ownerDoc->GetDocShell() : nullptr;
+  nsIDocShell* docShell = OwnerDoc()->GetDocShell();
   bool isBeingDestroyed = false;
   if (docShell) {
     docShell->IsBeingDestroyed(&isBeingDestroyed);
@@ -6217,8 +6591,7 @@ void HTMLMediaElement::NotifyOwnerDocumentActivityChanged() {
     NotifyDecoderActivityChanges();
   }
 
-  bool pauseElement = ShouldElementBePaused();
-  SuspendOrResumeElement(pauseElement, !IsActive());
+  SuspendOrResumeElement(!IsActive());
 
   // If the owning document has become inactive we should shutdown the CDM.
   if (!OwnerDoc()->IsCurrentActiveDocument() && mMediaKeys) {
@@ -6517,9 +6890,9 @@ ImageContainer* HTMLMediaElement::GetImageContainer() {
   return container ? container->GetImageContainer() : nullptr;
 }
 
-void HTMLMediaElement::UpdateAudioChannelPlayingState(bool aForcePlaying) {
+void HTMLMediaElement::UpdateAudioChannelPlayingState() {
   if (mAudioChannelWrapper) {
-    mAudioChannelWrapper->UpdateAudioChannelPlayingState(aForcePlaying);
+    mAudioChannelWrapper->UpdateAudioChannelPlayingState();
   }
 }
 
@@ -6533,11 +6906,8 @@ bool HTMLMediaElement::AudioChannelAgentBlockedPlay() {
     return true;
   }
 
-  // Note: SUSPENDED_PAUSE and SUSPENDED_BLOCK will be merged into one single
-  // state.
   const auto suspendType = mAudioChannelWrapper->GetSuspendType();
-  return suspendType == nsISuspendedTypes::SUSPENDED_PAUSE ||
-         suspendType == nsISuspendedTypes::SUSPENDED_BLOCK;
+  return suspendType == nsISuspendedTypes::SUSPENDED_PAUSE;
 }
 
 static const char* VisibilityString(Visibility aVisibility) {
@@ -6863,26 +7233,6 @@ bool HTMLMediaElement::IsEventAttributeNameInternal(nsAtom* aName) {
          nsGenericHTMLElement::IsEventAttributeNameInternal(aName);
 }
 
-already_AddRefed<nsIPrincipal> HTMLMediaElement::GetTopLevelPrincipal() {
-  RefPtr<nsIPrincipal> principal;
-  nsCOMPtr<nsPIDOMWindowInner> window = OwnerDoc()->GetInnerWindow();
-  if (!window) {
-    return nullptr;
-  }
-  // XXXkhuey better hope we always have an outer ...
-  nsCOMPtr<nsPIDOMWindowOuter> top =
-      window->GetOuterWindow()->GetInProcessTop();
-  if (!top) {
-    return nullptr;
-  }
-  Document* doc = top->GetExtantDoc();
-  if (!doc) {
-    return nullptr;
-  }
-  principal = doc->NodePrincipal();
-  return principal.forget();
-}
-
 void HTMLMediaElement::NotifyWaitingForKey() {
   LOG(LogLevel::Debug, ("%p, NotifyWaitingForKey()", this));
 
@@ -6895,7 +7245,9 @@ void HTMLMediaElement::NotifyWaitingForKey() {
     // Note: algorithm continues in UpdateReadyStateInternal() when all decoded
     // data enqueued in the MDSM is consumed.
     mWaitingForKey = WAITING_FOR_KEY;
-    UpdateReadyStateInternal();
+    // mWaitingForKey changed outside of UpdateReadyStateInternal. This may
+    // affect mReadyState.
+    mWatchManager.ManualNotify(&HTMLMediaElement::UpdateReadyStateInternal);
   }
 }
 
@@ -6933,7 +7285,9 @@ MediaDecoderOwner::NextFrameStatus HTMLMediaElement::NextFrameStatus() {
     return mDecoder->NextFrameStatus();
   }
   if (mSrcStream) {
-    if (mSrcStreamTracksAvailable && !mSrcStreamPlaybackEnded) {
+    AutoTArray<RefPtr<MediaTrack>, 4> tracks;
+    GetAllEnabledMediaTracks(tracks);
+    if (!tracks.IsEmpty() && !mSrcStreamPlaybackEnded) {
       return NEXT_FRAME_AVAILABLE;
     }
     return NEXT_FRAME_UNAVAILABLE;
@@ -7052,34 +7406,26 @@ void HTMLMediaElement::NotifyAudioPlaybackChanged(
   if (mAudioChannelWrapper) {
     mAudioChannelWrapper->NotifyAudioPlaybackChanged(aReason);
   }
+  if (mMediaControlEventListener) {
+    mMediaControlEventListener->UpdateMediaAudibleState(IsAudible());
+  }
   // only request wake lock for audible media.
   UpdateWakeLock();
-}
-
-bool HTMLMediaElement::ShouldElementBePaused() {
-  // Bfcached page or inactive document.
-  if (!IsActive()) {
-    return true;
-  }
-
-  return false;
 }
 
 void HTMLMediaElement::SetMediaInfo(const MediaInfo& aInfo) {
   const bool oldHasAudio = mMediaInfo.HasAudio();
   mMediaInfo = aInfo;
-  if (aInfo.HasAudio() != oldHasAudio) {
-    UpdateAudioChannelPlayingState();
-    NotifyAudioPlaybackChanged(
-        AudioChannelService::AudibleChangedReasons::eDataAudibleChanged);
+  if ((aInfo.HasAudio() != oldHasAudio) && mResumeDelayedPlaybackAgent) {
+    mResumeDelayedPlaybackAgent->UpdateAudibleState(this, IsAudible());
   }
   if (mAudioChannelWrapper) {
-    mAudioChannelWrapper->AudioCaptureStreamChangeIfNeeded();
+    mAudioChannelWrapper->AudioCaptureTrackChangeIfNeeded();
   }
   UpdateWakeLock();
 }
 
-void HTMLMediaElement::AudioCaptureStreamChange(bool aCapture) {
+void HTMLMediaElement::AudioCaptureTrackChange(bool aCapture) {
   // No need to capture a silent media element.
   if (!HasAudio()) {
     return;
@@ -7091,25 +7437,31 @@ void HTMLMediaElement::AudioCaptureStreamChange(bool aCapture) {
       return;
     }
 
-    MediaStreamGraph* msg = MediaStreamGraph::GetInstance(
-        MediaStreamGraph::AUDIO_THREAD_DRIVER, window,
-        MediaStreamGraph::REQUEST_DEFAULT_SAMPLE_RATE);
+    MediaTrackGraph* mtg = MediaTrackGraph::GetInstance(
+        MediaTrackGraph::AUDIO_THREAD_DRIVER, window,
+        MediaTrackGraph::REQUEST_DEFAULT_SAMPLE_RATE);
     RefPtr<DOMMediaStream> stream =
         CaptureStreamInternal(StreamCaptureBehavior::CONTINUE_WHEN_ENDED,
-                              StreamCaptureType::CAPTURE_AUDIO, msg);
+                              StreamCaptureType::CAPTURE_AUDIO, mtg);
     mStreamWindowCapturer =
         MakeUnique<MediaStreamWindowCapturer>(stream, window->WindowID());
   } else if (!aCapture && mStreamWindowCapturer) {
     for (size_t i = 0; i < mOutputStreams.Length(); i++) {
       if (mOutputStreams[i].mStream == mStreamWindowCapturer->mStream) {
-        if (mOutputStreams[i].mCapturingDecoder && mDecoder) {
-          mDecoder->RemoveOutputStream(mOutputStreams[i].mStream);
+        // We own this MediaStream, it is not exposed to JS.
+        AutoTArray<RefPtr<MediaStreamTrack>, 2> tracks;
+        mStreamWindowCapturer->mStream->GetTracks(tracks);
+        for (auto& track : tracks) {
+          track->Stop();
         }
         mOutputStreams.RemoveElementAt(i);
         break;
       }
     }
     mStreamWindowCapturer = nullptr;
+    if (mOutputStreams.IsEmpty()) {
+      mTracksCaptured = nullptr;
+    }
   }
 }
 
@@ -7233,12 +7585,24 @@ void HTMLMediaElement::NotifyDecoderActivityChanges() const {
 
 Document* HTMLMediaElement::GetDocument() const { return OwnerDoc(); }
 
-void HTMLMediaElement::ConstructMediaTracks(const MediaInfo* aInfo) {
-  if (mMediaTracksConstructed || !aInfo) {
-    return;
+bool HTMLMediaElement::IsAudible() const {
+  // No audio track.
+  if (!HasAudio()) {
+    return false;
   }
 
-  mMediaTracksConstructed = true;
+  // Muted or the volume should not be ~0
+  if (mMuted || (std::fabs(Volume()) <= 1e-7)) {
+    return false;
+  }
+
+  return mIsAudioTrackAudible;
+}
+
+void HTMLMediaElement::ConstructMediaTracks(const MediaInfo* aInfo) {
+  if (!aInfo) {
+    return;
+  }
 
   AudioTrackList* audioList = AudioTracks();
   if (audioList && aInfo->HasAudio()) {
@@ -7266,12 +7630,9 @@ void HTMLMediaElement::RemoveMediaTracks() {
   if (mAudioTrackList) {
     mAudioTrackList->RemoveTracks();
   }
-
   if (mVideoTrackList) {
     mVideoTrackList->RemoveTracks();
   }
-
-  mMediaTracksConstructed = false;
 }
 
 class MediaElementGMPCrashHelper : public GMPCrashHelper {
@@ -7387,7 +7748,7 @@ already_AddRefed<Promise> HTMLMediaElement::SetSinkId(const nsAString& aSinkId,
               return p;
             }
             if (self->mSrcAttrStream) {
-              // Set Sink Id through MSG is not supported yet.
+              // Set Sink Id through MTG is not supported yet.
               return SinkInfoPromise::CreateAndReject(NS_ERROR_ABORT, __func__);
             }
             // No media attached to the element save it for later.
@@ -7397,34 +7758,31 @@ already_AddRefed<Promise> HTMLMediaElement::SetSinkId(const nsAString& aSinkId,
             // Promise is rejected, sink not found.
             return SinkInfoPromise::CreateAndReject(res, __func__);
           })
-      ->Then(
-          mAbstractMainThread, __func__,
-          [promise, self = RefPtr<HTMLMediaElement>(this),
-           sinkId](const SinkInfoPromise::ResolveOrRejectValue& aValue) {
-            if (aValue.IsResolve()) {
-              self->mSink = MakePair(sinkId, aValue.ResolveValue());
-              promise->MaybeResolveWithUndefined();
-            } else {
-              switch (aValue.RejectValue()) {
-                case NS_ERROR_ABORT:
-                  promise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
-                  break;
-                case NS_ERROR_NOT_AVAILABLE: {
-                  ErrorResult notFoundError;
-                  notFoundError.ThrowDOMException(
-                      NS_ERROR_DOM_NOT_FOUND_ERR,
-                      NS_LITERAL_CSTRING("The object can not be found here."));
-                  promise->MaybeReject(notFoundError);
-                  break;
-                }
-                case NS_ERROR_DOM_MEDIA_NOT_ALLOWED_ERR:
-                  promise->MaybeReject(NS_ERROR_DOM_NOT_ALLOWED_ERR);
-                  break;
-                default:
-                  MOZ_ASSERT_UNREACHABLE("Invalid error.");
-              }
-            }
-          });
+      ->Then(mAbstractMainThread, __func__,
+             [promise, self = RefPtr<HTMLMediaElement>(this),
+              sinkId](const SinkInfoPromise::ResolveOrRejectValue& aValue) {
+               if (aValue.IsResolve()) {
+                 self->mSink = MakePair(sinkId, aValue.ResolveValue());
+                 promise->MaybeResolveWithUndefined();
+               } else {
+                 switch (aValue.RejectValue()) {
+                   case NS_ERROR_ABORT:
+                     promise->MaybeReject(NS_ERROR_DOM_ABORT_ERR);
+                     break;
+                   case NS_ERROR_NOT_AVAILABLE: {
+                     promise->MaybeRejectWithDOMException(
+                         NS_ERROR_DOM_NOT_FOUND_ERR,
+                         "The object can not be found here.");
+                     break;
+                   }
+                   case NS_ERROR_DOM_MEDIA_NOT_ALLOWED_ERR:
+                     promise->MaybeReject(NS_ERROR_DOM_NOT_ALLOWED_ERR);
+                     break;
+                   default:
+                     MOZ_ASSERT_UNREACHABLE("Invalid error.");
+                 }
+               }
+             });
 
   aRv = NS_OK;
   return promise.forget();
@@ -7448,6 +7806,71 @@ void HTMLMediaElement::NotifyTextTrackModeChanged() {
                                  mTextTrackManager->TimeMarchesOn();
                                }
                              }));
+}
+
+void HTMLMediaElement::CreateResumeDelayedMediaPlaybackAgentIfNeeded() {
+  if (mResumeDelayedPlaybackAgent) {
+    return;
+  }
+  mResumeDelayedPlaybackAgent =
+      MediaPlaybackDelayPolicy::CreateResumeDelayedPlaybackAgent(this,
+                                                                 IsAudible());
+  if (!mResumeDelayedPlaybackAgent) {
+    LOG(LogLevel::Debug,
+        ("%p Failed to create a delayed playback agant", this));
+    return;
+  }
+  mResumeDelayedPlaybackAgent->GetResumePromise()
+      ->Then(
+          mAbstractMainThread, __func__,
+          [self = RefPtr<HTMLMediaElement>(this)]() {
+            LOG(LogLevel::Debug, ("%p Resume delayed Play() call", self.get()));
+            self->mResumePlaybackRequest.Complete();
+            self->mResumeDelayedPlaybackAgent = nullptr;
+            IgnoredErrorResult dummy;
+            RefPtr<Promise> toBeIgnored = self->Play(dummy);
+          },
+          [self = RefPtr<HTMLMediaElement>(this)]() {
+            LOG(LogLevel::Debug,
+                ("%p Can not resume delayed Play() call", self.get()));
+            self->mResumePlaybackRequest.Complete();
+            self->mResumeDelayedPlaybackAgent = nullptr;
+          })
+      ->Track(mResumePlaybackRequest);
+}
+
+void HTMLMediaElement::ClearResumeDelayedMediaPlaybackAgentIfNeeded() {
+  if (mResumeDelayedPlaybackAgent) {
+    mResumePlaybackRequest.DisconnectIfExists();
+    mResumeDelayedPlaybackAgent = nullptr;
+  }
+}
+
+void HTMLMediaElement::NotifyMediaControlPlaybackStateChanged() {
+  if (!mMediaControlEventListener || !mMediaControlEventListener->IsStarted()) {
+    return;
+  }
+  if (mPaused) {
+    mMediaControlEventListener->NotifyMediaStoppedPlaying();
+  } else {
+    mMediaControlEventListener->NotifyMediaStartedPlaying();
+  }
+}
+
+void HTMLMediaElement::StartListeningMediaControlEventIfNeeded() {
+  if (!mMediaControlEventListener) {
+    mMediaControlEventListener = new MediaControlEventListener(this);
+  }
+  if (!mMediaControlEventListener->IsStarted()) {
+    mMediaControlEventListener->Start();
+  }
+}
+
+void HTMLMediaElement::StopListeningMediaControlEventIfNeeded() {
+  if (mMediaControlEventListener && mMediaControlEventListener->IsStarted()) {
+    mMediaControlEventListener->NotifyMediaStoppedPlaying();
+    mMediaControlEventListener->Stop();
+  }
 }
 
 }  // namespace dom

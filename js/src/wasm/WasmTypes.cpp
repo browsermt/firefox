@@ -19,10 +19,12 @@
 #include "wasm/WasmTypes.h"
 
 #include "js/Printf.h"
+#include "util/Memory.h"
 #include "vm/ArrayBufferObject.h"
 #include "wasm/WasmBaselineCompile.h"
 #include "wasm/WasmInstance.h"
 #include "wasm/WasmSerialize.h"
+#include "wasm/WasmStubs.h"
 
 #include "vm/JSObject-inl.h"
 #include "vm/NativeObject-inl.h"
@@ -63,7 +65,7 @@ static_assert(HugeMappedSize > ArrayBufferObject::MaxBufferByteLength,
 
 Val::Val(const LitVal& val) {
   type_ = val.type();
-  switch (type_.code()) {
+  switch (type_.kind()) {
     case ValType::I32:
       u.i32_ = val.i32();
       return;
@@ -77,12 +79,8 @@ Val::Val(const LitVal& val) {
       u.f64_ = val.f64();
       return;
     case ValType::Ref:
-    case ValType::FuncRef:
-    case ValType::AnyRef:
       u.ref_ = val.ref();
       return;
-    case ValType::NullRef:
-      break;
   }
   MOZ_CRASH();
 }
@@ -102,17 +100,6 @@ void AnyRef::trace(JSTracer* trc) {
     TraceManuallyBarrieredEdge(trc, &value_, "wasm anyref referent");
   }
 }
-
-class WasmValueBox : public NativeObject {
-  static const unsigned VALUE_SLOT = 0;
-
- public:
-  static const unsigned RESERVED_SLOTS = 1;
-  static const JSClass class_;
-
-  static WasmValueBox* create(JSContext* cx, HandleValue val);
-  Value value() const { return getFixedSlot(VALUE_SLOT); }
-};
 
 const JSClass WasmValueBox::class_ = {
     "WasmValueBox", JSCLASS_HAS_RESERVED_SLOTS(RESERVED_SLOTS)};
@@ -147,6 +134,11 @@ bool wasm::BoxAnyRef(JSContext* cx, HandleValue val, MutableHandleAnyRef addr) {
   return true;
 }
 
+JSObject* wasm::BoxBoxableValue(JSContext* cx, HandleValue val) {
+  MOZ_ASSERT(!val.isNull() && !val.isObject());
+  return WasmValueBox::create(cx, val);
+}
+
 Value wasm::UnboxAnyRef(AnyRef val) {
   // If UnboxAnyRef needs to allocate then we need a more complicated API, and
   // we need to root the value in the callers, see comments in callExport().
@@ -159,6 +151,14 @@ Value wasm::UnboxAnyRef(AnyRef val) {
   } else {
     result.setObjectOrNull(obj);
   }
+  return result;
+}
+
+Value wasm::UnboxFuncRef(FuncRef val) {
+  JSFunction* fn = val.asJSFunction();
+  Value result;
+  MOZ_ASSERT_IF(fn, fn->is<JSFunction>());
+  result.setObjectOrNull(fn);
   return result;
 }
 
@@ -218,34 +218,21 @@ bool wasm::IsRoundingFunction(SymbolicAddress callee, jit::RoundingMode* mode) {
 }
 
 size_t FuncType::serializedSize() const {
-  return sizeof(ret_) + SerializedPodVectorSize(args_);
+  return SerializedPodVectorSize(results_) + SerializedPodVectorSize(args_);
 }
 
 uint8_t* FuncType::serialize(uint8_t* cursor) const {
-  cursor = WriteScalar<ExprType>(cursor, ret_);
+  cursor = SerializePodVector(cursor, results_);
   cursor = SerializePodVector(cursor, args_);
   return cursor;
 }
 
-namespace js {
-namespace wasm {
-
-// ExprType is not POD while ReadScalar requires POD, so specialize.
-template <>
-inline const uint8_t* ReadScalar<ExprType>(const uint8_t* src, ExprType* dst) {
-  static_assert(sizeof(PackedTypeCode) == sizeof(ExprType),
-                "ExprType must carry only a PackedTypeCode");
-  memcpy(dst->packedPtr(), src, sizeof(PackedTypeCode));
-  return src + sizeof(*dst);
-}
-
-}  // namespace wasm
-}  // namespace js
-
 const uint8_t* FuncType::deserialize(const uint8_t* cursor) {
-  (cursor = ReadScalar<ExprType>(cursor, &ret_)) &&
-      (cursor = DeserializePodVector(cursor, &args_));
-  return cursor;
+  cursor = DeserializePodVector(cursor, &results_);
+  if (!cursor) {
+    return nullptr;
+  }
+  return DeserializePodVector(cursor, &args_);
 }
 
 size_t FuncType::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
@@ -262,24 +249,29 @@ static const unsigned sMaxTypes =
     (sTotalBits - sTagBits - sReturnBit - sLengthBits) / sTypeBits;
 
 static bool IsImmediateType(ValType vt) {
-  switch (vt.code()) {
+  switch (vt.kind()) {
     case ValType::I32:
     case ValType::I64:
     case ValType::F32:
     case ValType::F64:
-    case ValType::FuncRef:
-    case ValType::AnyRef:
       return true;
-    case ValType::NullRef:
     case ValType::Ref:
-      return false;
+      switch (vt.refTypeKind()) {
+        case RefType::Func:
+        case RefType::Any:
+        case RefType::Null:
+          return true;
+        case RefType::TypeIndex:
+          return false;
+      }
+      break;
   }
   MOZ_CRASH("bad ValType");
 }
 
 static unsigned EncodeImmediateType(ValType vt) {
   static_assert(4 < (1 << sTypeBits), "fits");
-  switch (vt.code()) {
+  switch (vt.kind()) {
     case ValType::I32:
       return 0;
     case ValType::I64:
@@ -288,12 +280,17 @@ static unsigned EncodeImmediateType(ValType vt) {
       return 2;
     case ValType::F64:
       return 3;
-    case ValType::FuncRef:
-      return 4;
-    case ValType::AnyRef:
-      return 5;
-    case ValType::NullRef:
     case ValType::Ref:
+      switch (vt.refTypeKind()) {
+        case RefType::Func:
+          return 4;
+        case RefType::Any:
+          return 5;
+        case RefType::Null:
+          return 6;
+        case RefType::TypeIndex:
+          break;
+      }
       break;
   }
   MOZ_CRASH("bad ValType");
@@ -301,18 +298,23 @@ static unsigned EncodeImmediateType(ValType vt) {
 
 /* static */
 bool FuncTypeIdDesc::isGlobal(const FuncType& funcType) {
-  unsigned numTypes =
-      (funcType.ret() == ExprType::Void ? 0 : 1) + (funcType.args().length());
-  if (numTypes > sMaxTypes) {
+  const ValTypeVector& results = funcType.results();
+  const ValTypeVector& args = funcType.args();
+  if (results.length() + args.length() > sMaxTypes) {
     return true;
   }
 
-  if (funcType.ret() != ExprType::Void &&
-      !IsImmediateType(NonVoidToValType(funcType.ret()))) {
+  if (results.length() > 1) {
     return true;
   }
 
-  for (ValType v : funcType.args()) {
+  for (ValType v : results) {
+    if (!IsImmediateType(v)) {
+      return true;
+    }
+  }
+
+  for (ValType v : args) {
     if (!IsImmediateType(v)) {
       return true;
     }
@@ -339,11 +341,12 @@ FuncTypeIdDesc FuncTypeIdDesc::immediate(const FuncType& funcType) {
   ImmediateType immediate = ImmediateBit;
   uint32_t shift = sTagBits;
 
-  if (funcType.ret() != ExprType::Void) {
+  if (funcType.results().length() > 0) {
+    MOZ_ASSERT(funcType.results().length() == 1);
     immediate |= (1 << shift);
     shift += sReturnBit;
 
-    immediate |= EncodeImmediateType(NonVoidToValType(funcType.ret())) << shift;
+    immediate |= EncodeImmediateType(funcType.results()[0]) << shift;
     shift += sTypeBits;
   } else {
     shift += sReturnBit;
@@ -380,6 +383,11 @@ const uint8_t* FuncTypeWithId::deserialize(const uint8_t* cursor) {
 size_t FuncTypeWithId::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
   return FuncType::sizeOfExcludingThis(mallocSizeOf);
 }
+
+ArgTypeVector::ArgTypeVector(const FuncType& funcType)
+    : args_(funcType.args()),
+      hasStackResults_(ABIResultIter::HasStackResults(
+          ResultType::Vector(funcType.results()))) {}
 
 // A simple notion of prefix: types and mutability must match exactly.
 
@@ -486,19 +494,23 @@ size_t Export::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const {
 }
 
 size_t ElemSegment::serializedSize() const {
-  return sizeof(tableIndex) + sizeof(offsetIfActive) +
-         SerializedPodVectorSize(elemFuncIndices);
+  return sizeof(kind) + sizeof(tableIndex) + sizeof(elementType) +
+         sizeof(offsetIfActive) + SerializedPodVectorSize(elemFuncIndices);
 }
 
 uint8_t* ElemSegment::serialize(uint8_t* cursor) const {
+  cursor = WriteBytes(cursor, &kind, sizeof(kind));
   cursor = WriteBytes(cursor, &tableIndex, sizeof(tableIndex));
+  cursor = WriteBytes(cursor, &elementType, sizeof(elementType));
   cursor = WriteBytes(cursor, &offsetIfActive, sizeof(offsetIfActive));
   cursor = SerializePodVector(cursor, elemFuncIndices);
   return cursor;
 }
 
 const uint8_t* ElemSegment::deserialize(const uint8_t* cursor) {
-  (cursor = ReadBytes(cursor, &tableIndex, sizeof(tableIndex))) &&
+  (cursor = ReadBytes(cursor, &kind, sizeof(kind))) &&
+      (cursor = ReadBytes(cursor, &tableIndex, sizeof(tableIndex))) &&
+      (cursor = ReadBytes(cursor, &elementType, sizeof(elementType))) &&
       (cursor = ReadBytes(cursor, &offsetIfActive, sizeof(offsetIfActive))) &&
       (cursor = DeserializePodVector(cursor, &elemFuncIndices));
   return cursor;
@@ -658,12 +670,20 @@ JSObject* DebugFrame::environmentChain() const {
 bool DebugFrame::getLocal(uint32_t localIndex, MutableHandleValue vp) {
   ValTypeVector locals;
   size_t argsLength;
-  if (!instance()->debug().debugGetLocalTypes(funcIndex(), &locals,
-                                              &argsLength)) {
+  StackResults stackResults;
+  if (!instance()->debug().debugGetLocalTypes(funcIndex(), &locals, &argsLength,
+                                              &stackResults)) {
     return false;
   }
 
-  BaseLocalIter iter(locals, argsLength, /* debugEnabled = */ true);
+  ValTypeVector args;
+  MOZ_ASSERT(argsLength <= locals.length());
+  if (!args.append(locals.begin(), argsLength)) {
+    return false;
+  }
+  ArgTypeVector abiArgs(args, stackResults);
+
+  BaseLocalIter iter(locals, abiArgs, /* debugEnabled = */ true);
   while (!iter.done() && iter.index() < localIndex) {
     iter++;
   }
@@ -694,36 +714,50 @@ bool DebugFrame::getLocal(uint32_t localIndex, MutableHandleValue vp) {
   return true;
 }
 
-void DebugFrame::updateReturnJSValue() {
+bool DebugFrame::updateReturnJSValue() {
   hasCachedReturnJSValue_ = true;
-  ExprType returnType = instance()->debug().debugGetResultType(funcIndex());
-  switch (returnType.code()) {
-    case ExprType::Void:
-      cachedReturnJSValue_.setUndefined();
-      break;
-    case ExprType::I32:
+  ValTypeVector results;
+  if (!instance()->debug().debugGetResultTypes(funcIndex(), &results)) {
+    return false;
+  }
+  if (results.length() == 0) {
+    cachedReturnJSValue_.setUndefined();
+    return true;
+  }
+  MOZ_ASSERT(results.length() == 1, "multi-value return unimplemented");
+  switch (results[0].kind()) {
+    case ValType::I32:
       cachedReturnJSValue_.setInt32(resultI32_);
       break;
-    case ExprType::I64:
+    case ValType::I64:
       // Just display as a Number; it's ok if we lose some precision
       cachedReturnJSValue_.setDouble((double)resultI64_);
       break;
-    case ExprType::F32:
+    case ValType::F32:
       cachedReturnJSValue_.setDouble(JS::CanonicalizeNaN(resultF32_));
       break;
-    case ExprType::F64:
+    case ValType::F64:
       cachedReturnJSValue_.setDouble(JS::CanonicalizeNaN(resultF64_));
       break;
-    case ExprType::Ref:
-      cachedReturnJSValue_ = ObjectOrNullValue((JSObject*)resultRef_);
-      break;
-    case ExprType::FuncRef:
-    case ExprType::AnyRef:
-      cachedReturnJSValue_ = UnboxAnyRef(resultAnyRef_);
+    case ValType::Ref:
+      switch (results[0].refTypeKind()) {
+        case RefType::TypeIndex:
+          cachedReturnJSValue_ = ObjectOrNullValue((JSObject*)resultRef_);
+          break;
+        case RefType::Func:
+          cachedReturnJSValue_ =
+              UnboxFuncRef(FuncRef::fromAnyRefUnchecked(resultAnyRef_));
+          break;
+        case RefType::Any:
+        case RefType::Null:
+          cachedReturnJSValue_ = UnboxAnyRef(resultAnyRef_);
+          break;
+      }
       break;
     default:
       MOZ_CRASH("result type");
   }
+  return true;
 }
 
 HandleValue DebugFrame::returnValue() const {

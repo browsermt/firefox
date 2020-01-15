@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import runpy
 import sys
 import atexit
 import shared_telemetry_utils as utils
@@ -44,6 +45,12 @@ BASE_DOC_URL = ("https://firefox-source-docs.mozilla.org/toolkit/components/"
                 "telemetry/telemetry/")
 HISTOGRAMS_DOC_URL = (BASE_DOC_URL + "collection/histograms.html")
 SCALARS_DOC_URL = (BASE_DOC_URL + "collection/scalars.html")
+
+GECKOVIEW_STREAMING_SUPPORTED_KINDS = [
+    'linear',
+    'exponential',
+    'categorical',
+]
 
 # parse_histograms.py is used by scripts from a mozilla-central build tree
 # and also by outside consumers, such as the telemetry server.  We need
@@ -416,6 +423,15 @@ the histogram."""
             if not utils.is_valid_product(product):
                 ParserError('Histogram "%s" has unknown product "%s" in %s.\n%s' %
                             (name, product, field, DOC_URL)).handle_later()
+            if utils.is_geckoview_streaming_product(product):
+                kind = definition.get('kind')
+                if kind not in GECKOVIEW_STREAMING_SUPPORTED_KINDS:
+                    ParserError(('Histogram "%s" is of kind "%s" which is unsupported for '
+                                 'product "%s".') % (name, kind, product)).handle_later()
+                keyed = definition.get('keyed')
+                if keyed:
+                    ParserError('Keyed histograms like "%s" are unsupported for product "%s"' %
+                                (name, product)).handle_later()
 
     def check_operating_systems(self, name, definition):
         if not self._strict_type_checks:
@@ -601,7 +617,10 @@ the histogram."""
         self._low = low
         self._high = high
         self._n_buckets = n_buckets
-        if allowlists is not None and self._n_buckets > 100 and type(self._n_buckets) is int:
+        max_n_buckets = 101 if self._kind in ['enumerated', 'categorical'] else 100
+        if (allowlists is not None
+            and self._n_buckets > max_n_buckets
+            and type(self._n_buckets) is int):
             if self._name not in allowlists['n_buckets']:
                 ParserError(
                     'New histogram "%s" is not permitted to have more than 100 buckets.\n'
@@ -691,19 +710,23 @@ def load_histograms_into_dict(ordered_pairs, strict_type_checks):
 # just Histograms.json.  For each file's basename, we have a specific
 # routine to parse that file, and return a dictionary mapping histogram
 # names to histogram parameters.
-def from_Histograms_json(filename, strict_type_checks):
+def from_json(filename, strict_type_checks):
     with open(filename, 'r') as f:
         try:
             def hook(ps):
                 return load_histograms_into_dict(ps, strict_type_checks)
             histograms = json.load(f, object_pairs_hook=hook)
-        except ValueError, e:
+        except ValueError as e:
             ParserError("error parsing histograms in %s: %s" % (filename, e.message)).handle_now()
     return histograms
 
 
 def from_UseCounters_conf(filename, strict_type_checks):
     return usecounters.generate_histograms(filename)
+
+
+def from_UseCountersWorker_conf(filename, strict_type_checks):
+    return usecounters.generate_histograms(filename, True)
 
 
 def from_nsDeprecatedOperationList(filename, strict_type_checks):
@@ -731,17 +754,86 @@ def from_nsDeprecatedOperationList(filename, strict_type_checks):
     return histograms
 
 
-FILENAME_PARSERS = {
-    'Histograms.json': from_Histograms_json,
-    'nsDeprecatedOperationList.h': from_nsDeprecatedOperationList,
-}
+def to_camel_case(property_name):
+    return re.sub("(^|_|-)([a-z0-9])",
+                  lambda m: m.group(2).upper(),
+                  property_name.strip("_").strip("-"))
+
+
+def add_css_property_counters(histograms, property_name):
+    def add_counter(context):
+        name = 'USE_COUNTER2_CSS_PROPERTY_%s_%s' % (to_camel_case(property_name), context.upper())
+        histograms[name] = {
+            'expires_in_version': 'never',
+            'kind': 'boolean',
+            'description': 'Whether a %s used the CSS property %s' % (context, property_name)
+        }
+
+    add_counter('document')
+    add_counter('page')
+
+
+def from_ServoCSSPropList(filename, strict_type_checks):
+    histograms = collections.OrderedDict()
+    properties = runpy.run_path(filename)["data"]
+    for prop in properties:
+        add_css_property_counters(histograms, prop.name)
+    return histograms
+
+
+def from_counted_unknown_properties(filename, strict_type_checks):
+    histograms = collections.OrderedDict()
+    properties = runpy.run_path(filename)["COUNTED_UNKNOWN_PROPERTIES"]
+
+    # NOTE(emilio): Unlike ServoCSSProperties, `prop` here is just the property
+    # name.
+    #
+    # We use the same naming as CSS properties so that we don't get
+    # discontinuity when we implement or prototype them.
+    for prop in properties:
+        add_css_property_counters(histograms, prop)
+    return histograms
+
+
+# This is only used for probe-scraper.
+def from_properties_db(filename, strict_type_checks):
+    histograms = collections.OrderedDict()
+    with open(filename, 'r') as f:
+        in_css_properties = False
+
+        for line in f:
+            if not in_css_properties:
+                if line.startswith("exports.CSS_PROPERTIES = {"):
+                    in_css_properties = True
+                continue
+
+            if line.startswith("};"):
+                break
+
+            if not line.startswith("  \""):
+                continue
+
+            name = line.split("\"")[1]
+            add_css_property_counters(histograms, name)
+    return histograms
+
+
+FILENAME_PARSERS = [
+    (lambda x: from_json if x.endswith('.json') else None),
+    (lambda x: from_nsDeprecatedOperationList if x == 'nsDeprecatedOperationList.h' else None),
+    (lambda x: from_ServoCSSPropList if x == 'ServoCSSPropList.py' else None),
+    (lambda x: from_counted_unknown_properties if x == 'counted_unknown_properties.py' else None),
+    (lambda x: from_properties_db if x == 'properties-db.js' else None),
+]
 
 # Similarly to the dance above with buildconfig, usecounters may not be
 # available, so handle that gracefully.
 try:
     import usecounters
 
-    FILENAME_PARSERS['UseCounters.conf'] = from_UseCounters_conf
+    FILENAME_PARSERS.append(lambda x: from_UseCounters_conf if x == 'UseCounters.conf' else None)
+    FILENAME_PARSERS.append(
+        lambda x: from_UseCountersWorker_conf if x == 'UseCountersWorker.conf' else None)
 except ImportError:
     pass
 
@@ -755,7 +847,15 @@ the histograms defined in filenames.
 
     all_histograms = OrderedDict()
     for filename in filenames:
-        parser = FILENAME_PARSERS[os.path.basename(filename)]
+        parser = None
+        for checkFn in FILENAME_PARSERS:
+            parser = checkFn(os.path.basename(filename))
+            if parser is not None:
+                break
+
+        if parser is None:
+            ParserError("Don't know how to parse %s." % filename).handle_now()
+
         histograms = parser(filename, strict_type_checks)
 
         # OrderedDicts are important, because then the iteration order over
@@ -770,17 +870,26 @@ the histograms defined in filenames.
                 ParserError('Duplicate histogram name "%s".' % name).handle_later()
             all_histograms[name] = definition
 
-    # We require that all USE_COUNTER2_* histograms be defined in a contiguous
+    def check_continuity(iterable, filter_function, name):
+        indices = filter(filter_function, enumerate(iterable.iterkeys()))
+        if indices:
+            lower_bound = indices[0][0]
+            upper_bound = indices[-1][0]
+            n_counters = upper_bound - lower_bound + 1
+            if n_counters != len(indices):
+                ParserError("Histograms %s must be defined in a contiguous block." %
+                            name).handle_later()
+
+    # We require that all USE_COUNTER2_*_WORKER histograms be defined in a contiguous
     # block.
-    use_counter_indices = filter(lambda x: x[1].startswith("USE_COUNTER2_"),
-                                 enumerate(all_histograms.iterkeys()))
-    if use_counter_indices:
-        lower_bound = use_counter_indices[0][0]
-        upper_bound = use_counter_indices[-1][0]
-        n_counters = upper_bound - lower_bound + 1
-        if n_counters != len(use_counter_indices):
-            ParserError("Use counter histograms must be defined in a contiguous block."
-                        ).handle_later()
+    check_continuity(all_histograms,
+                     lambda x: x[1].startswith("USE_COUNTER2_") and x[1].endswith("_WORKER"),
+                     "use counter worker")
+    # And all other USE_COUNTER2_* histograms be defined in a contiguous
+    # block.
+    check_continuity(all_histograms,
+                     lambda x: x[1].startswith("USE_COUNTER2_") and not x[1].endswith("_WORKER"),
+                     "use counter")
 
     # Check that histograms that were removed from Histograms.json etc.
     # are also removed from the allowlists.

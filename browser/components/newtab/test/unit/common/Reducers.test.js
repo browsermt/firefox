@@ -900,6 +900,18 @@ describe("Reducers", () => {
         INITIAL_STATE.DiscoveryStream
       );
     });
+    it("should set isPrivacyInfoModalVisible to true with SHOW_PRIVACY_INFO", () => {
+      const state = DiscoveryStream(undefined, {
+        type: at.SHOW_PRIVACY_INFO,
+      });
+      assert.equal(state.isPrivacyInfoModalVisible, true);
+    });
+    it("should set isPrivacyInfoModalVisible to false with HIDE_PRIVACY_INFO", () => {
+      const state = DiscoveryStream(undefined, {
+        type: at.HIDE_PRIVACY_INFO,
+      });
+      assert.equal(state.isPrivacyInfoModalVisible, false);
+    });
     it("should set layout data with DISCOVERY_STREAM_LAYOUT_UPDATE", () => {
       const state = DiscoveryStream(undefined, {
         type: at.DISCOVERY_STREAM_LAYOUT_UPDATE,
@@ -991,6 +1003,28 @@ describe("Reducers", () => {
         blocked: [],
         placements: [],
       });
+    });
+    it("should default to a single spoc placement", () => {
+      const deleteAction = {
+        type: at.DISCOVERY_STREAM_LINK_BLOCKED,
+        data: { url: "https://foo.com" },
+      };
+      const oldState = {
+        spocs: {
+          data: {
+            spocs: [{ url: "test-spoc.com" }],
+          },
+          loaded: true,
+        },
+        feeds: {
+          data: {},
+          loaded: true,
+        },
+      };
+
+      const newState = DiscoveryStream(oldState, deleteAction);
+
+      assert.equal(newState.spocs.data.spocs.length, 1);
     });
     it("should handle no data from DISCOVERY_STREAM_SPOCS_UPDATE", () => {
       const data = null;

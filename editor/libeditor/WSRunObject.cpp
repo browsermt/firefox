@@ -5,8 +5,6 @@
 
 #include "WSRunObject.h"
 
-#include "TextEditUtils.h"
-
 #include "mozilla/Assertions.h"
 #include "mozilla/Casting.h"
 #include "mozilla/EditorDOMPoint.h"
@@ -87,8 +85,8 @@ WSRunScanner::WSRunScanner(const HTMLEditor* aHTMLEditor,
       mEndRun(nullptr),
       mHTMLEditor(aHTMLEditor) {
   MOZ_ASSERT(
-      nsContentUtils::ComparePoints(aScanStartPoint.ToRawRangeBoundary(),
-                                    aScanEndPoint.ToRawRangeBoundary()) <= 0);
+      *nsContentUtils::ComparePoints(aScanStartPoint.ToRawRangeBoundary(),
+                                     aScanEndPoint.ToRawRangeBoundary()) <= 0);
   GetWSNodes();
   GetRuns();
 }
@@ -187,8 +185,8 @@ already_AddRefed<Element> WSRunObject::InsertBreak(
   }
 
   // MOOSE: for now, we always assume non-PRE formatting.  Fix this later.
-  // meanwhile, the pre case is handled in WillInsertText in
-  // HTMLEditRules.cpp
+  // meanwhile, the pre case is handled in HandleInsertText() in
+  // HTMLEditSubActionHandler.cpp
 
   WSFragment* beforeRun = FindNearestRun(aPointToInsert, false);
   WSFragment* afterRun = FindNearestRun(aPointToInsert, true);
@@ -260,8 +258,8 @@ nsresult WSRunObject::InsertText(Document& aDocument,
                                  EditorRawDOMPoint* aPointAfterInsertedString)
     MOZ_CAN_RUN_SCRIPT_FOR_DEFINITION {
   // MOOSE: for now, we always assume non-PRE formatting.  Fix this later.
-  // meanwhile, the pre case is handled in WillInsertText in
-  // HTMLEditRules.cpp
+  // meanwhile, the pre case is handled in HandleInsertText() in
+  // HTMLEditSubActionHandler.cpp
 
   // MOOSE: for now, just getting the ws logic straight.  This implementation
   // is very slow.  Will need to replace edit rules impl with a more efficient
@@ -275,7 +273,12 @@ nsresult WSRunObject::InsertText(Document& aDocument,
   }
 
   WSFragment* beforeRun = FindNearestRun(mScanStartPoint, false);
-  WSFragment* afterRun = FindNearestRun(mScanEndPoint, true);
+  // If mScanStartPoint isn't equal to mScanEndPoint, it will replace text (i.e.
+  // committing composition). And afterRun will be end point of replaced range.
+  // So we want to know this white space type (trailing whitespace etc) of
+  // this end point, not inserted (start) point, so we re-scan white space type.
+  WSRunObject afterRunObject(mHTMLEditor, mScanEndPoint);
+  WSFragment* afterRun = afterRunObject.FindNearestRun(mScanEndPoint, true);
 
   EditorDOMPoint pointToInsert(mScanStartPoint);
   nsAutoString theString(aStringToInsert);
@@ -359,7 +362,12 @@ nsresult WSRunObject::InsertText(Document& aDocument,
           theString.SetCharAt(kNBSP, lastCharIndex);
         }
       }
-    } else if (mEndReason & WSType::block) {
+    } else if (afterRunObject.mEndReason & WSType::block) {
+      // When afterRun is null, it means that mScanEndPoint is last point in
+      // editing host or editing block.
+      // If this text insertion replaces composition, this.mEndReason is
+      // start position of compositon. So we have to use afterRunObject's
+      // reason instead.
       theString.SetCharAt(kNBSP, lastCharIndex);
     }
   }
@@ -668,7 +676,7 @@ nsresult WSRunScanner::GetWSNodes() {
   // collect up an array of nodes that are contiguous with the insertion point
   // and which contain only whitespace.  Stop if you reach non-ws text or a new
   // block boundary.
-  EditorDOMPoint start(mScanStartPoint), end(mScanEndPoint);
+  EditorDOMPoint start(mScanStartPoint), end(mScanStartPoint);
   nsCOMPtr<nsINode> wsBoundingParent = GetWSBoundingParent();
 
   // first look backwards to find preceding ws nodes
@@ -760,7 +768,7 @@ nsresult WSRunScanner::GetWSNodes() {
         // not a break but still serves as a terminator to ws runs.
         mStartNode = start.GetContainer();
         mStartOffset = start.Offset();
-        if (TextEditUtils::IsBreak(priorNode)) {
+        if (priorNode->IsHTMLElement(nsGkAtoms::br)) {
           mStartReason = WSType::br;
         } else {
           mStartReason = WSType::special;
@@ -777,12 +785,11 @@ nsresult WSRunScanner::GetWSNodes() {
   }
 
   // then look ahead to find following ws nodes
-  if (Text* textNode = mScanEndPoint.GetContainerAsText()) {
+  if (Text* textNode = end.GetContainerAsText()) {
     // don't need to put it on list. it already is from code above
     const nsTextFragment* textFrag = &textNode->TextFragment();
-    if (!mScanEndPoint.IsEndOfContainer()) {
-      for (uint32_t i = mScanEndPoint.Offset(); i < textNode->TextLength();
-           i++) {
+    if (!end.IsEndOfContainer()) {
+      for (uint32_t i = end.Offset(); i < textNode->TextLength(); i++) {
         // sanity bounds check the char position.  bug 136165
         if (i >= textFrag->GetLength()) {
           MOZ_ASSERT_UNREACHABLE("looking beyond end of text fragment");
@@ -868,7 +875,7 @@ nsresult WSRunScanner::GetWSNodes() {
         // serves as a terminator to ws runs.
         mEndNode = end.GetContainer();
         mEndOffset = end.Offset();
-        if (TextEditUtils::IsBreak(nextNode)) {
+        if (nextNode->IsHTMLElement(nsGkAtoms::br)) {
           mEndReason = WSType::br;
         } else {
           mEndReason = WSType::special;
@@ -1637,7 +1644,7 @@ WSRunScanner::WSFragment* WSRunScanner::FindNearestRun(
   MOZ_ASSERT(aPoint.IsSetAndValid());
 
   for (WSFragment* run = mStartRun; run; run = run->mRight) {
-    int32_t comp = run->mStartNode ? nsContentUtils::ComparePoints(
+    int32_t comp = run->mStartNode ? *nsContentUtils::ComparePoints(
                                          aPoint.ToRawRangeBoundary(),
                                          run->StartPoint().ToRawRangeBoundary())
                                    : -1;
@@ -1647,7 +1654,7 @@ WSRunScanner::WSFragment* WSRunScanner::FindNearestRun(
       return aForward ? run : nullptr;
     }
 
-    comp = run->mEndNode ? nsContentUtils::ComparePoints(
+    comp = run->mEndNode ? *nsContentUtils::ComparePoints(
                                aPoint.ToRawRangeBoundary(),
                                run->EndPoint().ToRawRangeBoundary())
                          : -1;
@@ -1689,6 +1696,8 @@ WSRunScanner::WSPoint WSRunScanner::GetNextCharPointInternal(
     const EditorDOMPointBase<PT, CT>& aPoint) const {
   // Note: only to be called if aPoint.GetContainer() is not a ws node.
 
+  MOZ_ASSERT(aPoint.IsSetAndValid());
+
   // Binary search on wsnodes
   uint32_t numNodes = mNodeArray.Length();
 
@@ -1703,8 +1712,8 @@ WSRunScanner::WSPoint WSRunScanner::GetNextCharPointInternal(
   uint32_t firstNum = 0, curNum = numNodes / 2, lastNum = numNodes;
   while (curNum != lastNum) {
     Text* curNode = mNodeArray[curNum];
-    int16_t cmp = nsContentUtils::ComparePoints(aPoint.ToRawRangeBoundary(),
-                                                RawRangeBoundary(curNode, 0));
+    int16_t cmp = *nsContentUtils::ComparePoints(aPoint.ToRawRangeBoundary(),
+                                                 RawRangeBoundary(curNode, 0u));
     if (cmp < 0) {
       lastNum = curNum;
     } else {
@@ -1737,6 +1746,8 @@ WSRunScanner::WSPoint WSRunScanner::GetPreviousCharPointInternal(
     const EditorDOMPointBase<PT, CT>& aPoint) const {
   // Note: only to be called if aNode is not a ws node.
 
+  MOZ_ASSERT(aPoint.IsSetAndValid());
+
   // Binary search on wsnodes
   uint32_t numNodes = mNodeArray.Length();
 
@@ -1753,8 +1764,8 @@ WSRunScanner::WSPoint WSRunScanner::GetPreviousCharPointInternal(
   // ComparePoints(), which is expensive.
   while (curNum != lastNum) {
     Text* curNode = mNodeArray[curNum];
-    cmp = nsContentUtils::ComparePoints(aPoint.ToRawRangeBoundary(),
-                                        RawRangeBoundary(curNode, 0));
+    cmp = *nsContentUtils::ComparePoints(aPoint.ToRawRangeBoundary(),
+                                         RawRangeBoundary(curNode, 0u));
     if (cmp < 0) {
       lastNum = curNum;
     } else {

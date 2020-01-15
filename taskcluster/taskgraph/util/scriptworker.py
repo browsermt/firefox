@@ -57,10 +57,9 @@ SIGNING_SCOPE_ALIAS_TO_PROJECT = [[
     'all-release-branches', set([
         'mozilla-beta',
         'mozilla-release',
-        'mozilla-esr60',
         'mozilla-esr68',
         'comm-beta',
-        'comm-esr60',
+        'comm-esr68',
     ])
 ]]
 
@@ -95,10 +94,8 @@ BEETMOVER_SCOPE_ALIAS_TO_PROJECT = [[
     'all-release-branches', set([
         'mozilla-beta',
         'mozilla-release',
-        'mozilla-esr60',
         'mozilla-esr68',
         'comm-beta',
-        'comm-esr60',
         'comm-esr68',
     ])
 ]]
@@ -141,12 +138,7 @@ BALROG_SCOPE_ALIAS_TO_PROJECT = [[
 ], [
     'release', set([
         'mozilla-release',
-        'comm-esr60',
         'comm-esr68',
-    ])
-], [
-    'esr60', set([
-        'mozilla-esr60',
     ])
 ], [
     'esr68', set([
@@ -161,7 +153,6 @@ BALROG_SERVER_SCOPES = {
     'aurora': 'balrog:server:aurora',
     'beta': 'balrog:server:beta',
     'release': 'balrog:server:release',
-    'esr60': 'balrog:server:esr',
     'esr68': 'balrog:server:esr',
     'default': 'balrog:server:dep',
 }
@@ -377,7 +368,7 @@ def get_release_config(config):
 def get_signing_cert_scope_per_platform(build_platform, is_nightly, config):
     if 'devedition' in build_platform:
         return get_devedition_signing_cert_scope(config)
-    elif is_nightly or build_platform in ('firefox-source', 'fennec-source', 'thunderbird-source'):
+    elif is_nightly:
         return get_signing_cert_scope(config)
     else:
         return add_scope_prefix(config, 'signing:cert:dep-signing')
@@ -785,12 +776,3 @@ def generate_beetmover_partials_artifact_map(config, job, partials_info, **kwarg
         })
 
     return artifacts
-
-
-def should_use_artifact_map(platform):
-    """Return True if this task uses the beetmover artifact map.
-
-    This function exists solely for the beetmover artifact map
-    migration.
-    """
-    return 'devedition' not in platform

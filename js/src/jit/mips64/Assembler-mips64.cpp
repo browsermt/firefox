@@ -75,13 +75,9 @@ uint32_t js::jit::SA(FloatRegister r) {
   return r.id() << SAShift;
 }
 
-void Assembler::executableCopy(uint8_t* buffer, bool flushICache) {
+void Assembler::executableCopy(uint8_t* buffer) {
   MOZ_ASSERT(isFinished);
   m_buffer.executableCopy(buffer);
-
-  if (flushICache) {
-    AutoFlushICache::setRange(uintptr_t(buffer), m_buffer.size());
-  }
 }
 
 uintptr_t Assembler::GetPointer(uint8_t* instPtr) {
@@ -131,7 +127,6 @@ static void TraceOneDataRelocation(JSTracer* trc,
       awjc.emplace(code);
     }
     Assembler::UpdateLoad64Value(inst, uint64_t(ptr));
-    AutoFlushICache::flush(uintptr_t(inst), 6 * sizeof(uint32_t));
   }
 }
 
@@ -211,7 +206,12 @@ void Assembler::bind(InstImm* inst, uintptr_t branch, uintptr_t target) {
     addLongJump(BufferOffset(branch), BufferOffset(target));
     Assembler::WriteLoad64Instructions(inst, ScratchRegister,
                                        LabelBase::INVALID_OFFSET);
+#ifdef MIPSR6
+    inst[4] =
+        InstReg(op_special, ScratchRegister, zero, zero, ff_jalr).encode();
+#else
     inst[4] = InstReg(op_special, ScratchRegister, zero, zero, ff_jr).encode();
+#endif
     // There is 1 nop after this.
   } else {
     // Handle long conditional jump.
@@ -220,7 +220,12 @@ void Assembler::bind(InstImm* inst, uintptr_t branch, uintptr_t target) {
     addLongJump(BufferOffset(branch + sizeof(uint32_t)), BufferOffset(target));
     Assembler::WriteLoad64Instructions(&inst[1], ScratchRegister,
                                        LabelBase::INVALID_OFFSET);
+#ifdef MIPSR6
+    inst[5] =
+        InstReg(op_special, ScratchRegister, zero, zero, ff_jalr).encode();
+#else
     inst[5] = InstReg(op_special, ScratchRegister, zero, zero, ff_jr).encode();
+#endif
     // There is 1 nop after this.
   }
 }
@@ -249,9 +254,6 @@ void Assembler::PatchWrite_NearCall(CodeLocationLabel start,
   Assembler::WriteLoad64Instructions(inst, ScratchRegister, (uint64_t)dest);
   inst[4] = InstReg(op_special, ScratchRegister, zero, ra, ff_jalr);
   inst[5] = InstNOP();
-
-  // Ensure everyone sees the code that was just written into memory.
-  AutoFlushICache::flush(uintptr_t(inst), PatchWrite_NearCallSize());
 }
 
 uint64_t Assembler::ExtractLoad64Value(Instruction* inst0) {
@@ -337,8 +339,6 @@ void Assembler::PatchDataWithValueCheck(CodeLocationLabel label,
 
   // Replace with new value
   Assembler::UpdateLoad64Value(inst, uint64_t(newValue.value));
-
-  AutoFlushICache::flush(uintptr_t(inst), 6 * sizeof(uint32_t));
 }
 
 uint64_t Assembler::ExtractInstructionImmediate(uint8_t* code) {
@@ -365,6 +365,4 @@ void Assembler::ToggleCall(CodeLocationLabel inst_, bool enabled) {
     InstNOP nop;
     *i4 = nop;
   }
-
-  AutoFlushICache::flush(uintptr_t(i4), sizeof(uint32_t));
 }

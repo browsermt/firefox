@@ -12,6 +12,7 @@ const {
 const dom = require("devtools/client/shared/vendor/react-dom-factories");
 const { div, span } = dom;
 const Actions = require("devtools/client/netmonitor/src/actions/index");
+const { PANELS } = require("devtools/client/netmonitor/src/constants");
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const {
   connect,
@@ -21,9 +22,15 @@ const TreeView = createFactory(TreeViewClass);
 const LabelCell = createFactory(
   require("devtools/client/shared/components/tree/LabelCell")
 );
-const { SearchProvider } = require("./search-provider");
-const Toolbar = createFactory(require("./Toolbar"));
-const StatusBar = createFactory(require("./StatusBar"));
+const {
+  SearchProvider,
+} = require("devtools/client/netmonitor/src/components/search/search-provider");
+const Toolbar = createFactory(
+  require("devtools/client/netmonitor/src/components/search/Toolbar")
+);
+const StatusBar = createFactory(
+  require("devtools/client/netmonitor/src/components/search/StatusBar")
+);
 // There are two levels in the search panel tree hierarchy:
 // 0: Resource - represents the source request object
 // 1: Search Result - represents a match coming from the parent resource
@@ -47,6 +54,7 @@ class SearchPanel extends Component {
       query: PropTypes.string.isRequired,
       results: PropTypes.array,
       navigate: PropTypes.func.isRequired,
+      isDisplaying: PropTypes.bool.isRequired,
     };
   }
 
@@ -62,6 +70,12 @@ class SearchPanel extends Component {
 
   componentDidMount() {
     if (this.searchboxRef) {
+      this.searchboxRef.current.focus();
+    }
+  }
+
+  componentDidUpdate(prevProps) {
+    if (this.props.isDisplaying && !prevProps.isDisplaying) {
       this.searchboxRef.current.focus();
     }
   }
@@ -97,7 +111,7 @@ class SearchPanel extends Component {
       ...props,
       title:
         member.level == 1
-          ? this.provider.getValue(member.object)
+          ? this.getTooltip(member.object)
           : this.provider.getResourceTooltipLabel(member.object),
       renderSuffix,
     });
@@ -159,7 +173,7 @@ class SearchPanel extends Component {
           return highlightedMatch;
         });
 
-        return span({ title: object.value }, allMatches);
+        return span({ title: this.getTooltip(object) }, allMatches);
       }
 
       const indexStart = caseSensitive
@@ -168,9 +182,9 @@ class SearchPanel extends Component {
       const indexEnd = indexStart + query.length;
 
       // Handles a match in a string
-      if (indexStart > 0) {
+      if (indexStart >= 0) {
         return span(
-          { title: object.value },
+          { title: this.getTooltip(object) },
           span({}, object.value.substring(0, indexStart)),
           span(
             { className: "query-match" },
@@ -182,10 +196,21 @@ class SearchPanel extends Component {
 
       // Default for key:value matches where query might not
       // be present in the value, but found in the key.
-      return span({ title: object.value }, span({}, object.value));
+      return span({ title: this.getTooltip(object) }, span({}, object.value));
     }
 
     return this.provider.getValue(member.object);
+  }
+
+  /**
+   * Returns first 1024 characters of value for use as a tooltip.
+   * @param object
+   * @returns {*}
+   */
+  getTooltip(object) {
+    return object.value.length > 1024
+      ? object.value.substring(0, 1024) + "…"
+      : object.value;
   }
 
   render() {
@@ -223,6 +248,7 @@ module.exports = connect(
     caseSensitive: state.search.caseSensitive,
     results: state.search.results,
     ongoingSearch: state.search.ongoingSearch,
+    isDisplaying: state.ui.selectedActionBarTabId === PANELS.SEARCH,
     status: state.search.status,
   }),
   dispatch => ({

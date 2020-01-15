@@ -6,13 +6,10 @@
 #include "nsXMLPrettyPrinter.h"
 #include "nsContentUtils.h"
 #include "nsICSSDeclaration.h"
-#include "nsIObserver.h"
 #include "nsSyncLoadService.h"
 #include "nsPIDOMWindow.h"
-#include "nsIServiceManager.h"
 #include "nsNetUtil.h"
 #include "mozilla/dom/Element.h"
-#include "nsIScriptSecurityManager.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/dom/Document.h"
 #include "nsVariant.h"
@@ -113,8 +110,8 @@ void nsXMLPrettyPrinter::MaybeUnhook(nsIContent* aContent) {
   // If it is not null but in the shadow tree or the <scrollbar> NACs,
   // the change was in the generated content, and it should be ignored.
   bool isGeneratedContent =
-      !aContent ? false
-                : aContent->GetBindingParent() || aContent->IsInShadowTree();
+      aContent &&
+      (aContent->IsInNativeAnonymousSubtree() || aContent->IsInShadowTree());
 
   if (!isGeneratedContent && !mUnhookPending) {
     // Can't blindly to mUnhookPending after AddScriptRunner,

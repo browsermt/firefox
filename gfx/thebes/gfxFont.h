@@ -37,6 +37,7 @@
 #include "nsFontMetrics.h"
 #include "mozilla/ServoUtils.h"
 #include "TextDrawTarget.h"
+#include "ThebesRLBoxTypes.h"
 
 typedef struct _cairo cairo_t;
 typedef struct _cairo_scaled_font cairo_scaled_font_t;
@@ -1390,7 +1391,6 @@ class gfxFont {
 
  protected:
   nsAutoRefCnt mRefCnt;
-  cairo_scaled_font_t* mScaledFont;
 
   void NotifyReleased() {
     gfxFontCache* cache = gfxFontCache::GetCache();
@@ -1406,8 +1406,7 @@ class gfxFont {
 
   gfxFont(const RefPtr<mozilla::gfx::UnscaledFont>& aUnscaledFont,
           gfxFontEntry* aFontEntry, const gfxFontStyle* aFontStyle,
-          AntialiasOption anAAOption = kAntialiasDefault,
-          cairo_scaled_font_t* aScaledFont = nullptr);
+          AntialiasOption anAAOption = kAntialiasDefault);
 
  public:
   virtual ~gfxFont();
@@ -1443,8 +1442,6 @@ class gfxFont {
 
   const nsCString& GetName() const { return mFontEntry->Name(); }
   const gfxFontStyle* GetStyle() const { return &mStyle; }
-
-  cairo_scaled_font_t* GetCairoScaledFont() { return mScaledFont; }
 
   virtual mozilla::UniquePtr<gfxFont> CopyWithAntialiasOption(
       AntialiasOption anAAOption) {
@@ -1519,6 +1516,9 @@ class gfxFont {
   // Work out whether cairo will snap inter-glyph spacing to pixels
   // when rendering to the given drawTarget.
   RoundingFlags GetRoundOffsetsToPixels(DrawTarget* aDrawTarget);
+
+  virtual bool ShouldHintMetrics() const { return true; }
+  virtual bool ShouldRoundXOffset(cairo_t* aCairo) const { return true; }
 
   // Font metrics
   struct Metrics {
@@ -1686,12 +1686,8 @@ class gfxFont {
 
   gfxGlyphExtents* GetOrCreateGlyphExtents(int32_t aAppUnitsPerDevUnit);
 
-  // You need to call SetupCairoFont on aDrawTarget just before calling this.
   void SetupGlyphExtents(DrawTarget* aDrawTarget, uint32_t aGlyphID,
                          bool aNeedTight, gfxGlyphExtents* aExtents);
-
-  // This is called by the default Draw() implementation above.
-  virtual bool SetupCairoFont(DrawTarget* aDrawTarget) = 0;
 
   virtual bool AllowSubpixelAA() { return true; }
 
@@ -1862,11 +1858,6 @@ class gfxFont {
   // glyphs. This does not add a reference to the returned font.
   gfxFont* GetSubSuperscriptFont(int32_t aAppUnitsPerDevPixel);
 
-  /**
-   * Return the reference cairo_t object from aDT.
-   */
-  static cairo_t* RefCairo(mozilla::gfx::DrawTarget* aDT);
-
  protected:
   virtual const Metrics& GetHorizontalMetrics() = 0;
 
@@ -1925,6 +1916,11 @@ class gfxFont {
   // point format.
   virtual int32_t GetGlyphWidth(uint16_t aGID) { return -1; }
 
+  virtual bool GetGlyphBounds(uint16_t aGID, gfxRect* aBounds,
+                              bool aTight = false) {
+    return false;
+  }
+
   bool IsSpaceGlyphInvisible(DrawTarget* aRefDrawTarget,
                              const gfxTextRun* aTextRun);
 
@@ -1935,7 +1931,10 @@ class gfxFont {
   bool HasSubstitutionRulesWithSpaceLookups(Script aRunScript);
 
   // do spaces participate in shaping rules? if so, can't used word cache
-  bool SpaceMayParticipateInShaping(Script aRunScript);
+  // Note that this function uses HasGraphiteSpaceContextuals, so it can only
+  // return a "hint" to the correct answer. The  calling code must ensure it
+  // performs safe actions independent of the value returned.
+  tainted_boolean_hint SpaceMayParticipateInShaping(Script aRunScript);
 
   // For 8-bit text, expand to 16-bit and then call the following method.
   bool ShapeText(DrawTarget* aContext, const uint8_t* aText,

@@ -20,7 +20,6 @@
 #include "nsIThread.h"
 #include "nsString.h"
 #include "nsCOMPtr.h"
-#include "nsAutoPtr.h"
 #include "xpcpublic.h"
 #include "mozilla/AbstractEventQueue.h"
 #include "mozilla/Atomics.h"
@@ -659,6 +658,47 @@ already_AddRefed<mozilla::Runnable> NS_NewRunnableFunction(
       aName, std::forward<Function>(aFunction)));
 }
 
+// Creates a new object implementing nsIRunnable and nsICancelableRunnable,
+// which runs a given function on Run and clears the stored function object on a
+// call to `Cancel` (and thus destroys all objects it holds).
+template <typename Function>
+already_AddRefed<mozilla::CancelableRunnable> NS_NewCancelableRunnableFunction(
+    const char* aName, Function&& aFunc) {
+  class FuncCancelableRunnable final : public mozilla::CancelableRunnable {
+   public:
+    static_assert(std::is_void_v<decltype(
+                      std::declval<std::remove_reference_t<Function>>()())>);
+
+    NS_INLINE_DECL_REFCOUNTING_INHERITED(FuncCancelableRunnable,
+                                         CancelableRunnable)
+
+    explicit FuncCancelableRunnable(const char* aName, Function&& aFunc)
+        : CancelableRunnable{aName},
+          mFunc{mozilla::Some(std::forward<Function>(aFunc))} {}
+
+    NS_IMETHOD Run() override {
+      MOZ_ASSERT(mFunc);
+
+      (*mFunc)();
+
+      return NS_OK;
+    }
+
+    nsresult Cancel() override {
+      mFunc.reset();
+      return NS_OK;
+    }
+
+   private:
+    ~FuncCancelableRunnable() = default;
+
+    mozilla::Maybe<std::remove_reference_t<Function>> mFunc;
+  };
+
+  return mozilla::MakeAndAddRef<FuncCancelableRunnable>(
+      aName, std::forward<Function>(aFunc));
+}
+
 namespace mozilla {
 namespace detail {
 
@@ -770,7 +810,7 @@ template <typename PtrType, class C, typename R, bool Owning,
           mozilla::RunnableKind Kind, typename... As>
 struct nsRunnableMethodTraits<PtrType, R (C::*)(As...), Owning, Kind> {
   typedef typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -782,7 +822,7 @@ template <typename PtrType, class C, typename R, bool Owning,
 struct nsRunnableMethodTraits<PtrType, R (C::*)(As...) const, Owning, Kind> {
   typedef const typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type
       class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -795,7 +835,7 @@ template <typename PtrType, class C, typename R, bool Owning,
 struct nsRunnableMethodTraits<PtrType, R (__stdcall C::*)(As...), Owning,
                               Kind> {
   typedef typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -806,7 +846,7 @@ template <typename PtrType, class C, typename R, bool Owning,
           mozilla::RunnableKind Kind>
 struct nsRunnableMethodTraits<PtrType, R (NS_STDCALL C::*)(), Owning, Kind> {
   typedef typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -819,7 +859,7 @@ struct nsRunnableMethodTraits<PtrType, R (__stdcall C::*)(As...) const, Owning,
                               Kind> {
   typedef const typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type
       class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -832,7 +872,7 @@ struct nsRunnableMethodTraits<PtrType, R (NS_STDCALL C::*)() const, Owning,
                               Kind> {
   typedef const typename mozilla::RemoveRawOrSmartPointer<PtrType>::Type
       class_type;
-  static_assert(mozilla::IsBaseOf<C, class_type>::value,
+  static_assert(std::is_base_of<C, class_type>::value,
                 "Stored class must inherit from method's class");
   typedef R return_type;
   typedef nsRunnableMethod<C, R, Owning, Kind> base_type;
@@ -1043,14 +1083,14 @@ struct SmartPointerStorageClass
 template <typename T>
 struct NonLValueReferenceStorageClass
     : mozilla::Conditional<
-          mozilla::IsRvalueReference<T>::value,
+          std::is_rvalue_reference_v<T>,
           StoreCopyPassByRRef<typename mozilla::RemoveReference<T>::Type>,
           typename SmartPointerStorageClass<T>::Type> {};
 
 template <typename T>
 struct NonPointerStorageClass
     : mozilla::Conditional<
-          mozilla::IsLvalueReference<T>::value,
+          std::is_lvalue_reference_v<T>,
           typename LValueReferenceStorageClass<
               typename mozilla::RemoveReference<T>::Type>::Type,
           typename NonLValueReferenceStorageClass<T>::Type> {};
@@ -1693,51 +1733,36 @@ void NS_UnsetMainThread();
 extern mozilla::TimeStamp NS_GetTimerDeadlineHintOnCurrentThread(
     mozilla::TimeStamp aDefault, uint32_t aSearchBound);
 
-namespace mozilla {
+/**
+ * Dispatches the given event to a background thread.  The primary benefit of
+ * this API is that you do not have to manage the lifetime of your own thread
+ * for running your own events; the thread manager will take care of the
+ * background thread's lifetime.  Not having to manage your own thread also
+ * means less resource usage, as the underlying implementation here can manage
+ * spinning up and shutting down threads appropriately.
+ *
+ * NOTE: there is no guarantee that events dispatched via these APIs are run
+ * serially, in dispatch order; several dispatched events may run in parallel.
+ * If you depend on serial execution of dispatched events, you should use
+ * NS_CreateBackgroundTaskQueue instead, and dispatch events to the returned
+ * event target.
+ */
+extern nsresult NS_DispatchBackgroundTask(
+    already_AddRefed<nsIRunnable> aEvent,
+    uint32_t aDispatchFlags = NS_DISPATCH_NORMAL);
+extern nsresult NS_DispatchBackgroundTask(
+    nsIRunnable* aEvent, uint32_t aDispatchFlags = NS_DISPATCH_NORMAL);
 
 /**
- * Cooperative thread scheduling is governed by two rules:
- * - Only one thread in the pool of cooperatively scheduled threads runs at a
- *   time.
- * - Thread switching happens at well-understood safe points.
- *
- * In some cases we may want to treat all the threads in a cooperative pool as a
- * single thread, while other parts of the code may want to view them as
- * separate threads. GetCurrentVirtualThread() will return the same value for
- * all threads in a cooperative thread pool. GetCurrentPhysicalThread will
- * return a different value for each thread in the pool.
- *
- * Thread safety assertions are a concrete example where GetCurrentVirtualThread
- * should be used. An object may want to assert that it only can be used on the
- * thread that created it. Such assertions would normally prevent the object
- * from being used on different cooperative threads. However, the object might
- * really only care that it's used atomically. Cooperative scheduling guarantees
- * that it will be (assuming we don't yield in the middle of modifying the
- * object). So we can weaken the assertion to compare the virtual thread the
- * object was created on to the virtual thread on which it's being used. This
- * assertion allows the object to be used across threads in a cooperative thread
- * pool while preventing accesses across preemptively scheduled threads (which
- * would be unsafe).
+ * Obtain a new serial event target that dispatches runnables to a background
+ * thread.  In many cases, this is a straight replacement for creating your
+ * own, private thread, and is generally preferred to creating your own,
+ * private thread.
  */
+extern nsresult NS_CreateBackgroundTaskQueue(const char* aName,
+                                             nsISerialEventTarget** aTarget);
 
-// Returns the PRThread on which this code is running.
-PRThread* GetCurrentPhysicalThread();
-
-// Returns a "virtual" PRThread that should only be used for comparison with
-// other calls to GetCurrentVirtualThread. Two threads in the same cooperative
-// thread pool will return the same virtual thread. Threads that are not
-// cooperatively scheduled will have their own unique virtual PRThread (which
-// will be equal to their physical PRThread).
-//
-// The return value of GetCurrentVirtualThread() is guaranteed not to change
-// throughout the lifetime of a thread.
-//
-// Note that the original main thread (the first one created in the process) is
-// considered as part of the pool of cooperative threads, so the return value of
-// GetCurrentVirtualThread() for this thread (throughout its lifetime, even
-// during shutdown) is the same as the return value from any other thread in the
-// cooperative pool.
-PRThread* GetCurrentVirtualThread();
+namespace mozilla {
 
 // These functions return event targets that can be used to dispatch to the
 // current or main thread. They can also be used to test if you're on those

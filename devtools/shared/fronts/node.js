@@ -20,13 +20,6 @@ loader.lazyRequireGetter(
   "devtools/shared/dom-node-constants"
 );
 
-loader.lazyRequireGetter(
-  this,
-  "BrowsingContextTargetFront",
-  "devtools/shared/fronts/targets/browsing-context",
-  true
-);
-
 const BROWSER_TOOLBOX_FISSION_ENABLED = Services.prefs.getBoolPref(
   "devtools.browsertoolbox.fission",
   false
@@ -148,6 +141,8 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
       // when calling getNodeValue()
       form.nodeValue = form.incompleteValue ? null : form.shortValue;
     }
+
+    this.traits = form.traits || {};
 
     // Shallow copy of the form.  We could just store a reference, but
     // eventually we'll want to update some of the data.
@@ -534,13 +529,22 @@ class NodeFront extends FrontClassWithSpec(nodeSpec) {
       return this._remoteFrameTarget;
     }
     // First get the target actor form of this remote frame element
-    const form = await super.connectToRemoteFrame();
-    // Build the related Target object
-    this._remoteFrameTarget = new BrowsingContextTargetFront(this.conn);
-    this._remoteFrameTarget.actorID = form.actor;
-    this._remoteFrameTarget.form(form);
-    this._remoteFrameTarget.manage(this._remoteFrameTarget);
+    const descriptor = await this.targetFront.client.mainRoot.getBrowsingContextDescriptor(
+      this._form.browsingContextID
+    );
+    this._remoteFrameTarget = await descriptor.getTarget();
     return this._remoteFrameTarget;
+  }
+
+  async getAllSelectors() {
+    if (!this.traits.supportsGetAllSelectors) {
+      // Backward compatibility: if the server does not support getAllSelectors
+      // fallback on getUniqueSelector and wrap the response in an array.
+      // getAllSelectors was added in FF72.
+      const selector = await super.getUniqueSelector();
+      return [selector];
+    }
+    return super.getAllSelectors();
   }
 }
 

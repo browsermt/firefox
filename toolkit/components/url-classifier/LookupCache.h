@@ -11,7 +11,6 @@
 #include "nsTArray.h"
 #include "nsCOMPtr.h"
 #include "nsIFile.h"
-#include "nsIFileStreams.h"
 #include "mozilla/RefPtr.h"
 #include "nsUrlClassifierPrefixSet.h"
 #include "VariableLengthPrefixSet.h"
@@ -182,6 +181,9 @@ class LookupCache {
   // entry
   static nsresult GetLookupFragments(const nsACString& aSpec,
                                      nsTArray<nsCString>* aFragments);
+
+  static nsresult GetLookupWhitelistFragments(const nsACString& aSpec,
+                                              nsTArray<nsCString>* aFragments);
 
   LookupCache(const nsACString& aTableName, const nsACString& aProvider,
               nsCOMPtr<nsIFile>& aStoreFile);

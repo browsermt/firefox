@@ -8,12 +8,12 @@
 
 #include "mozilla/DebugOnly.h"
 
-#include "jsutil.h"
 #include "NamespaceImports.h"
 
 #include "gc/GCInternals.h"
 #include "gc/PublicIterators.h"
 #include "gc/Zone.h"
+#include "util/Memory.h"
 #include "util/Text.h"
 #include "vm/BigIntType.h"
 #include "vm/JSFunction.h"
@@ -196,28 +196,25 @@ static const char* StringKindHeader(JSString* str) {
     return "atom: ";
   }
 
-  if (str->isFlat()) {
-    if (str->isExtensible()) {
-      return "extensible: ";
+  if (str->isExtensible()) {
+    return "extensible: ";
+  }
+
+  if (str->isInline()) {
+    if (str->isFatInline()) {
+      return "fat inline: ";
     }
-    if (str->isUndepended()) {
-      return "undepended: ";
-    }
-    if (str->isInline()) {
-      if (str->isFatInline()) {
-        return "fat inline: ";
-      }
-      return "inline: ";
-    }
-    return "flat: ";
+    return "inline: ";
   }
 
   if (str->isDependent()) {
     return "dependent: ";
   }
+
   if (str->isExternal()) {
     return "external: ";
   }
+
   return "linear: ";
 }
 
@@ -355,14 +352,10 @@ JS_PUBLIC_API void JS_GetTraceThingInfo(char* buf, size_t bufsize,
 
       case JS::TraceKind::Symbol: {
         JS::Symbol* sym = static_cast<JS::Symbol*>(thing);
-        if (JSString* desc = sym->description()) {
-          if (desc->isLinear()) {
-            *buf++ = ' ';
-            bufsize--;
-            PutEscapedString(buf, bufsize, &desc->asLinear(), 0);
-          } else {
-            snprintf(buf, bufsize, "<nonlinear desc>");
-          }
+        if (JSAtom* desc = sym->description()) {
+          *buf++ = ' ';
+          bufsize--;
+          PutEscapedString(buf, bufsize, desc, 0);
         } else {
           snprintf(buf, bufsize, "<null>");
         }

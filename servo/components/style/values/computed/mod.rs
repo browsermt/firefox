@@ -75,6 +75,7 @@ pub use self::resolution::Resolution;
 pub use self::svg::MozContextProperties;
 pub use self::svg::{SVGLength, SVGOpacity, SVGPaint, SVGPaintKind};
 pub use self::svg::{SVGPaintOrder, SVGStrokeDashArray, SVGWidth};
+pub use self::text::TextUnderlinePosition;
 pub use self::text::{InitialLetter, LetterSpacing, LineBreak, LineHeight};
 pub use self::text::{OverflowWrap, TextOverflow, WordBreak, WordSpacing};
 pub use self::text::{TextAlign, TextEmphasisPosition, TextEmphasisStyle};
@@ -107,6 +108,7 @@ pub mod flex;
 pub mod font;
 pub mod image;
 pub mod length;
+pub mod length_percentage;
 pub mod list;
 pub mod motion;
 pub mod outline;
@@ -302,10 +304,8 @@ pub trait ToComputedValue {
 
     /// Convert a specified value to a computed value, using itself and the data
     /// inside the `Context`.
-    #[inline]
     fn to_computed_value(&self, context: &Context) -> Self::ComputedValue;
 
-    #[inline]
     /// Convert a computed value to specified value form.
     ///
     /// This will be used for recascading during animation.
@@ -472,6 +472,7 @@ trivial_to_computed_value!(Atom);
 trivial_to_computed_value!(Prefix);
 trivial_to_computed_value!(String);
 trivial_to_computed_value!(Box<str>);
+trivial_to_computed_value!(crate::OwnedStr);
 
 /// A `<number>` value.
 pub type Number = CSSFloat;
@@ -577,7 +578,16 @@ impl From<GreaterThanOrEqualToOneNumber> for CSSFloat {
 
 #[allow(missing_docs)]
 #[derive(
-    Clone, ComputeSquaredDistance, Copy, Debug, MallocSizeOf, PartialEq, ToCss, ToResolvedValue,
+    Animate,
+    Clone,
+    ComputeSquaredDistance,
+    Copy,
+    Debug,
+    MallocSizeOf,
+    PartialEq,
+    ToAnimatedZero,
+    ToCss,
+    ToResolvedValue,
 )]
 #[repr(C, u8)]
 pub enum NumberOrPercentage {

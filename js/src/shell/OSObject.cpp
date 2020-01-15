@@ -293,7 +293,7 @@ static bool ReadFile(JSContext* cx, unsigned argc, Value* vp,
       return false;
     }
     bool match;
-    if (!JS_StringEqualsAscii(cx, opt, "binary", &match)) {
+    if (!JS_StringEqualsLiteral(cx, opt, "binary", &match)) {
       return false;
     }
     if (match) {
@@ -462,17 +462,17 @@ class FileObject : public NativeObject {
 };
 
 static const JSClassOps FileObjectClassOps = {
-    nullptr,              /* addProperty */
-    nullptr,              /* delProperty */
-    nullptr,              /* enumerate */
-    nullptr,              /* newEnumerate */
-    nullptr,              /* resolve */
-    nullptr,              /* mayResolve */
-    FileObject::finalize, /* finalize */
-    nullptr,              /* call */
-    nullptr,              /* hasInstance */
-    nullptr,              /* construct */
-    nullptr               /* trace */
+    nullptr,               // addProperty
+    nullptr,               // delProperty
+    nullptr,               // enumerate
+    nullptr,               // newEnumerate
+    nullptr,               // resolve
+    nullptr,               // mayResolve
+    FileObject::finalize,  // finalize
+    nullptr,               // call
+    nullptr,               // hasInstance
+    nullptr,               // construct
+    nullptr,               // trace
 };
 
 const JSClass FileObject::class_ = {

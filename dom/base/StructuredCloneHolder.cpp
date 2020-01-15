@@ -12,6 +12,8 @@
 #include "mozilla/dom/BlobBinding.h"
 #include "mozilla/dom/BrowsingContext.h"
 #include "mozilla/dom/BrowsingContextBinding.h"
+#include "mozilla/dom/ClonedErrorHolder.h"
+#include "mozilla/dom/ClonedErrorHolderBinding.h"
 #include "mozilla/dom/StructuredCloneBlob.h"
 #include "mozilla/dom/Directory.h"
 #include "mozilla/dom/DirectoryBinding.h"
@@ -166,21 +168,20 @@ void StructuredCloneHolderBase::Clear() {
 
 bool StructuredCloneHolderBase::Write(JSContext* aCx,
                                       JS::Handle<JS::Value> aValue) {
-  return Write(aCx, aValue, JS::UndefinedHandleValue,
-               JS::CloneDataPolicy().denySharedArrayBuffer());
+  return Write(aCx, aValue, JS::UndefinedHandleValue, JS::CloneDataPolicy());
 }
 
 bool StructuredCloneHolderBase::Write(JSContext* aCx,
                                       JS::Handle<JS::Value> aValue,
                                       JS::Handle<JS::Value> aTransfer,
-                                      JS::CloneDataPolicy cloneDataPolicy) {
+                                      JS::CloneDataPolicy aCloneDataPolicy) {
   MOZ_ASSERT(!mBuffer, "Double Write is not allowed");
   MOZ_ASSERT(!mClearCalled, "This method cannot be called after Clear.");
 
   mBuffer = MakeUnique<JSAutoStructuredCloneBuffer>(
       mStructuredCloneScope, &StructuredCloneHolder::sCallbacks, this);
 
-  if (!mBuffer->write(aCx, aValue, aTransfer, cloneDataPolicy,
+  if (!mBuffer->write(aCx, aValue, aTransfer, aCloneDataPolicy,
                       &StructuredCloneHolder::sCallbacks, this)) {
     mBuffer = nullptr;
     return false;
@@ -191,11 +192,17 @@ bool StructuredCloneHolderBase::Write(JSContext* aCx,
 
 bool StructuredCloneHolderBase::Read(JSContext* aCx,
                                      JS::MutableHandle<JS::Value> aValue) {
+  return Read(aCx, aValue, JS::CloneDataPolicy());
+}
+
+bool StructuredCloneHolderBase::Read(JSContext* aCx,
+                                     JS::MutableHandle<JS::Value> aValue,
+                                     JS::CloneDataPolicy aCloneDataPolicy) {
   MOZ_ASSERT(mBuffer, "Read() without Write() is not allowed.");
   MOZ_ASSERT(!mClearCalled, "This method cannot be called after Clear.");
 
-  bool ok =
-      mBuffer->read(aCx, aValue, &StructuredCloneHolder::sCallbacks, this);
+  bool ok = mBuffer->read(aCx, aValue, aCloneDataPolicy,
+                          &StructuredCloneHolder::sCallbacks, this);
   return ok;
 }
 
@@ -234,7 +241,7 @@ StructuredCloneHolder::StructuredCloneHolder(
     : StructuredCloneHolderBase(aScope),
       mSupportsCloning(aSupportsCloning == CloningSupported),
       mSupportsTransferring(aSupportsTransferring == TransferringSupported),
-      mParent(nullptr)
+      mGlobal(nullptr)
 #ifdef DEBUG
       ,
       mCreationEventTarget(GetCurrentThreadEventTarget())
@@ -249,8 +256,7 @@ StructuredCloneHolder::~StructuredCloneHolder() {
 
 void StructuredCloneHolder::Write(JSContext* aCx, JS::Handle<JS::Value> aValue,
                                   ErrorResult& aRv) {
-  Write(aCx, aValue, JS::UndefinedHandleValue,
-        JS::CloneDataPolicy().denySharedArrayBuffer(), aRv);
+  Write(aCx, aValue, JS::UndefinedHandleValue, JS::CloneDataPolicy(), aRv);
 }
 
 void StructuredCloneHolder::Write(JSContext* aCx, JS::Handle<JS::Value> aValue,
@@ -268,18 +274,25 @@ void StructuredCloneHolder::Write(JSContext* aCx, JS::Handle<JS::Value> aValue,
   }
 }
 
-void StructuredCloneHolder::Read(nsISupports* aParent, JSContext* aCx,
+void StructuredCloneHolder::Read(nsIGlobalObject* aGlobal, JSContext* aCx,
                                  JS::MutableHandle<JS::Value> aValue,
+                                 ErrorResult& aRv) {
+  return Read(aGlobal, aCx, aValue, JS::CloneDataPolicy(), aRv);
+}
+
+void StructuredCloneHolder::Read(nsIGlobalObject* aGlobal, JSContext* aCx,
+                                 JS::MutableHandle<JS::Value> aValue,
+                                 JS::CloneDataPolicy aCloneDataPolicy,
                                  ErrorResult& aRv) {
   MOZ_ASSERT_IF(
       mStructuredCloneScope == StructuredCloneScope::SameProcessSameThread,
       mCreationEventTarget->IsOnCurrentThread());
-  MOZ_ASSERT(aParent);
+  MOZ_ASSERT(aGlobal);
 
-  mozilla::AutoRestore<nsISupports*> guard(mParent);
-  mParent = aParent;
+  mozilla::AutoRestore<nsIGlobalObject*> guard(mGlobal);
+  mGlobal = aGlobal;
 
-  if (!StructuredCloneHolderBase::Read(aCx, aValue)) {
+  if (!StructuredCloneHolderBase::Read(aCx, aValue, aCloneDataPolicy)) {
     JS_ClearPendingException(aCx);
     aRv.Throw(NS_ERROR_DOM_DATA_CLONE_ERR);
     return;
@@ -295,15 +308,17 @@ void StructuredCloneHolder::Read(nsISupports* aParent, JSContext* aCx,
   }
 }
 
-void StructuredCloneHolder::ReadFromBuffer(nsISupports* aParent, JSContext* aCx,
+void StructuredCloneHolder::ReadFromBuffer(nsIGlobalObject* aGlobal,
+                                           JSContext* aCx,
                                            JSStructuredCloneData& aBuffer,
                                            JS::MutableHandle<JS::Value> aValue,
                                            ErrorResult& aRv) {
-  ReadFromBuffer(aParent, aCx, aBuffer, JS_STRUCTURED_CLONE_VERSION, aValue,
+  ReadFromBuffer(aGlobal, aCx, aBuffer, JS_STRUCTURED_CLONE_VERSION, aValue,
                  aRv);
 }
 
-void StructuredCloneHolder::ReadFromBuffer(nsISupports* aParent, JSContext* aCx,
+void StructuredCloneHolder::ReadFromBuffer(nsIGlobalObject* aGlobal,
+                                           JSContext* aCx,
                                            JSStructuredCloneData& aBuffer,
                                            uint32_t aAlgorithmVersion,
                                            JS::MutableHandle<JS::Value> aValue,
@@ -314,12 +329,12 @@ void StructuredCloneHolder::ReadFromBuffer(nsISupports* aParent, JSContext* aCx,
 
   MOZ_ASSERT(!mBuffer, "ReadFromBuffer() must be called without a Write().");
 
-  mozilla::AutoRestore<nsISupports*> guard(mParent);
-  mParent = aParent;
+  mozilla::AutoRestore<nsIGlobalObject*> guard(mGlobal);
+  mGlobal = aGlobal;
 
   if (!JS_ReadStructuredClone(aCx, aBuffer, aAlgorithmVersion,
-                              mStructuredCloneScope, aValue, &sCallbacks,
-                              this)) {
+                              mStructuredCloneScope, aValue,
+                              JS::CloneDataPolicy(), &sCallbacks, this)) {
     JS_ClearPendingException(aCx);
     aRv.Throw(NS_ERROR_DOM_DATA_CLONE_ERR);
   }
@@ -348,20 +363,22 @@ JSObject* StructuredCloneHolder::ReadFullySerializableObjects(
     if (!nsJSPrincipals::ReadKnownPrincipalType(aCx, aReader, aTag, &prin)) {
       return nullptr;
     }
-    // nsJSPrincipals::ReadKnownPrincipalType addrefs for us, but because of the
-    // casting between JSPrincipals* and nsIPrincipal* we can't use
-    // getter_AddRefs above and have to already_AddRefed here.
-    nsCOMPtr<nsIPrincipal> principal =
-        already_AddRefed<nsIPrincipal>(nsJSPrincipals::get(prin));
 
     JS::RootedValue result(aCx);
-    nsresult rv = nsContentUtils::WrapNative(
-        aCx, principal, &NS_GET_IID(nsIPrincipal), &result);
-    if (NS_FAILED(rv)) {
-      xpc::Throw(aCx, NS_ERROR_DOM_DATA_CLONE_ERR);
-      return nullptr;
-    }
+    {
+      // nsJSPrincipals::ReadKnownPrincipalType addrefs for us, but because of
+      // the casting between JSPrincipals* and nsIPrincipal* we can't use
+      // getter_AddRefs above and have to already_AddRefed here.
+      nsCOMPtr<nsIPrincipal> principal =
+          already_AddRefed<nsIPrincipal>(nsJSPrincipals::get(prin));
 
+      nsresult rv = nsContentUtils::WrapNative(
+          aCx, principal, &NS_GET_IID(nsIPrincipal), &result);
+      if (NS_FAILED(rv)) {
+        xpc::Throw(aCx, NS_ERROR_DOM_DATA_CLONE_ERR);
+        return nullptr;
+      }
+    }
     return result.toObjectOrNull();
   }
 
@@ -438,18 +455,20 @@ JSObject* ReadBlob(JSContext* aCx, uint32_t aIndex,
   }
 #endif
   MOZ_ASSERT(aIndex < aHolder->BlobImpls().Length());
-  RefPtr<BlobImpl> blobImpl = aHolder->BlobImpls()[aIndex];
-
-  MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
-
-  // RefPtr<File> needs to go out of scope before toObject() is
-  // called because the static analysis thinks dereferencing XPCOM objects
-  // can GC (because in some cases it can!), and a return statement with a
-  // JSObject* type means that JSObject* is on the stack as a raw pointer
-  // while destructors are running.
   JS::Rooted<JS::Value> val(aCx);
   {
-    RefPtr<Blob> blob = Blob::Create(aHolder->ParentDuringRead(), blobImpl);
+    // RefPtr<File> and RefPtr<BlobImpl> need to go out of scope before
+    // toObject() is called because the static analysis thinks releasing XPCOM
+    // objects can GC (because in some cases it can!), and a return statement
+    // with a JSObject* type means that JSObject* is on the stack as a raw
+    // pointer while destructors are running.
+    RefPtr<BlobImpl> blobImpl = aHolder->BlobImpls()[aIndex];
+
+    RefPtr<Blob> blob = Blob::Create(aHolder->GlobalDuringRead(), blobImpl);
+    if (NS_WARN_IF(!blob)) {
+      return nullptr;
+    }
+
     if (!ToJSValue(aCx, blob, &val)) {
       return nullptr;
     }
@@ -471,7 +490,6 @@ bool WriteBlob(JSStructuredCloneWriter* aWriter, Blob* aBlob,
   }
 
   RefPtr<BlobImpl> blobImpl = aBlob->Impl();
-  MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
 
   // We store the position of the blobImpl in the array as index.
   if (JS_WriteUint32Pair(aWriter, SCTAG_DOM_BLOB,
@@ -521,7 +539,7 @@ already_AddRefed<Directory> ReadDirectoryInternal(
   }
 
   RefPtr<Directory> directory =
-      Directory::Create(aHolder->ParentDuringRead(), file);
+      Directory::Create(aHolder->GlobalDuringRead(), file);
   return directory.forget();
 }
 
@@ -560,7 +578,7 @@ JSObject* ReadFileList(JSContext* aCx, JSStructuredCloneReader* aReader,
 
   JS::Rooted<JS::Value> val(aCx);
   {
-    RefPtr<FileList> fileList = new FileList(aHolder->ParentDuringRead());
+    RefPtr<FileList> fileList = new FileList(aHolder->GlobalDuringRead());
 
     uint32_t zero, index;
     // |index| is the index of the first blobImpl.
@@ -583,9 +601,11 @@ JSObject* ReadFileList(JSContext* aCx, JSStructuredCloneReader* aReader,
       RefPtr<BlobImpl> blobImpl = aHolder->BlobImpls()[pos];
       MOZ_ASSERT(blobImpl->IsFile());
 
-      MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
+      RefPtr<File> file = File::Create(aHolder->GlobalDuringRead(), blobImpl);
+      if (NS_WARN_IF(!file)) {
+        return nullptr;
+      }
 
-      RefPtr<File> file = File::Create(aHolder->ParentDuringRead(), blobImpl);
       if (!fileList->Append(file)) {
         return nullptr;
       }
@@ -620,7 +640,6 @@ bool WriteFileList(JSStructuredCloneWriter* aWriter, FileList* aFileList,
 
   for (uint32_t i = 0; i < aFileList->Length(); ++i) {
     RefPtr<BlobImpl> blobImpl = aFileList->Item(i)->Impl();
-    MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
     blobImpls.AppendElement(blobImpl);
   }
 
@@ -638,7 +657,7 @@ JSObject* ReadFormData(JSContext* aCx, JSStructuredCloneReader* aReader,
   // See the serialization of the FormData for the format.
   JS::Rooted<JS::Value> val(aCx);
   {
-    RefPtr<FormData> formData = new FormData(aHolder->ParentDuringRead());
+    RefPtr<FormData> formData = new FormData(aHolder->GlobalDuringRead());
 
     Optional<nsAString> thirdArg;
     for (uint32_t i = 0; i < aCount; ++i) {
@@ -661,10 +680,11 @@ JSObject* ReadFormData(JSContext* aCx, JSStructuredCloneReader* aReader,
         MOZ_ASSERT(indexOrLengthOfString < aHolder->BlobImpls().Length());
 
         RefPtr<BlobImpl> blobImpl = aHolder->BlobImpls()[indexOrLengthOfString];
-        MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
 
-        RefPtr<Blob> blob = Blob::Create(aHolder->ParentDuringRead(), blobImpl);
-        MOZ_ASSERT(blob);
+        RefPtr<Blob> blob = Blob::Create(aHolder->GlobalDuringRead(), blobImpl);
+        if (NS_WARN_IF(!blob)) {
+          return nullptr;
+        }
 
         ErrorResult rv;
         formData->Append(name, *blob, thirdArg, rv);
@@ -758,7 +778,6 @@ bool WriteFormData(JSStructuredCloneWriter* aWriter, FormData* aFormData,
         }
 
         RefPtr<BlobImpl> blobImpl = aValue.GetAsBlob()->Impl();
-        MOZ_ALWAYS_SUCCEEDS(blobImpl->SetMutable(false));
 
         closure->mHolder->BlobImpls().AppendElement(blobImpl);
         return true;
@@ -833,13 +852,15 @@ JSObject* ReadInputStream(JSContext* aCx, uint32_t aIndex,
   }
 #endif
   MOZ_ASSERT(aIndex < aHolder->InputStreams().Length());
-  nsCOMPtr<nsIInputStream> inputStream = aHolder->InputStreams()[aIndex];
-
   JS::RootedValue result(aCx);
-  nsresult rv = nsContentUtils::WrapNative(
-      aCx, inputStream, &NS_GET_IID(nsIInputStream), &result);
-  if (NS_FAILED(rv)) {
-    return nullptr;
+  {
+    nsCOMPtr<nsIInputStream> inputStream = aHolder->InputStreams()[aIndex];
+
+    nsresult rv = nsContentUtils::WrapNative(
+        aCx, inputStream, &NS_GET_IID(nsIInputStream), &result);
+    if (NS_FAILED(rv)) {
+      return nullptr;
+    }
   }
 
   return &result.toObject();
@@ -891,10 +912,13 @@ JSObject* StructuredCloneHolder::CustomReadHandler(
            StructuredCloneScope::SameProcessDifferentThread)) {
     // Get the current global object.
     // This can be null.
-    nsCOMPtr<nsIGlobalObject> parent = do_QueryInterface(mParent);
-    // aIndex is the index of the cloned image.
-    return ImageBitmap::ReadStructuredClone(aCx, aReader, parent, GetSurfaces(),
-                                            aIndex);
+    JS::RootedObject result(aCx);
+    {
+      // aIndex is the index of the cloned image.
+      result = ImageBitmap::ReadStructuredClone(aCx, aReader, mGlobal,
+                                                GetSurfaces(), aIndex);
+    }
+    return result;
   }
 
   if (aTag == SCTAG_DOM_STRUCTURED_CLONE_HOLDER) {
@@ -914,6 +938,10 @@ JSObject* StructuredCloneHolder::CustomReadHandler(
 
   if (aTag == SCTAG_DOM_BROWSING_CONTEXT) {
     return BrowsingContext::ReadStructuredClone(aCx, aReader, this);
+  }
+
+  if (aTag == SCTAG_DOM_CLONED_ERROR_OBJECT) {
+    return ClonedErrorHolder::ReadStructuredClone(aCx, aReader, this);
   }
 
   return ReadFullySerializableObjects(aCx, aReader, aTag);
@@ -988,6 +1016,14 @@ bool StructuredCloneHolder::CustomWriteHandler(JSContext* aCx,
     }
   }
 
+  // See if this is a ClonedErrorHolder object.
+  {
+    ClonedErrorHolder* holder = nullptr;
+    if (NS_SUCCEEDED(UNWRAP_OBJECT(ClonedErrorHolder, &obj, holder))) {
+      return holder->WriteStructuredClone(aCx, aWriter, this);
+    }
+  }
+
   // See if this is a WasmModule.
   if ((mStructuredCloneScope == StructuredCloneScope::SameProcessSameThread ||
        mStructuredCloneScope ==
@@ -1024,12 +1060,10 @@ bool StructuredCloneHolder::CustomReadTransferHandler(
     }
 #endif
     MOZ_ASSERT(aExtraData < mPortIdentifiers.Length());
-    const MessagePortIdentifier& portIdentifier = mPortIdentifiers[aExtraData];
-
-    nsCOMPtr<nsIGlobalObject> global = do_QueryInterface(mParent);
+    UniqueMessagePortId portIdentifier(mPortIdentifiers[aExtraData]);
 
     ErrorResult rv;
-    RefPtr<MessagePort> port = MessagePort::Create(global, portIdentifier, rv);
+    RefPtr<MessagePort> port = MessagePort::Create(mGlobal, portIdentifier, rv);
     if (NS_WARN_IF(rv.Failed())) {
       rv.SuppressException();
       return false;
@@ -1054,9 +1088,8 @@ bool StructuredCloneHolder::CustomReadTransferHandler(
     MOZ_ASSERT(aContent);
     OffscreenCanvasCloneData* data =
         static_cast<OffscreenCanvasCloneData*>(aContent);
-    nsCOMPtr<nsIGlobalObject> parent = do_QueryInterface(mParent);
     RefPtr<OffscreenCanvas> canvas =
-        OffscreenCanvas::CreateFromCloneData(parent, data);
+        OffscreenCanvas::CreateFromCloneData(mGlobal, data);
     delete data;
 
     JS::Rooted<JS::Value> value(aCx);
@@ -1075,8 +1108,8 @@ bool StructuredCloneHolder::CustomReadTransferHandler(
            StructuredCloneScope::SameProcessDifferentThread)) {
     MOZ_ASSERT(aContent);
     ImageBitmapCloneData* data = static_cast<ImageBitmapCloneData*>(aContent);
-    nsCOMPtr<nsIGlobalObject> parent = do_QueryInterface(mParent);
-    RefPtr<ImageBitmap> bitmap = ImageBitmap::CreateFromCloneData(parent, data);
+    RefPtr<ImageBitmap> bitmap =
+        ImageBitmap::CreateFromCloneData(mGlobal, data);
     delete data;
 
     JS::Rooted<JS::Value> value(aCx);
@@ -1106,15 +1139,16 @@ bool StructuredCloneHolder::CustomWriteTransferHandler(
     MessagePort* port = nullptr;
     nsresult rv = UNWRAP_OBJECT(MessagePort, &obj, port);
     if (NS_SUCCEEDED(rv)) {
-      // We use aExtraData to store the index of this new port identifier.
-      *aExtraData = mPortIdentifiers.Length();
-      MessagePortIdentifier* identifier = mPortIdentifiers.AppendElement();
-
       if (!port->CanBeCloned()) {
         return false;
       }
 
-      port->CloneAndDisentangle(*identifier);
+      UniqueMessagePortId identifier;
+      port->CloneAndDisentangle(identifier);
+
+      // We use aExtraData to store the index of this new port identifier.
+      *aExtraData = mPortIdentifiers.Length();
+      mPortIdentifiers.AppendElement(identifier.release());
 
       *aTag = SCTAG_DOM_MAP_MESSAGEPORT;
       *aOwnership = JS::SCTAG_TMO_CUSTOM;

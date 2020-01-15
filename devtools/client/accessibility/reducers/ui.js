@@ -20,7 +20,7 @@ const {
   UPDATE_DETAILS,
   PREF_KEYS,
   PREFS,
-} = require("../constants");
+} = require("devtools/client/accessibility/constants");
 
 const TreeView = require("devtools/client/shared/components/tree/TreeView");
 
@@ -185,10 +185,8 @@ function onReset(state, { accessibility, supports }) {
     enabled,
     canBeDisabled,
     canBeEnabled,
+    supports,
   };
-  if (supports) {
-    newState.supports = supports;
-  }
 
   return newState;
 }

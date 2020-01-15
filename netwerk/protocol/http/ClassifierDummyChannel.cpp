@@ -297,6 +297,16 @@ ClassifierDummyChannel::GetLoadFlags(nsLoadFlags* aLoadFlags) {
 }
 
 NS_IMETHODIMP
+ClassifierDummyChannel::GetTRRMode(nsIRequest::TRRMode* aTRRMode) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
+ClassifierDummyChannel::SetTRRMode(nsIRequest::TRRMode aTRRMode) {
+  return NS_ERROR_NOT_IMPLEMENTED;
+}
+
+NS_IMETHODIMP
 ClassifierDummyChannel::SetLoadFlags(nsLoadFlags aLoadFlags) {
   return NS_ERROR_NOT_IMPLEMENTED;
 }
@@ -640,14 +650,12 @@ void ClassifierDummyChannel::SetIPv4Disabled() {}
 
 void ClassifierDummyChannel::SetIPv6Disabled() {}
 
-bool ClassifierDummyChannel::GetHasSandboxedAuxiliaryNavigations() {
-  return false;
-}
+bool ClassifierDummyChannel::GetHasNonEmptySandboxingFlag() { return false; }
 
-void ClassifierDummyChannel::SetHasSandboxedAuxiliaryNavigations(
-    bool aHasSandboxedAuxiliaryNavigations) {}
+void ClassifierDummyChannel::SetHasNonEmptySandboxingFlag(
+    bool aHasNonEmptySandboxingFlag) {}
 
-NS_IMETHODIMP ClassifierDummyChannel::GetCrossOriginOpenerPolicy(
+NS_IMETHODIMP ClassifierDummyChannel::ComputeCrossOriginOpenerPolicy(
     nsILoadInfo::CrossOriginOpenerPolicy aInitiatorPolicy,
     nsILoadInfo::CrossOriginOpenerPolicy* aOutPolicy) {
   return NS_ERROR_NOT_IMPLEMENTED;

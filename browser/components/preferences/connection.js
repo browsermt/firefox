@@ -7,10 +7,9 @@
 /* import-globals-from ../../../toolkit/content/preferencesBindings.js */
 /* import-globals-from in-content/extensionControlled.js */
 
-document.documentElement.addEventListener(
-  "dialoghelp",
-  window.top.openPrefsHelp
-);
+document
+  .getElementById("ConnectionsDialog")
+  .addEventListener("dialoghelp", window.top.openPrefsHelp);
 
 Preferences.addAll([
   // Add network.proxy.autoconfig_url before network.proxy.type so they're
@@ -85,9 +84,11 @@ window.addEventListener(
     gConnectionsDialog.updateProxySettingsUI();
     initializeProxyUI(gConnectionsDialog);
     gConnectionsDialog.registerSyncPrefListeners();
-    document.documentElement.addEventListener("beforeaccept", e =>
-      gConnectionsDialog.beforeAccept(e)
-    );
+    document
+      .getElementById("ConnectionsDialog")
+      .addEventListener("beforeaccept", e =>
+        gConnectionsDialog.beforeAccept(e)
+      );
   },
   { once: true, capture: true }
 );
@@ -136,11 +137,11 @@ var gConnectionsDialog = {
       );
       let proxyPref = Preferences.get("network.proxy." + prefName);
       // Only worry about ports which are currently active. If the share option is on, then ignore
-      // all ports except the HTTP port
+      // all ports except the HTTP and SOCKS port
       if (
         proxyPref.value != "" &&
         proxyPortPref.value == 0 &&
-        (prefName == "http" || !shareProxiesPref.value)
+        (prefName == "http" || prefName == "socks" || !shareProxiesPref.value)
       ) {
         document
           .getElementById("networkProxy" + prefName.toUpperCase() + "_Port")
@@ -152,7 +153,7 @@ var gConnectionsDialog = {
 
     // In the case of a shared proxy preference, backup the current values and update with the HTTP value
     if (shareProxiesPref.value) {
-      var proxyPrefs = ["ssl", "ftp", "socks"];
+      var proxyPrefs = ["ssl", "ftp"];
       for (var i = 0; i < proxyPrefs.length; ++i) {
         var proxyServerURLPref = Preferences.get(
           "network.proxy." + proxyPrefs[i]
@@ -232,7 +233,7 @@ var gConnectionsDialog = {
 
   updateReloadButton() {
     // Disable the "Reload PAC" button if the selected proxy type is not PAC or
-    // if the current value of the PAC textbox does not match the value stored
+    // if the current value of the PAC input does not match the value stored
     // in prefs.  Likewise, disable the reload button if PAC is not configured
     // in prefs.
 
@@ -269,7 +270,7 @@ var gConnectionsDialog = {
       );
 
       // Restore previous per-proxy custom settings, if present.
-      if (!shareProxiesPref.value) {
+      if (proxyPrefs[i] != "socks" && !shareProxiesPref.value) {
         var backupServerURLPref = Preferences.get(
           "network.proxy.backup." + proxyPrefs[i]
         );
@@ -300,14 +301,16 @@ var gConnectionsDialog = {
   },
 
   readProxyProtocolPref(aProtocol, aIsPort) {
-    var shareProxiesPref = Preferences.get(
-      "network.proxy.share_proxy_settings"
-    );
-    if (shareProxiesPref.value) {
-      var pref = Preferences.get(
-        "network.proxy.http" + (aIsPort ? "_port" : "")
+    if (aProtocol != "socks") {
+      var shareProxiesPref = Preferences.get(
+        "network.proxy.share_proxy_settings"
       );
-      return pref.value;
+      if (shareProxiesPref.value) {
+        var pref = Preferences.get(
+          "network.proxy.http" + (aIsPort ? "_port" : "")
+        );
+        return pref.value;
+      }
     }
 
     var backupPref = Preferences.get(
@@ -370,7 +373,7 @@ var gConnectionsDialog = {
     return [
       ...controlGroup.querySelectorAll(":scope > radio"),
       ...controlGroup.querySelectorAll("label"),
-      ...controlGroup.querySelectorAll("textbox"),
+      ...controlGroup.querySelectorAll("input"),
       ...controlGroup.querySelectorAll("checkbox"),
       ...document.querySelectorAll("#networkProxySOCKSVersion > radio"),
       ...document.querySelectorAll("#ConnectionsDialogPane > checkbox"),
@@ -470,9 +473,7 @@ var gConnectionsDialog = {
       return;
     }
     let [menu, customInput] = this.getDnsOverHttpsControls();
-    let customContainer = document.getElementById(
-      "customDnsOverHttpsContainer"
-    );
+    let dohUIContainer = document.getElementById("dnsOverHttps-grid");
     let customURI = Preferences.get("network.trr.custom_uri").value;
     let currentURI = Preferences.get("network.trr.uri").value;
     let resolvers = this.dnsOverHttpsResolvers;
@@ -495,11 +496,11 @@ var gConnectionsDialog = {
     }
 
     if (!menu.disabled && isCustom) {
-      customContainer.hidden = false;
+      dohUIContainer.classList.remove("custom-container-hidden");
       customInput.disabled = false;
-      customContainer.scrollIntoView();
+      customInput.scrollIntoView();
     } else {
-      customContainer.hidden = true;
+      dohUIContainer.classList.add("custom-container-hidden");
       customInput.disabled = true;
     }
 

@@ -21,6 +21,19 @@ XPCOMUtils.defineLazyModuleGetters(this, {
 
 const { debug, warn } = GeckoViewUtils.initLogging("Startup"); // eslint-disable-line no-unused-vars
 
+const ACTORS = {
+  LoadURIDelegate: {
+    child: {
+      moduleURI: "resource:///actors/LoadURIDelegateChild.jsm",
+    },
+  },
+  WebBrowserChrome: {
+    child: {
+      moduleURI: "resource:///actors/WebBrowserChromeChild.jsm",
+    },
+  },
+};
+
 function GeckoViewStartup() {}
 
 GeckoViewStartup.prototype = {
@@ -56,10 +69,21 @@ GeckoViewStartup.prototype = {
         GeckoViewUtils.addLazyGetter(this, "GeckoViewWebExtension", {
           module: "resource://gre/modules/GeckoViewWebExtension.jsm",
           ged: [
+            "GeckoView:ActionDelegate:Attached",
+            "GeckoView:BrowserAction:Click",
+            "GeckoView:PageAction:Click",
             "GeckoView:RegisterWebExtension",
             "GeckoView:UnregisterWebExtension",
+            "GeckoView:WebExtension:Get",
+            "GeckoView:WebExtension:Disable",
+            "GeckoView:WebExtension:Enable",
+            "GeckoView:WebExtension:Install",
+            "GeckoView:WebExtension:InstallBuiltIn",
+            "GeckoView:WebExtension:List",
             "GeckoView:WebExtension:PortDisconnect",
             "GeckoView:WebExtension:PortMessageFromApp",
+            "GeckoView:WebExtension:Uninstall",
+            "GeckoView:WebExtension:Update",
           ],
         });
 
@@ -122,6 +146,7 @@ GeckoViewStartup.prototype = {
         if (
           Services.appinfo.processType == Services.appinfo.PROCESS_TYPE_DEFAULT
         ) {
+          ActorManagerParent.addActors(ACTORS);
           ActorManagerParent.flush();
 
           Services.mm.loadFrameScript(
@@ -182,6 +207,8 @@ GeckoViewStartup.prototype = {
           "GeckoView:SetDefaultPrefs",
           "GeckoView:SetLocale",
         ]);
+
+        Services.obs.notifyObservers(null, "geckoview-startup-complete");
         break;
       }
     }

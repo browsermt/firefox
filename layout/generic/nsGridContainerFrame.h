@@ -10,7 +10,6 @@
 #define nsGridContainerFrame_h___
 
 #include "mozilla/Maybe.h"
-#include "mozilla/TypeTraits.h"
 #include "mozilla/HashTable.h"
 #include "nsContainerFrame.h"
 
@@ -45,7 +44,8 @@ struct ComputedGridTrackInfo {
       nsTArray<nscoord>&& aPositions, nsTArray<nscoord>&& aSizes,
       nsTArray<uint32_t>&& aStates, nsTArray<bool>&& aRemovedRepeatTracks,
       uint32_t aRepeatFirstTrack,
-      nsTArray<nsTArray<StyleCustomIdent>>&& aResolvedLineNames)
+      nsTArray<nsTArray<StyleCustomIdent>>&& aResolvedLineNames,
+      bool aIsSubgrid)
       : mNumLeadingImplicitTracks(aNumLeadingImplicitTracks),
         mNumExplicitTracks(aNumExplicitTracks),
         mStartFragmentTrack(aStartFragmentTrack),
@@ -54,8 +54,9 @@ struct ComputedGridTrackInfo {
         mSizes(aSizes),
         mStates(aStates),
         mRemovedRepeatTracks(aRemovedRepeatTracks),
+        mResolvedLineNames(std::move(aResolvedLineNames)),
         mRepeatFirstTrack(aRepeatFirstTrack),
-        mResolvedLineNames(std::move(aResolvedLineNames)) {}
+        mIsSubgrid(aIsSubgrid) {}
   uint32_t mNumLeadingImplicitTracks;
   uint32_t mNumExplicitTracks;
   uint32_t mStartFragmentTrack;
@@ -64,8 +65,9 @@ struct ComputedGridTrackInfo {
   nsTArray<nscoord> mSizes;
   nsTArray<uint32_t> mStates;
   nsTArray<bool> mRemovedRepeatTracks;
-  uint32_t mRepeatFirstTrack;
   nsTArray<nsTArray<StyleCustomIdent>> mResolvedLineNames;
+  uint32_t mRepeatFirstTrack;
+  bool mIsSubgrid;
 };
 
 struct ComputedGridLineInfo {

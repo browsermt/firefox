@@ -17,10 +17,10 @@
 #include "shlobj.h"
 #include "windows.h"
 #include "nsIWindowsRegKey.h"
-#include "nsIProcess.h"
 #include "nsUnicharUtils.h"
 #include "nsITextToSubURI.h"
 #include "nsVariant.h"
+#include "mozilla/AssembleCmdLine.h"
 #include "mozilla/ShellHeaderOnlyUtils.h"
 #include "mozilla/UrlmonHeaderOnlyUtils.h"
 #include "mozilla/UniquePtrExtensions.h"
@@ -38,6 +38,48 @@ nsresult nsMIMEInfoWin::LaunchDefaultWithFile(nsIFile* aFile) {
   if (executable) return NS_ERROR_FAILURE;
 
   return aFile->Launch();
+}
+
+nsresult nsMIMEInfoWin::ShellExecuteWithIFile(nsIFile* aExecutable,
+                                              const nsString& aArgs) {
+  nsresult rv;
+
+  nsAutoString execPath;
+  rv = aExecutable->GetTarget(execPath);
+  if (NS_FAILED(rv) || execPath.IsEmpty()) {
+    rv = aExecutable->GetPath(execPath);
+  }
+  if (NS_FAILED(rv)) {
+    return rv;
+  }
+
+  auto assembledArgs = mozilla::assembleSingleArgument(aArgs);
+  if (!assembledArgs) {
+    return NS_ERROR_FILE_EXECUTION_FAILED;
+  }
+
+  _bstr_t execPathBStr(execPath.get());
+  // Pass VT_ERROR/DISP_E_PARAMNOTFOUND to omit an optional RPC parameter
+  // to execute a file with the default verb.
+  _variant_t verbDefault(DISP_E_PARAMNOTFOUND, VT_ERROR);
+  _variant_t workingDir;
+  _variant_t showCmd(SW_SHOWNORMAL);
+
+  // Ask Explorer to ShellExecute on our behalf, as some applications such as
+  // Skype for Business do not start correctly when inheriting our process's
+  // migitation policies.
+  // It does not work in a special environment such as Citrix.  In such a case
+  // we fall back to launching an application as a child process.  We need to
+  // find a way to handle the combination of these interop issues.
+  mozilla::LauncherVoidResult shellExecuteOk = mozilla::ShellExecuteByExplorer(
+      execPathBStr, assembledArgs.get(), verbDefault, workingDir, showCmd);
+  if (shellExecuteOk.isErr()) {
+    // No need to pass assembledArgs to LaunchWithIProcess.  aArgs will be
+    // processed in nsProcess::RunProcess.
+    return LaunchWithIProcess(aExecutable, aArgs);
+  }
+
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -63,9 +105,6 @@ nsMIMEInfoWin::LaunchWithFile(nsIFile* aFile) {
     nsCOMPtr<nsIFile> executable;
     rv = localHandler->GetExecutable(getter_AddRefs(executable));
     NS_ENSURE_SUCCESS(rv, rv);
-
-    nsAutoString path;
-    aFile->GetPath(path);
 
     // Deal with local dll based handlers
     nsCString filename;
@@ -130,7 +169,9 @@ nsMIMEInfoWin::LaunchWithFile(nsIFile* aFile) {
         return NS_ERROR_FILE_EXECUTION_FAILED;
       }
     }
-    return LaunchWithIProcess(executable, path);
+    nsAutoString path;
+    aFile->GetPath(path);
+    return ShellExecuteWithIFile(executable, path);
   }
 
   return NS_ERROR_INVALID_ARG;

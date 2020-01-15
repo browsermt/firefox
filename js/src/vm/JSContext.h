@@ -11,6 +11,8 @@
 
 #include "mozilla/MemoryReporting.h"
 
+#include "jstypes.h"  // JS_PUBLIC_API
+
 #include "ds/TraceableFifo.h"
 #include "gc/Memory.h"
 #include "js/CharacterEncoding.h"
@@ -22,9 +24,12 @@
 #include "js/Vector.h"
 #include "threading/ProtectedData.h"
 #include "util/StructuredSpewer.h"
+#include "vm/Activation.h"  // js::Activation
 #include "vm/ErrorReporting.h"
 #include "vm/MallocProvider.h"
 #include "vm/Runtime.h"
+
+struct JS_PUBLIC_API JSContext;
 
 struct DtoaState;
 
@@ -35,6 +40,7 @@ class AutoMaybeLeaveAtomsZone;
 class AutoRealm;
 
 namespace jit {
+class JitActivation;
 class JitContext;
 class DebugModeOSRVolatileJitFrameIter;
 }  // namespace jit
@@ -43,8 +49,6 @@ namespace gc {
 class AutoCheckCanAccessAtomsDuringGC;
 class AutoSuppressNurseryCellAlloc;
 }  // namespace gc
-
-typedef HashSet<Shape*> ShapeSet;
 
 /* Detects cycles when traversing an object graph. */
 class MOZ_RAII AutoCycleDetector {
@@ -147,8 +151,8 @@ enum class InterruptReason : uint32_t {
  * A JSContext encapsulates the thread local state used when using the JS
  * runtime.
  */
-struct JSContext : public JS::RootingContext,
-                   public js::MallocProvider<JSContext> {
+struct JS_PUBLIC_API JSContext : public JS::RootingContext,
+                                 public js::MallocProvider<JSContext> {
   JSContext(JSRuntime* runtime, const JS::ContextOptions& options);
   ~JSContext();
 
@@ -251,8 +255,8 @@ struct JSContext : public JS::RootingContext,
    * on OOM and retry the allocation.
    */
   template <typename T>
-  T* pod_callocCanGC(size_t numElems, arena_id_t arena = js::MallocArena) {
-    T* p = maybe_pod_calloc<T>(numElems, arena);
+  T* pod_arena_callocCanGC(arena_id_t arena, size_t numElems) {
+    T* p = maybe_pod_arena_calloc<T>(arena, numElems);
     if (MOZ_LIKELY(!!p)) {
       return p;
     }
@@ -298,10 +302,6 @@ struct JSContext : public JS::RootingContext,
   }
   js::PropertyName* emptyString() { return runtime_->emptyString; }
   JSFreeOp* defaultFreeOp() { return &defaultFreeOp_.ref(); }
-  void* stackLimitAddress(JS::StackKind kind) {
-    return &nativeStackLimit[kind];
-  }
-  void* stackLimitAddressForJitCode(JS::StackKind kind);
   uintptr_t stackLimit(JS::StackKind kind) { return nativeStackLimit[kind]; }
   uintptr_t stackLimitForJitCode(JS::StackKind kind);
   size_t gcSystemPageSize() { return js::gc::SystemPageSize(); }
@@ -523,14 +523,7 @@ struct JSContext : public JS::RootingContext,
   js::UnprotectedData<js::TraceLoggerThread*> traceLogger;
 #endif
 
- private:
-  /* Pointer to the current AutoFlushICache. */
-  js::ContextData<js::jit::AutoFlushICache*> autoFlushICache_;
-
  public:
-  js::jit::AutoFlushICache* autoFlushICache() const;
-  void setAutoFlushICache(js::jit::AutoFlushICache* afc);
-
   // State used by util/DoubleToString.cpp.
   js::ContextData<DtoaState*> dtoaState;
 
@@ -544,13 +537,21 @@ struct JSContext : public JS::RootingContext,
    */
   js::ContextData<int32_t> suppressGC;
 
-  // Whether this thread is currently sweeping GC things.  This thread could
-  // be the main thread or a helper thread while the main thread is running
-  // the mutator.  This is used to assert that destruction of GCPtr only
-  // happens when we are sweeping.
+#ifdef DEBUG
+  // Whether this thread is currently sweeping GC things. This thread could be
+  // the main thread or a helper thread while the main thread is running the
+  // mutator. This is used to assert that destruction of GCPtrs only happens
+  // when we are sweeping, among other things.
   js::ContextData<bool> gcSweeping;
 
-#ifdef DEBUG
+  // The specific zone currently being swept, if any. Setting this restricts
+  // IsAboutToBeFinalized and IsMarked calls to this zone.
+  js::ContextData<JS::Zone*> gcSweepingZone;
+
+  // Whether this thread is currently marking GC things. This thread could
+  // be the main thread or a helper thread doing sweep-marking.
+  js::ContextData<bool> gcMarking;
+
   // Whether this thread is currently manipulating possibly-gray GC things.
   js::ContextData<size_t> isTouchingGrayThings;
 
@@ -811,25 +812,15 @@ struct JSContext : public JS::RootingContext,
 
   /*
    * See JS_SetTrustedPrincipals in jsapi.h.
-   * Note: !cx->compartment is treated as trusted.
+   * Note: !cx->realm() is treated as trusted.
    */
   inline bool runningWithTrustedPrincipals();
 
-  JS_FRIEND_API size_t
-  sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+  size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
 
   void trace(JSTracer* trc);
 
   inline js::RuntimeCaches& caches();
-
- private:
-  /*
-   * The allocation code calls the function to indicate either OOM failure
-   * when p is null or that a memory pressure counter has reached some
-   * threshold when p is not null. The function takes the pointer and not
-   * a boolean flag to minimize the amount of code in its inlined callers.
-   */
-  JS_FRIEND_API void checkMallocGCPressure(void* p);
 
  public:
   using InterruptCallbackVector =
@@ -894,13 +885,6 @@ struct JSContext : public JS::RootingContext,
   // Futex state, used by Atomics.wait() and Atomics.wake() on the Atomics
   // object.
   js::FutexThread fx;
-
-  // Buffer for OSR from baseline to Ion. To avoid holding on to this for
-  // too long, it's also freed in EnterBaseline (after returning from JIT code).
-  js::ContextData<uint8_t*> osrTempData_;
-
-  uint8_t* allocateOsrTempData(size_t size);
-  void freeOsrTempData();
 
   // In certain cases, we want to optimize certain opcodes to typed
   // instructions, to avoid carrying an extra register to feed into an unbox.
@@ -998,6 +982,12 @@ struct JSContext : public JS::RootingContext,
   js::StructuredSpewer& spewer() { return structuredSpewer_.ref(); }
 #endif
 
+  // During debugger evaluations which need to observe native calls, JITs are
+  // completely disabled. This flag indicates whether we are in this state, and
+  // the debugger which initiated the evaluation. This debugger has other
+  // references on the stack and does not need to be traced.
+  js::ContextData<js::Debugger*> insideDebuggerEvaluationWithOnNativeCallHook;
+
 }; /* struct JSContext */
 
 inline JS::Result<> JSContext::boolToResult(bool ok) {
@@ -1050,8 +1040,7 @@ struct MOZ_RAII AutoResolving {
  * Create and destroy functions for JSContext, which is manually allocated
  * and exclusively owned.
  */
-extern JSContext* NewContext(uint32_t maxBytes, uint32_t maxNurseryBytes,
-                             JSRuntime* parentRuntime);
+extern JSContext* NewContext(uint32_t maxBytes, JSRuntime* parentRuntime);
 
 extern void DestroyContext(JSContext* cx);
 
@@ -1115,9 +1104,13 @@ extern void ReportIsNotDefined(JSContext* cx, HandleId id);
 /*
  * Report an attempt to access the property of a null or undefined value (v).
  */
-extern void ReportIsNullOrUndefined(JSContext* cx, int spindex, HandleValue v);
-
-extern void ReportMissingArg(JSContext* cx, js::HandleValue v, unsigned arg);
+extern void ReportIsNullOrUndefinedForPropertyAccess(JSContext* cx,
+                                                     HandleValue v,
+                                                     bool reportScanStack);
+extern void ReportIsNullOrUndefinedForPropertyAccess(JSContext* cx,
+                                                     HandleValue v,
+                                                     HandleId key,
+                                                     bool reportScanStack);
 
 /*
  * Report error using js_DecompileValueGenerator(cx, spindex, v, fallback) as
@@ -1243,6 +1236,21 @@ class MOZ_RAII AutoKeepAtoms {
   inline ~AutoKeepAtoms();
 };
 
+class MOZ_RAII AutoNoteDebuggerEvaluationWithOnNativeCallHook {
+  JSContext* cx;
+  Debugger* oldValue;
+
+ public:
+  AutoNoteDebuggerEvaluationWithOnNativeCallHook(JSContext* cx, Debugger* dbg)
+      : cx(cx), oldValue(cx->insideDebuggerEvaluationWithOnNativeCallHook) {
+    cx->insideDebuggerEvaluationWithOnNativeCallHook = dbg;
+  }
+
+  ~AutoNoteDebuggerEvaluationWithOnNativeCallHook() {
+    cx->insideDebuggerEvaluationWithOnNativeCallHook = oldValue;
+  }
+};
+
 enum UnsafeABIStrictness {
   NoExceptions,
   AllowPendingExceptions,
@@ -1302,16 +1310,56 @@ class MOZ_RAII AutoSetThreadIsPerformingGC {
 
 // In debug builds, set/reset the GC sweeping flag for the current thread.
 struct MOZ_RAII AutoSetThreadIsSweeping {
-  AutoSetThreadIsSweeping() : cx(TlsContext.get()), prevState(cx->gcSweeping) {
+#ifndef DEBUG
+  explicit AutoSetThreadIsSweeping(Zone* zone = nullptr) {}
+#else
+  explicit AutoSetThreadIsSweeping(Zone* zone = nullptr)
+      : cx(TlsContext.get()),
+        prevState(cx->gcSweeping),
+        prevZone(cx->gcSweepingZone) {
     cx->gcSweeping = true;
+    cx->gcSweepingZone = zone;
   }
 
-  ~AutoSetThreadIsSweeping() { cx->gcSweeping = prevState; }
+  ~AutoSetThreadIsSweeping() {
+    cx->gcSweeping = prevState;
+    cx->gcSweepingZone = prevZone;
+    MOZ_ASSERT_IF(!cx->gcSweeping, !cx->gcSweepingZone);
+  }
+
+ private:
+  JSContext* cx;
+  bool prevState;
+  JS::Zone* prevZone;
+#endif
+};
+
+// Note that this class does not suppress buffer allocation/reallocation in the
+// nursery, only Cells themselves.
+class MOZ_RAII AutoSuppressNurseryCellAlloc {
+  JSContext* cx_;
+
+ public:
+  explicit AutoSuppressNurseryCellAlloc(JSContext* cx) : cx_(cx) {
+    cx_->nurserySuppressions_++;
+  }
+  ~AutoSuppressNurseryCellAlloc() { cx_->nurserySuppressions_--; }
+};
+
+#ifdef DEBUG
+// Set/reset the GC marking flag for the current thread.
+struct MOZ_RAII AutoSetThreadIsMarking {
+  AutoSetThreadIsMarking() : cx(TlsContext.get()), prevState(cx->gcMarking) {
+    cx->gcMarking = true;
+  }
+
+  ~AutoSetThreadIsMarking() { cx->gcMarking = prevState; }
 
  private:
   JSContext* cx;
   bool prevState;
 };
+#endif  // DEBUG
 
 }  // namespace gc
 

@@ -22,29 +22,23 @@
 namespace mozilla {
 
 class DecodedStreamData;
+class MediaDecoderStateMachine;
 class AudioData;
 class VideoData;
-class MediaStream;
-class OutputStreamManager;
 struct PlaybackInfoInit;
-class ProcessedMediaStream;
+class ProcessedMediaTrack;
 class TimeStamp;
 
 template <class T>
 class MediaQueue;
 
 class DecodedStream : public MediaSink {
-  using MediaSink::PlaybackParams;
-
  public:
-  DecodedStream(AbstractThread* aOwnerThread, AbstractThread* aMainThread,
+  DecodedStream(MediaDecoderStateMachine* aStateMachine,
+                nsTArray<RefPtr<ProcessedMediaTrack>> aOutputTracks,
+                double aVolume, double aPlaybackRate, bool aPreservesPitch,
                 MediaQueue<AudioData>& aAudioQueue,
-                MediaQueue<VideoData>& aVideoQueue,
-                OutputStreamManager* aOutputStreamManager);
-
-  // MediaSink functions.
-  const PlaybackParams& GetPlaybackParams() const override;
-  void SetPlaybackParams(const PlaybackParams& aParams) override;
+                MediaQueue<VideoData>& aVideoQueue);
 
   RefPtr<EndedPromise> OnEnded(TrackType aType) override;
   media::TimeUnit GetEndTime(TrackType aType) const override;
@@ -58,6 +52,8 @@ class DecodedStream : public MediaSink {
   void SetPlaybackRate(double aPlaybackRate) override;
   void SetPreservesPitch(bool aPreservesPitch) override;
   void SetPlaying(bool aPlaying) override;
+
+  double PlaybackRate() const override;
 
   nsresult Start(const media::TimeUnit& aStartTime,
                  const MediaInfo& aInfo) override;
@@ -74,6 +70,7 @@ class DecodedStream : public MediaSink {
   void DestroyData(UniquePtr<DecodedStreamData>&& aData);
   void SendAudio(double aVolume, const PrincipalHandle& aPrincipalHandle);
   void SendVideo(const PrincipalHandle& aPrincipalHandle);
+  void ResetAudio();
   void ResetVideo(const PrincipalHandle& aPrincipalHandle);
   void SendData();
   void NotifyOutput(int64_t aTime);
@@ -89,14 +86,6 @@ class DecodedStream : public MediaSink {
 
   const RefPtr<AbstractThread> mOwnerThread;
 
-  const RefPtr<AbstractThread> mAbstractMainThread;
-
-  /*
-   * Main thread only members.
-   */
-  // Data about MediaStreams that are being fed by the decoder.
-  const RefPtr<OutputStreamManager> mOutputStreamManager;
-
   /*
    * Worker thread only members.
    */
@@ -107,8 +96,11 @@ class DecodedStream : public MediaSink {
 
   Watchable<bool> mPlaying;
   Mirror<PrincipalHandle> mPrincipalHandle;
+  const nsTArray<RefPtr<ProcessedMediaTrack>> mOutputTracks;
 
-  PlaybackParams mParams;
+  double mVolume;
+  double mPlaybackRate;
+  bool mPreservesPitch;
 
   media::NullableTimeUnit mStartTime;
   media::TimeUnit mLastOutputTime;

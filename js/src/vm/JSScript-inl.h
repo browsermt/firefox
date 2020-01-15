@@ -58,37 +58,33 @@ ScriptAndCounts::ScriptAndCounts(ScriptAndCounts&& sac)
 void SetFrameArgumentsObject(JSContext* cx, AbstractFramePtr frame,
                              HandleScript script, JSObject* argsobj);
 
-/* static */ inline JSFunction* LazyScript::functionDelazifying(
-    JSContext* cx, Handle<LazyScript*> script) {
-  RootedFunction fun(cx, script->function_);
-  if (script->function_ && !JSFunction::getOrCreateScript(cx, fun)) {
-    return nullptr;
-  }
-  return script->function_;
+inline void ScriptWarmUpData::initEnclosingScript(LazyScript* enclosingScript) {
+  MOZ_ASSERT(data_ == ResetState());
+  setTaggedPtr<EnclosingScriptTag>(enclosingScript);
+  static_assert(std::is_base_of<gc::TenuredCell, LazyScript>::value,
+                "LazyScript must be TenuredCell to avoid post-barriers");
+}
+inline void ScriptWarmUpData::clearEnclosingScript() {
+  LazyScript::writeBarrierPre(toEnclosingScript());
+  data_ = ResetState();
+}
+
+inline void ScriptWarmUpData::initEnclosingScope(Scope* enclosingScope) {
+  MOZ_ASSERT(data_ == ResetState());
+  setTaggedPtr<EnclosingScopeTag>(enclosingScope);
+  static_assert(std::is_base_of<gc::TenuredCell, Scope>::value,
+                "Scope must be TenuredCell to avoid post-barriers");
+}
+inline void ScriptWarmUpData::clearEnclosingScope() {
+  Scope::writeBarrierPre(toEnclosingScope());
+  data_ = ResetState();
+}
+
+inline JSPrincipals* BaseScript::principals() const {
+  return realm()->principals();
 }
 
 }  // namespace js
-
-inline JSFunction* JSScript::functionDelazifying() const {
-  JSFunction* fun = function();
-  if (fun && fun->isInterpretedLazy()) {
-    fun->setUnlazifiedScript(const_cast<JSScript*>(this));
-    // If this script has a LazyScript, make sure the LazyScript has a
-    // reference to the script when delazifying its canonical function.
-    if (lazyScript && !lazyScript->maybeScript()) {
-      lazyScript->initScript(const_cast<JSScript*>(this));
-    }
-  }
-  return fun;
-}
-
-inline void JSScript::ensureNonLazyCanonicalFunction() {
-  // Infallibly delazify the canonical script.
-  JSFunction* fun = function();
-  if (fun && fun->isInterpretedLazy()) {
-    functionDelazifying();
-  }
-}
 
 inline JSFunction* JSScript::getFunction(size_t index) {
   JSObject* obj = getObject(index);
@@ -158,8 +154,6 @@ inline js::Shape* JSScript::initialEnvironmentShape() const {
   return nullptr;
 }
 
-inline JSPrincipals* JSScript::principals() { return realm()->principals(); }
-
 inline bool JSScript::ensureHasAnalyzedArgsUsage(JSContext* cx) {
   if (analyzedArgsUsage()) {
     return true;
@@ -168,7 +162,7 @@ inline bool JSScript::ensureHasAnalyzedArgsUsage(JSContext* cx) {
 }
 
 inline bool JSScript::isDebuggee() const {
-  return realm_->debuggerObservesAllExecution() || hasDebugScript();
+  return realm()->debuggerObservesAllExecution() || hasDebugScript();
 }
 
 inline bool JSScript::hasBaselineScript() const {
@@ -229,6 +223,30 @@ inline js::jit::BaselineScript* JSScript::baselineScript() const {
 
 inline js::jit::IonScript* JSScript::ionScript() const {
   return jitScript()->ionScript();
+}
+
+inline uint32_t JSScript::getWarmUpCount() const {
+  if (warmUpData_.isWarmUpCount()) {
+    return warmUpData_.toWarmUpCount();
+  }
+  return warmUpData_.toJitScript()->warmUpCount_;
+}
+
+inline void JSScript::incWarmUpCounter(uint32_t amount) {
+  if (warmUpData_.isWarmUpCount()) {
+    warmUpData_.incWarmUpCount(amount);
+  } else {
+    warmUpData_.toJitScript()->warmUpCount_ += amount;
+  }
+}
+
+inline void JSScript::resetWarmUpCounterForGC() {
+  incWarmUpResetCounter();
+  if (warmUpData_.isWarmUpCount()) {
+    warmUpData_.resetWarmUpCount(0);
+  } else {
+    warmUpData_.toJitScript()->warmUpCount_ = 0;
+  }
 }
 
 #endif /* vm_JSScript_inl_h */

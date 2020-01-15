@@ -4,7 +4,7 @@
 
 "use strict";
 
-var { Front } = require("../Front");
+var { Front } = require("devtools/shared/protocol/Front");
 
 /**
  * Generates request methods as described by the given actor specification on
@@ -27,7 +27,7 @@ var generateRequestMethods = function(actorSpec, frontProto) {
       // The front was probably destroyed earlier.
       if (!this.actorID) {
         throw new Error(
-          `Can not send request because front '${
+          `Can not send request '${name}' because front '${
             this.typeName
           }' is already destroyed.`
         );

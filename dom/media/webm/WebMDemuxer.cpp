@@ -232,13 +232,12 @@ already_AddRefed<MediaTrackDemuxer> WebMDemuxer::GetTrackDemuxer(
   return e.forget();
 }
 
-nsresult WebMDemuxer::Reset(TrackInfo::TrackType aType) {
+void WebMDemuxer::Reset(TrackInfo::TrackType aType) {
   if (aType == TrackInfo::kVideoTrack) {
     mVideoPackets.Reset();
   } else {
     mAudioPackets.Reset();
   }
-  return NS_OK;
 }
 
 nsresult WebMDemuxer::ReadMetadata() {
@@ -461,7 +460,7 @@ void WebMDemuxer::EnsureUpToDateIndex() {
       Resource(TrackInfo::kVideoTrack).GetResource());
   MediaByteRangeSet byteRanges;
   nsresult rv = resource->GetCachedRanges(byteRanges);
-  if (NS_FAILED(rv) || !byteRanges.Length()) {
+  if (NS_FAILED(rv) || byteRanges.IsEmpty()) {
     return;
   }
   mBufferedState->UpdateIndex(byteRanges, resource);
@@ -899,9 +898,7 @@ nsresult WebMDemuxer::SeekInternal(TrackInfo::TrackType aType,
   uint32_t trackToSeek = mHasVideo ? mVideoTrack : mAudioTrack;
   uint64_t target = aTarget.ToNanoseconds();
 
-  if (NS_FAILED(Reset(aType))) {
-    return NS_ERROR_FAILURE;
-  }
+  Reset(aType);
 
   if (mSeekPreroll) {
     uint64_t startTime = 0;
@@ -1181,7 +1178,7 @@ void WebMTrackDemuxer::Reset() {
   mSamples.Reset();
   media::TimeIntervals buffered = GetBuffered();
   mNeedKeyframe = true;
-  if (buffered.Length()) {
+  if (!buffered.IsEmpty()) {
     WEBM_DEBUG("Seek to start point: %f", buffered.Start(0).ToSeconds());
     mParent->SeekInternal(mType, buffered.Start(0));
     SetNextKeyFrameTime();

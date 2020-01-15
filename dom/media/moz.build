@@ -45,6 +45,7 @@ DIRS += [
     'mediacontrol',
     'mediasink',
     'mediasource',
+    'mediasession',
     'mp3',
     'ogg',
     'platforms',
@@ -129,7 +130,11 @@ EXPORTS += [
     'DOMMediaStream.h',
     'DriftCompensation.h',
     'FileBlockCache.h',
+    'ForwardedInputTrack.h',
     'FrameStatistics.h',
+    'GVAutoplayPermissionRequest.h',
+    'GVAutoplayRequestStatusIPC.h',
+    'GVAutoplayRequestUtils.h',
     'ImageToI420.h',
     'Intervals.h',
     'MediaCache.h',
@@ -144,6 +149,7 @@ EXPORTS += [
     'MediaInfo.h',
     'MediaMetadataManager.h',
     'MediaMIMETypes.h',
+    'MediaPlaybackDelayPolicy.h',
     'MediaPromiseDefs.h',
     'MediaQueue.h',
     'MediaRecorder.h',
@@ -154,27 +160,24 @@ EXPORTS += [
     'MediaShutdownManager.h',
     'MediaSpan.h',
     'MediaStatistics.h',
-    'MediaStreamGraph.h',
-    'MediaStreamListener.h',
-    'MediaStreamTypes.h',
     'MediaStreamWindowCapturer.h',
     'MediaTimer.h',
     'MediaTrack.h',
+    'MediaTrackGraph.h',
     'MediaTrackList.h',
+    'MediaTrackListener.h',
     'MemoryBlockCache.h',
     'nsIDocumentActivity.h',
     'PrincipalChangeObserver.h',
+    'PrincipalHandle.h',
     'QueueObject.h',
     'SeekJob.h',
     'SeekTarget.h',
     'SelfRef.h',
     'SharedBuffer.h',
-    'StreamTracks.h',
     'ThreadPoolCOMListener.h',
     'TimeUnits.h',
     'Tracing.h',
-    'TrackID.h',
-    'TrackUnionStream.h',
     'VideoFrameContainer.h',
     'VideoLimits.h',
     'VideoSegment.h',
@@ -186,6 +189,7 @@ EXPORTS += [
 
 EXPORTS.mozilla += [
     'MediaManager.h',
+    'UnderrunHandler.h',
 ]
 
 EXPORTS.mozilla.media.webrtc += [
@@ -197,10 +201,6 @@ if not CONFIG['MOZ_WEBRTC']:
   EXPORTS.mtransport += [
       '../../media/mtransport/runnable_utils.h',
   ]
-
-IPDL_SOURCES += [
-    'webrtc/PWebrtcGlobal.ipdl',
-]
 
 EXPORTS.mozilla.dom += [
     'AudioDeviceInfo.h',
@@ -229,7 +229,7 @@ EXPORTS.mozilla.dom += [
 UNIFIED_SOURCES += [
     'ADTSDecoder.cpp',
     'ADTSDemuxer.cpp',
-    'AudioCaptureStream.cpp',
+    'AudioCaptureTrack.cpp',
     'AudioChannelFormat.cpp',
     'AudioCompactor.cpp',
     'AudioConfig.cpp',
@@ -253,9 +253,11 @@ UNIFIED_SOURCES += [
     'DOMMediaStream.cpp',
     'FileBlockCache.cpp',
     'FileMediaResource.cpp',
+    'ForwardedInputTrack.cpp',
     'GetUserMediaRequest.cpp',
     'GraphDriver.cpp',
     'GraphRunner.cpp',
+    'GVAutoplayPermissionRequest.cpp',
     'ImageToI420.cpp',
     'MediaCache.cpp',
     'MediaContainerType.cpp',
@@ -268,29 +270,28 @@ UNIFIED_SOURCES += [
     'MediaInfo.cpp',
     'MediaManager.cpp',
     'MediaMIMETypes.cpp',
+    'MediaPlaybackDelayPolicy.cpp',
     'MediaRecorder.cpp',
     'MediaResource.cpp',
     'MediaShutdownManager.cpp',
     'MediaStreamError.cpp',
-    'MediaStreamGraph.cpp',
-    'MediaStreamListener.cpp',
     'MediaStreamTrack.cpp',
     'MediaStreamWindowCapturer.cpp',
     'MediaTimer.cpp',
     'MediaTrack.cpp',
+    'MediaTrackGraph.cpp',
     'MediaTrackList.cpp',
+    'MediaTrackListener.cpp',
     'MemoryBlockCache.cpp',
     'QueueObject.cpp',
     'ReaderProxy.cpp',
     'SeekJob.cpp',
-    'StreamTracks.cpp',
     'TextTrack.cpp',
     'TextTrackCue.cpp',
     'TextTrackCueList.cpp',
     'TextTrackList.cpp',
     'TextTrackRegion.cpp',
     'Tracing.cpp',
-    'TrackUnionStream.cpp',
     'VideoFrameContainer.cpp',
     'VideoPlaybackQuality.cpp',
     'VideoSegment.cpp',
@@ -301,6 +302,11 @@ UNIFIED_SOURCES += [
     'WebVTTListener.cpp',
     'XiphExtradata.cpp',
 ]
+
+if CONFIG['OS_TARGET'] == 'Linux':
+    UNIFIED_SOURCES += [ 'UnderrunHandlerLinux.cpp' ]
+else:
+    UNIFIED_SOURCES += [ 'UnderrunHandlerNoop.cpp']
 
 if CONFIG['OS_TARGET'] == 'WINNT':
   EXPORTS.mozilla.audio += [
@@ -337,7 +343,6 @@ if CONFIG['MOZ_WEBRTC']:
 EXTRA_JS_MODULES.media += [
     'IdpSandbox.jsm',
     'PeerConnectionIdp.jsm',
-    'RTCStatsReport.jsm',
 ]
 
 LOCAL_INCLUDES += [
@@ -375,7 +380,3 @@ if CONFIG['CC_TYPE'] in ('clang', 'gcc'):
     ]
 
 FINAL_LIBRARY = 'xul'
-
-MARIONETTE_DOM_MEDIA_MANIFESTS += [
- 'test/marionette/manifest.ini'
-]

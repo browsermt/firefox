@@ -15,11 +15,15 @@ const dom = require("devtools/client/shared/vendor/react-dom-factories");
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
 const { connect } = require("devtools/client/shared/vendor/react-redux");
 
-const Toolbar = createFactory(require("./Toolbar"));
-const Viewports = createFactory(require("./Viewports"));
+const Toolbar = createFactory(
+  require("devtools/client/responsive/components/Toolbar")
+);
+const Viewports = createFactory(
+  require("devtools/client/responsive/components/Viewports")
+);
 
 loader.lazyGetter(this, "DeviceModal", () =>
-  createFactory(require("./DeviceModal"))
+  createFactory(require("devtools/client/responsive/components/DeviceModal"))
 );
 
 const {
@@ -32,8 +36,10 @@ const {
   updateDeviceDisplayed,
   updateDeviceModal,
   updatePreferredDevices,
-} = require("../actions/devices");
-const { takeScreenshot } = require("../actions/screenshot");
+} = require("devtools/client/responsive/actions/devices");
+const {
+  takeScreenshot,
+} = require("devtools/client/responsive/actions/screenshot");
 const {
   changeUserAgent,
   toggleLeftAlignment,
@@ -41,7 +47,7 @@ const {
   toggleReloadOnUserAgent,
   toggleTouchSimulation,
   toggleUserAgentInput,
-} = require("../actions/ui");
+} = require("devtools/client/responsive/actions/ui");
 const {
   changeDevice,
   changePixelRatio,
@@ -49,16 +55,19 @@ const {
   removeDeviceAssociation,
   resizeViewport,
   rotateViewport,
-} = require("../actions/viewports");
-const { getOrientation } = require("../utils/orientation");
+} = require("devtools/client/responsive/actions/viewports");
+const {
+  getOrientation,
+} = require("devtools/client/responsive/utils/orientation");
 
-const Types = require("../types");
+const Types = require("devtools/client/responsive/types");
 
 class App extends PureComponent {
   static get propTypes() {
     return {
       devices: PropTypes.shape(Types.devices).isRequired,
       dispatch: PropTypes.func.isRequired,
+      leftAlignmentEnabled: PropTypes.bool.isRequired,
       networkThrottling: PropTypes.shape(Types.networkThrottling).isRequired,
       screenshot: PropTypes.shape(Types.screenshot).isRequired,
       viewports: PropTypes.arrayOf(PropTypes.shape(Types.viewport)).isRequired,
@@ -269,6 +278,14 @@ class App extends PureComponent {
   doResizeViewport(id, width, height) {
     // This is the setter function that we pass to Toolbar and Viewports
     // so they can modify the viewport.
+    window.postMessage(
+      {
+        type: "viewport-resize",
+        width,
+        height,
+      },
+      "*"
+    );
     this.props.dispatch(resizeViewport(id, width, height));
   }
 
@@ -333,6 +350,16 @@ class App extends PureComponent {
 
   onToggleLeftAlignment() {
     this.props.dispatch(toggleLeftAlignment());
+
+    if (Services.prefs.getBoolPref("devtools.responsive.browserUI.enabled")) {
+      window.postMessage(
+        {
+          type: "toggle-left-alignment",
+          leftAlignmentEnabled: this.props.leftAlignmentEnabled,
+        },
+        "*"
+      );
+    }
   }
 
   onToggleReloadOnTouchSimulation() {
@@ -353,6 +380,10 @@ class App extends PureComponent {
 
   onUpdateDeviceModal(isOpen, modalOpenedFromViewport) {
     this.props.dispatch(updateDeviceModal(isOpen, modalOpenedFromViewport));
+
+    if (Services.prefs.getBoolPref("devtools.responsive.browserUI.enabled")) {
+      window.postMessage({ type: "update-device-modal", isOpen }, "*");
+    }
   }
 
   render() {
@@ -366,7 +397,6 @@ class App extends PureComponent {
       onChangePixelRatio,
       onChangeTouchSimulation,
       onChangeUserAgent,
-      onChangeViewportOrientation,
       onContentResize,
       onDeviceListUpdate,
       onEditCustomDevice,
@@ -422,16 +452,17 @@ class App extends PureComponent {
         onToggleUserAgentInput,
         onUpdateDeviceModal,
       }),
-      Viewports({
-        screenshot,
-        viewports,
-        onBrowserMounted,
-        onChangeViewportOrientation,
-        onContentResize,
-        onRemoveDeviceAssociation,
-        doResizeViewport,
-        onResizeViewport,
-      }),
+      !Services.prefs.getBoolPref("devtools.responsive.browserUI.enabled")
+        ? Viewports({
+            screenshot,
+            viewports,
+            onBrowserMounted,
+            onContentResize,
+            onRemoveDeviceAssociation,
+            doResizeViewport,
+            onResizeViewport,
+          })
+        : null,
       devices.isModalOpen
         ? DeviceModal({
             deviceAdderViewportTemplate,
@@ -448,4 +479,11 @@ class App extends PureComponent {
   }
 }
 
-module.exports = connect(state => state)(App);
+const mapStateToProps = state => {
+  return {
+    ...state,
+    leftAlignmentEnabled: state.ui.leftAlignmentEnabled,
+  };
+};
+
+module.exports = connect(mapStateToProps)(App);

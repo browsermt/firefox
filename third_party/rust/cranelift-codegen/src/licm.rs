@@ -11,7 +11,7 @@ use crate::ir::{
 use crate::isa::TargetIsa;
 use crate::loop_analysis::{Loop, LoopAnalysis};
 use crate::timing;
-use std::vec::Vec;
+use alloc::vec::Vec;
 
 /// Performs the LICM pass by detecting loops within the CFG and moving
 /// loop-invariant instructions out of them.
@@ -71,9 +71,8 @@ fn create_pre_header(
     domtree: &DominatorTree,
 ) -> Ebb {
     let pool = &mut ListPool::<Value>::new();
-    let header_args_values: Vec<Value> = func.dfg.ebb_params(header).into_iter().cloned().collect();
+    let header_args_values = func.dfg.ebb_params(header).to_vec();
     let header_args_types: Vec<Type> = header_args_values
-        .clone()
         .into_iter()
         .map(|val| func.dfg.value_type(val))
         .collect();

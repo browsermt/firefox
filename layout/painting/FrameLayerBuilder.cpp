@@ -580,7 +580,6 @@ class PaintedLayerData {
         mHideAllLayersBelow(false),
         mOpaqueForAnimatedGeometryRootParent(false),
         mBackfaceHidden(false),
-        mShouldPaintOnContentSide(false),
         mDTCRequiresTargetConfirmation(false),
         mImage(nullptr),
         mItemClip(nullptr),
@@ -802,11 +801,6 @@ class PaintedLayerData {
    * with visible backface.
    */
   bool mBackfaceHidden;
-  /**
-   * Set if it is better to render this layer on the content process, for
-   * example if it contains native theme widgets.
-   */
-  bool mShouldPaintOnContentSide;
   /**
    * Set to true if events targeting the dispatch-to-content region
    * require target confirmation.
@@ -2092,9 +2086,9 @@ void FrameLayerBuilder::Init(nsDisplayListBuilder* aBuilder,
 }
 
 void FrameLayerBuilder::FlashPaint(gfxContext* aContext) {
-  float r = float(rand()) / RAND_MAX;
-  float g = float(rand()) / RAND_MAX;
-  float b = float(rand()) / RAND_MAX;
+  float r = float(rand()) / float(RAND_MAX);
+  float g = float(rand()) / float(RAND_MAX);
+  float b = float(rand()) / float(RAND_MAX);
   aContext->SetColor(Color(r, g, b, 0.4f));
   aContext->Paint();
 }
@@ -3885,10 +3879,6 @@ void PaintedLayerData::Accumulate(
     }
   }
 
-  if (aItem->MustPaintOnContentSide()) {
-    mShouldPaintOnContentSide = true;
-  }
-
   if (aTransform && aType == DisplayItemEntryType::Item) {
     // Bounds transformed with axis-aligned transforms could be included in the
     // opaque region calculations. For simplicity, this is currently not done.
@@ -5076,13 +5066,6 @@ void ContainerState::ProcessDisplayItems(nsDisplayList* aList) {
         newLayerEntry->mOpaqueForAnimatedGeometryRootParent = false;
         newLayerEntry->mBaseScrollMetadata =
             scrollItem->ComputeScrollMetadata(ownLayer->Manager(), mParameters);
-      } else if ((itemType == DisplayItemType::TYPE_SUBDOCUMENT ||
-                  itemType == DisplayItemType::TYPE_ZOOM ||
-                  itemType == DisplayItemType::TYPE_RESOLUTION) &&
-                 StaticPrefs::layout_scroll_root_frame_containers()) {
-        newLayerEntry->mBaseScrollMetadata =
-            static_cast<nsDisplaySubDocument*>(item)->ComputeScrollMetadata(
-                ownLayer->Manager(), mParameters);
       }
 
       /**
@@ -5967,12 +5950,8 @@ void ContainerState::Finish(uint32_t* aTextContentFlags,
                             nsDisplayList* aChildItems) {
   mPaintedLayerDataTree.Finish();
 
-  if (!StaticPrefs::layout_scroll_root_frame_containers()) {
-    // Bug 1336544 tracks re-enabling this assertion in the
-    // StaticPrefs::layout_scroll_root_frame_containers() case.
-    NS_ASSERTION(mContainerBounds.IsEqualInterior(mAccumulatedChildBounds),
-                 "Bounds computation mismatch");
-  }
+  NS_ASSERTION(mContainerBounds.IsEqualInterior(mAccumulatedChildBounds),
+               "Bounds computation mismatch");
 
   if (mLayerBuilder->IsBuildingRetainedLayers()) {
     nsIntRegion containerOpaqueRegion;
@@ -6144,6 +6123,14 @@ Size FrameLayerBuilder::ChooseScale(nsIFrame* aContainerFrame,
     scale = Size(1.0, 1.0);
   }
 
+  // Prevent the scale from getting too large, to avoid excessive memory
+  // allocation. Usually memory allocation is limited by the visible region,
+  // which should be restricted to the display port. But at very large scales
+  // the visible region itself can become excessive due to rounding errors.
+  // Clamping the scale here prevents that.
+  scale =
+      Size(std::min(scale.width, 32768.0f), std::min(scale.height, 32768.0f));
+
   return scale;
 }
 
@@ -6305,12 +6292,6 @@ already_AddRefed<ContainerLayer> FrameLayerBuilder::BuildContainerLayerFor(
   const ActiveScrolledRoot* containerScrollMetadataASR =
       aParameters.mScrollMetadataASR;
   const ActiveScrolledRoot* containerCompositorASR = aParameters.mCompositorASR;
-
-  if (!aContainerItem && StaticPrefs::layout_scroll_root_frame_containers()) {
-    containerASR = aBuilder->ActiveScrolledRootForRootScrollframe();
-    containerScrollMetadataASR = containerASR;
-    containerCompositorASR = containerASR;
-  }
 
   ContainerLayerParameters scaleParameters;
   nsRect bounds =
@@ -7022,8 +7003,8 @@ void FrameLayerBuilder::PaintItems(std::vector<AssignedDisplayItem>& aItems,
     }
 
 #ifdef MOZ_DUMP_PAINTING
-    AUTO_PROFILER_LABEL_DYNAMIC_CSTR("FrameLayerBuilder::PaintItems",
-                                     GRAPHICS_Rasterization, item->Name());
+    AUTO_PROFILER_LABEL_DYNAMIC_CSTR_NONSENSITIVE(
+        "FrameLayerBuilder::PaintItems", GRAPHICS_Rasterization, item->Name());
 #else
     AUTO_PROFILER_LABEL("FrameLayerBuilder::PaintItems",
                         GRAPHICS_Rasterization);

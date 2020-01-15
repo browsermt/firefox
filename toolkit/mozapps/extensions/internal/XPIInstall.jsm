@@ -456,10 +456,11 @@ async function loadManifestFromWebManifest(aPackage) {
 
   // Read the list of available locales, and pre-load messages for
   // all locales.
-  let locales =
-    extension.errors.length == 0 ? await extension.initAllLocales() : null;
+  let locales = !extension.errors.length
+    ? await extension.initAllLocales()
+    : null;
 
-  if (extension.errors.length > 0) {
+  if (extension.errors.length) {
     let error = new Error("Extension is invalid");
     // Add detailed errors on the error object so that the front end can display them
     // if needed (eg in about:debugging).
@@ -1170,7 +1171,7 @@ SafeInstallOperation.prototype = {
    * state
    */
   rollback() {
-    while (this._installedFiles.length > 0) {
+    while (this._installedFiles.length) {
       let move = this._installedFiles.pop();
       if (move.isMoveTo) {
         move.newFile.moveTo(move.oldDir.parent, move.oldDir.leafName);
@@ -1185,7 +1186,7 @@ SafeInstallOperation.prototype = {
       }
     }
 
-    while (this._createdDirs.length > 0) {
+    while (this._createdDirs.length) {
       recursiveRemove(this._createdDirs.pop());
     }
   },
@@ -1724,7 +1725,9 @@ class AddonInstall {
       this.existingAddon.userDisabled &&
       !this.existingAddon.pendingUninstall
     ) {
-      await XPIDatabase.updateAddonDisabledState(this.existingAddon, false);
+      await XPIDatabase.updateAddonDisabledState(this.existingAddon, {
+        userDisabled: false,
+      });
       this.state = AddonManager.STATE_INSTALLED;
       this._callInstallListeners("onInstallEnded", this.existingAddon.wrapper);
       return;
@@ -2561,7 +2564,7 @@ var DownloadAddonInstall = class extends AddonInstall {
       );
       let prompt = factory.getPrompt(win, Ci.nsIAuthPrompt2);
 
-      if (this.browser && prompt instanceof Ci.nsILoginManagerPrompter) {
+      if (this.browser && prompt instanceof Ci.nsILoginManagerAuthPrompter) {
         prompt.browser = this.browser;
       }
 
@@ -2898,17 +2901,12 @@ UpdateChecker.prototype = {
       );
     }
 
-    let compatOverrides = AddonManager.strictCompatibility
-      ? null
-      : await AddonRepository.getCompatibilityOverrides(this.addon.id);
-
     let update = await AUC.getNewestCompatibleUpdate(
       aUpdates,
       this.appVersion,
       this.platformVersion,
       ignoreMaxVersion,
-      ignoreStrictCompat,
-      compatOverrides
+      ignoreStrictCompat
     );
 
     if (
@@ -3576,7 +3574,7 @@ class SystemAddonInstaller extends DirectoryInstaller {
         AddonManagerPrivate.hasUpgradeListener(addon.id)
       );
 
-      if (blockers.length > 0) {
+      if (blockers.length) {
         await waitForAllPromises(installs.map(postponeAddon));
       } else {
         await waitForAllPromises(installs.map(installAddon));
@@ -3730,7 +3728,7 @@ var XPIInstall = {
 
   cancelAll() {
     // Cancelling one may alter _inProgress, so don't use a simple iterator
-    while (this._inProgress.length > 0) {
+    while (this._inProgress.length) {
       let c = this._inProgress.shift();
       try {
         c.cancel();

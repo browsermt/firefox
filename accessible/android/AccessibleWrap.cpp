@@ -5,23 +5,37 @@
 
 #include "AccessibleWrap.h"
 
+#include "JavaBuiltins.h"
 #include "Accessible-inl.h"
+#include "HyperTextAccessible-inl.h"
+#include "AccEvent.h"
 #include "AndroidInputType.h"
 #include "DocAccessibleWrap.h"
 #include "IDSet.h"
-#include "JavaBuiltins.h"
 #include "SessionAccessibility.h"
+#include "TextLeafAccessible.h"
+#include "TraversalRule.h"
+#include "Pivot.h"
 #include "nsAccessibilityService.h"
+#include "nsEventShell.h"
 #include "nsPersistentProperties.h"
 #include "nsIAccessibleAnnouncementEvent.h"
 #include "nsIStringBundle.h"
 #include "nsAccUtils.h"
 #include "nsTextEquivUtils.h"
+#include "RootAccessible.h"
 
 #include "mozilla/a11y/PDocAccessibleChild.h"
 #include "mozilla/jni/GeckoBundleUtils.h"
 
 #define ROLE_STRINGS_URL "chrome://global/locale/AccessFu.properties"
+
+// icu TRUE conflicting with java::sdk::Boolean::TRUE()
+// https://searchfox.org/mozilla-central/rev/ce02064d8afc8673cef83c92896ee873bd35e7ae/intl/icu/source/common/unicode/umachine.h#265
+// https://searchfox.org/mozilla-central/source/__GENERATED__/widget/android/bindings/JavaBuiltins.h#78
+#ifdef TRUE
+#  undef TRUE
+#endif
 
 using namespace mozilla::a11y;
 
@@ -79,6 +93,27 @@ nsresult AccessibleWrap::HandleAccEvent(AccEvent* aEvent) {
         }
         break;
       }
+      case nsIAccessibleEvent::EVENT_TEXT_CARET_MOVED: {
+        if (accessible != aEvent->Document() && !aEvent->IsFromUserInput()) {
+          AccCaretMoveEvent* caretEvent = downcast_accEvent(aEvent);
+          if (IsHyperText()) {
+            DOMPoint point =
+                AsHyperText()->OffsetToDOMPoint(caretEvent->GetCaretOffset());
+            if (Accessible* newPos =
+                    doc->GetAccessibleOrContainer(point.node)) {
+              static_cast<AccessibleWrap*>(newPos)->Pivot(
+                  java::SessionAccessibility::HTML_GRANULARITY_DEFAULT, true,
+                  true);
+            }
+          }
+        }
+        break;
+      }
+      case nsIAccessibleEvent::EVENT_SCROLLING_START: {
+        accessible->Pivot(java::SessionAccessibility::HTML_GRANULARITY_DEFAULT,
+                          true, true);
+        break;
+      }
       default:
         break;
     }
@@ -123,15 +158,11 @@ nsresult AccessibleWrap::HandleAccEvent(AccEvent* aEvent) {
 
       RefPtr<AccessibleWrap> newPosition =
           static_cast<AccessibleWrap*>(vcEvent->NewAccessible());
-      auto oldPosition = static_cast<AccessibleWrap*>(vcEvent->OldAccessible());
-
       if (sessionAcc && newPosition) {
-        if (oldPosition != newPosition) {
-          if (vcEvent->Reason() == nsIAccessiblePivot::REASON_POINT) {
-            sessionAcc->SendHoverEnterEvent(newPosition);
-          } else {
-            sessionAcc->SendAccessibilityFocusedEvent(newPosition);
-          }
+        if (vcEvent->Reason() == nsIAccessiblePivot::REASON_POINT) {
+          sessionAcc->SendHoverEnterEvent(newPosition);
+        } else if (vcEvent->BoundaryType() == nsIAccessiblePivot::NO_BOUNDARY) {
+          sessionAcc->SendAccessibilityFocusedEvent(newPosition);
         }
 
         if (vcEvent->BoundaryType() != nsIAccessiblePivot::NO_BOUNDARY) {
@@ -236,6 +267,8 @@ void AccessibleWrap::GetTextContents(nsAString& aText) {
   // In the future this may be smarter and retrieve a flattened string.
   if (IsHyperText()) {
     AsHyperText()->TextSubstring(0, -1, aText);
+  } else if (IsTextLeaf()) {
+    aText = AsTextLeaf()->Text();
   }
 }
 
@@ -246,6 +279,177 @@ bool AccessibleWrap::GetSelectionBounds(int32_t* aStartOffset,
   }
 
   return false;
+}
+
+void AccessibleWrap::Pivot(int32_t aGranularity, bool aForward,
+                           bool aInclusive) {
+  a11y::Pivot pivot(RootAccessible());
+  TraversalRule rule(aGranularity);
+  Accessible* result = aForward ? pivot.Next(this, rule, aInclusive)
+                                : pivot.Prev(this, rule, aInclusive);
+  if (result && (result != this || aInclusive)) {
+    PivotMoveReason reason = aForward ? nsIAccessiblePivot::REASON_NEXT
+                                      : nsIAccessiblePivot::REASON_PREV;
+    RefPtr<AccEvent> event = new AccVCChangeEvent(
+        result->Document(), this, -1, -1, result, -1, -1, reason,
+        nsIAccessiblePivot::NO_BOUNDARY, eFromUserInput);
+    nsEventShell::FireEvent(event);
+  }
+}
+
+void AccessibleWrap::ExploreByTouch(float aX, float aY) {
+  a11y::Pivot pivot(RootAccessible());
+  TraversalRule rule;
+
+  Accessible* result = pivot.AtPoint(aX, aY, rule);
+
+  if (result && result != this) {
+    RefPtr<AccEvent> event =
+        new AccVCChangeEvent(result->Document(), this, -1, -1, result, -1, -1,
+                             nsIAccessiblePivot::REASON_POINT,
+                             nsIAccessiblePivot::NO_BOUNDARY, eFromUserInput);
+    nsEventShell::FireEvent(event);
+  }
+}
+
+void AccessibleWrap::NavigateText(int32_t aGranularity, int32_t aStartOffset,
+                                  int32_t aEndOffset, bool aForward,
+                                  bool aSelect) {
+  a11y::Pivot pivot(RootAccessible());
+
+  HyperTextAccessible* editable =
+      (State() & states::EDITABLE) != 0 ? AsHyperText() : nullptr;
+
+  int32_t start = aStartOffset, end = aEndOffset;
+  // If the accessible is an editable, set the virtual cursor position
+  // to its caret offset. Otherwise use the document's virtual cursor
+  // position as a starting offset.
+  if (editable) {
+    start = end = editable->CaretOffset();
+  }
+
+  uint16_t pivotGranularity = nsIAccessiblePivot::LINE_BOUNDARY;
+  switch (aGranularity) {
+    case 1:  // MOVEMENT_GRANULARITY_CHARACTER
+      pivotGranularity = nsIAccessiblePivot::CHAR_BOUNDARY;
+      break;
+    case 2:  // MOVEMENT_GRANULARITY_WORD
+      pivotGranularity = nsIAccessiblePivot::WORD_BOUNDARY;
+      break;
+    default:
+      break;
+  }
+
+  int32_t newOffset;
+  Accessible* newAnchor = nullptr;
+  if (aForward) {
+    newAnchor = pivot.NextText(this, &start, &end, pivotGranularity);
+    newOffset = end;
+  } else {
+    newAnchor = pivot.PrevText(this, &start, &end, pivotGranularity);
+    newOffset = start;
+  }
+
+  if (newAnchor && (start != aStartOffset || end != aEndOffset)) {
+    if (IsTextLeaf() && newAnchor == Parent()) {
+      // For paragraphs, divs, spans, etc., we put a11y focus on the text leaf
+      // node instead of the HyperTextAccessible. However, Pivot will always
+      // return a HyperTextAccessible. Android doesn't support text navigation
+      // landing on an accessible which is different to the originating
+      // accessible. Therefore, if we're still within the same text leaf,
+      // translate the offsets to the text leaf.
+      int32_t thisChild = IndexInParent();
+      HyperTextAccessible* newHyper = newAnchor->AsHyperText();
+      MOZ_ASSERT(newHyper);
+      int32_t startChild = newHyper->GetChildIndexAtOffset(start);
+      // We use end - 1 because the end offset is exclusive, so end itself
+      // might be associated with the next child.
+      int32_t endChild = newHyper->GetChildIndexAtOffset(end - 1);
+      if (startChild == thisChild && endChild == thisChild) {
+        // We've landed within the same text leaf.
+        newAnchor = this;
+        int32_t thisOffset = newHyper->GetChildOffset(thisChild);
+        start -= thisOffset;
+        end -= thisOffset;
+      }
+    }
+    RefPtr<AccEvent> event = new AccVCChangeEvent(
+        newAnchor->Document(), this, aStartOffset, aEndOffset, newAnchor, start,
+        end, nsIAccessiblePivot::REASON_NONE, pivotGranularity, eFromUserInput);
+    nsEventShell::FireEvent(event);
+  }
+
+  // If we are in an editable, move the caret to the new virtual cursor
+  // offset.
+  if (editable) {
+    if (aSelect) {
+      int32_t anchor = editable->CaretOffset();
+      if (editable->SelectionCount()) {
+        int32_t startSel, endSel;
+        GetSelectionOrCaret(&startSel, &endSel);
+        anchor = startSel == anchor ? endSel : startSel;
+      }
+      editable->SetSelectionBoundsAt(0, anchor, newOffset);
+    } else {
+      editable->SetCaretOffset(newOffset);
+    }
+  }
+}
+
+void AccessibleWrap::SetSelection(int32_t aStart, int32_t aEnd) {
+  if (HyperTextAccessible* textAcc = AsHyperText()) {
+    if (aStart == aEnd) {
+      textAcc->SetCaretOffset(aStart);
+    } else {
+      textAcc->SetSelectionBoundsAt(0, aStart, aEnd);
+    }
+  }
+}
+
+void AccessibleWrap::Cut() {
+  if ((State() & states::EDITABLE) == 0) {
+    return;
+  }
+
+  if (HyperTextAccessible* textAcc = AsHyperText()) {
+    int32_t startSel, endSel;
+    GetSelectionOrCaret(&startSel, &endSel);
+    textAcc->CutText(startSel, endSel);
+  }
+}
+
+void AccessibleWrap::Copy() {
+  if (HyperTextAccessible* textAcc = AsHyperText()) {
+    int32_t startSel, endSel;
+    GetSelectionOrCaret(&startSel, &endSel);
+    textAcc->CopyText(startSel, endSel);
+  }
+}
+
+void AccessibleWrap::Paste() {
+  if ((State() & states::EDITABLE) == 0) {
+    return;
+  }
+
+  if (IsHyperText()) {
+    RefPtr<HyperTextAccessible> textAcc = AsHyperText();
+    int32_t startSel, endSel;
+    GetSelectionOrCaret(&startSel, &endSel);
+    if (startSel != endSel) {
+      textAcc->DeleteText(startSel, endSel);
+    }
+    textAcc->PasteText(startSel);
+  }
+}
+
+void AccessibleWrap::GetSelectionOrCaret(int32_t* aStartOffset,
+                                         int32_t* aEndOffset) {
+  *aStartOffset = *aEndOffset = -1;
+  if (HyperTextAccessible* textAcc = AsHyperText()) {
+    if (!textAcc->SelectionBoundsAt(0, aStartOffset, aEndOffset)) {
+      *aStartOffset = *aEndOffset = textAcc->CaretOffset();
+    }
+  }
 }
 
 uint32_t AccessibleWrap::GetFlags(role aRole, uint64_t aState,
@@ -477,6 +681,12 @@ mozilla::java::GeckoBundle::LocalRef AccessibleWrap::ToBundle(
       java::sdk::Integer::ValueOf(parent ? parent->VirtualViewID() : 0));
 
   role role = WrapperRole();
+  if (role == roles::LINK && !(aState & states::LINKED)) {
+    // A link without the linked state (<a> with no href) shouldn't be presented
+    // as a link.
+    role = roles::TEXT;
+  }
+
   uint32_t flags = GetFlags(role, aState, aActionCount);
   GECKOBUNDLE_PUT(nodeInfo, "flags", java::sdk::Integer::ValueOf(flags));
   GECKOBUNDLE_PUT(nodeInfo, "className",
@@ -677,7 +887,7 @@ bool AccessibleWrap::HandleLiveRegionEvent(AccEvent* aEvent) {
     Accessible* atomicAncestor = nullptr;
     for (Accessible* parent = announcementTarget; parent;
          parent = parent->Parent()) {
-      Element* element = parent->Elm();
+      dom::Element* element = parent->Elm();
       if (element &&
           element->AttrValueIs(kNameSpaceID_None, nsGkAtoms::aria_atomic,
                                nsGkAtoms::_true, eCaseMatters)) {

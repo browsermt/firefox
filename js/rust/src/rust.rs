@@ -137,7 +137,7 @@ impl Runtime {
                     }
 
                     let context = JS_NewContext(
-                        DEFAULT_HEAPSIZE, ChunkSize as u32, ptr::null_mut());
+                        DEFAULT_HEAPSIZE, ptr::null_mut());
                     assert!(!context.is_null());
                     JS::InitSelfHostedCode(context);
                     PARENT.set(context);
@@ -160,7 +160,6 @@ impl Runtime {
             assert_eq!(IsDebugBuild(), cfg!(feature = "debugmozjs"));
 
             let js_context = JS_NewContext(DEFAULT_HEAPSIZE,
-                                           ChunkSize as u32,
                                            JS_GetParentRuntime(PARENT.get()));
             assert!(!js_context.is_null());
 
@@ -284,7 +283,7 @@ impl RootKind for *mut JSObject {
     fn rootKind() -> JS::RootKind { JS::RootKind::Object }
 }
 
-impl RootKind for *mut JSFlatString {
+impl RootKind for *mut JSLinearString {
     #[inline(always)]
     fn rootKind() -> JS::RootKind { JS::RootKind::String }
 }
@@ -559,12 +558,6 @@ impl Default for JS::RealmOptions {
     fn default() -> Self { unsafe { ::std::mem::zeroed() } }
 }
 
-const ChunkShift: usize = 20;
-const ChunkSize: usize = 1 << ChunkShift;
-
-#[cfg(target_pointer_width = "32")]
-const ChunkLocationOffset: usize = ChunkSize - 2 * 4 - 8;
-
 pub trait GCMethods {
     unsafe fn initial() -> Self;
     unsafe fn write_barriers(v: *mut Self, prev: Self, next: Self);
@@ -573,6 +566,15 @@ pub trait GCMethods {
 impl GCMethods for jsid {
     unsafe fn initial() -> jsid { Default::default() }
     unsafe fn write_barriers(_: *mut jsid, _: jsid, _: jsid) {}
+}
+
+#[cfg(feature = "bigint")]
+impl GCMethods for *mut JS::BigInt {
+    unsafe fn initial() -> *mut JS::BigInt { ptr::null_mut() }
+    unsafe fn write_barriers(v: *mut *mut JS::BigInt, prev: *mut JS::BigInt,
+                             next: *mut JS::BigInt) {
+        JS::HeapBigIntWriteBarriers(v, prev, next);
+    }
 }
 
 impl GCMethods for *mut JSObject {

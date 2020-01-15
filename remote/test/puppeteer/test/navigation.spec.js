@@ -137,7 +137,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       server.setRoute('/empty.html', (req, res) => { });
       let error = null;
       await page.goto(server.PREFIX + '/empty.html', {timeout: 1}).catch(e => error = e);
-      expect(error.message).toContain('Navigation Timeout Exceeded: 1ms');
+      expect(error.message).toContain('Navigation timeout of 1 ms exceeded');
       expect(error).toBeInstanceOf(puppeteer.errors.TimeoutError);
     });
     it('should fail when exceeding default maximum navigation timeout', async({page, server}) => {
@@ -146,7 +146,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       let error = null;
       page.setDefaultNavigationTimeout(1);
       await page.goto(server.PREFIX + '/empty.html').catch(e => error = e);
-      expect(error.message).toContain('Navigation Timeout Exceeded: 1ms');
+      expect(error.message).toContain('Navigation timeout of 1 ms exceeded');
       expect(error).toBeInstanceOf(puppeteer.errors.TimeoutError);
     });
     it('should fail when exceeding default maximum timeout', async({page, server}) => {
@@ -155,7 +155,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       let error = null;
       page.setDefaultTimeout(1);
       await page.goto(server.PREFIX + '/empty.html').catch(e => error = e);
-      expect(error.message).toContain('Navigation Timeout Exceeded: 1ms');
+      expect(error.message).toContain('Navigation timeout of 1 ms exceeded');
       expect(error).toBeInstanceOf(puppeteer.errors.TimeoutError);
     });
     it('should prioritize default navigation timeout over default timeout', async({page, server}) => {
@@ -165,7 +165,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       page.setDefaultTimeout(0);
       page.setDefaultNavigationTimeout(1);
       await page.goto(server.PREFIX + '/empty.html').catch(e => error = e);
-      expect(error.message).toContain('Navigation Timeout Exceeded: 1ms');
+      expect(error.message).toContain('Navigation timeout of 1 ms exceeded');
       expect(error).toBeInstanceOf(puppeteer.errors.TimeoutError);
     });
     it('should disable timeout when its set to 0', async({page, server}) => {
@@ -180,7 +180,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       const response = await page.goto(server.EMPTY_PAGE);
       expect(response.ok()).toBe(true);
     });
-    it_fails_ffox('should work when navigating to data url', async({page, server}) => {
+    it('should work when navigating to data url', async({page, server}) => {
       const response = await page.goto('data:text/html,hello');
       expect(response.ok()).toBe(true);
     });
@@ -284,7 +284,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       process.removeListener('warning', warningHandler);
       expect(warning).toBe(null);
     });
-    it_fails_ffox('should navigate to dataURL and fire dataURL requests', async({page, server}) => {
+    it('should navigate to dataURL and fire dataURL requests', async({page, server}) => {
       const requests = [];
       page.on('request', request => !utils.isFavicon(request) && requests.push(request));
       const dataURL = 'data:text/html,<div>yo</div>';
@@ -293,7 +293,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       expect(requests.length).toBe(1);
       expect(requests[0].url()).toBe(dataURL);
     });
-    it_fails_ffox('should navigate to URL with hash and fire requests without hash', async({page, server}) => {
+    it('should navigate to URL with hash and fire requests without hash', async({page, server}) => {
       const requests = [];
       page.on('request', request => !utils.isFavicon(request) && requests.push(request));
       const response = await page.goto(server.EMPTY_PAGE + '#hash');
@@ -401,7 +401,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       expect(response).toBe(null);
       expect(page.url()).toBe(server.PREFIX + '/replaced.html');
     });
-    it_fails_ffox('should work with DOM history.back()/history.forward()', async({page, server}) => {
+    it('should work with DOM history.back()/history.forward()', async({page, server}) => {
       await page.goto(server.EMPTY_PAGE);
       await page.setContent(`
         <a id=back onclick='javascript:goBack()'>back</a>
@@ -427,7 +427,7 @@ module.exports.addTests = function({testRunner, expect, puppeteer, CHROME}) {
       expect(forwardResponse).toBe(null);
       expect(page.url()).toBe(server.PREFIX + '/second.html');
     });
-    it('should work when subframe issues window.stop()', async({page, server}) => {
+    it_fails_ffox('should work when subframe issues window.stop()', async({page, server}) => {
       server.setRoute('/frames/style.css', (req, res) => {});
       const navigationPromise = page.goto(server.PREFIX + '/frames/one-frame.html');
       const frame = await utils.waitEvent(page, 'frameattached');

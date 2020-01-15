@@ -324,6 +324,7 @@ typename nsTSubstring<T>::size_type nsTSubstring<T>::Capacity() const {
       capacity = (hdr->StorageSize() / sizeof(char_type)) - 1;
     }
   } else if (this->mDataFlags & DataFlags::INLINE) {
+    MOZ_ASSERT(this->mClassFlags & ClassFlags::INLINE);
     capacity = AsAutoString(this)->mInlineCapacity;
   } else if (this->mDataFlags & DataFlags::OWNED) {
     // we don't store the capacity of an adopted buffer because that would
@@ -1051,6 +1052,13 @@ template <typename T>
 bool nsTStringRepr<T>::EqualsASCII(const char* aData) const {
   return char_traits::compareASCIINullTerminated(this->mData, this->mLength,
                                                  aData) == 0;
+}
+
+template <typename T>
+bool nsTStringRepr<T>::EqualsLatin1(const char* aData,
+                                    const size_type aLength) const {
+  return (this->mLength == aLength) &&
+         char_traits::equalsLatin1(this->mData, aData, aLength);
 }
 
 template <typename T>

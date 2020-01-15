@@ -101,7 +101,6 @@
 #include "mozilla/EndianUtils.h"
 #include "mozilla/Likely.h"
 
-#include "nsIInputStream.h"
 #include "RasterImage.h"
 #include <algorithm>
 
@@ -658,8 +657,8 @@ LexerTransition<nsBMPDecoder::State> nsBMPDecoder::ReadBitfields(
 
   MOZ_ASSERT(!mImageData, "Already have a buffer allocated?");
   nsresult rv = AllocateFrame(OutputSize(), mMayHaveTransparency
-                                                ? SurfaceFormat::B8G8R8A8
-                                                : SurfaceFormat::B8G8R8X8);
+                                                ? SurfaceFormat::OS_RGBA
+                                                : SurfaceFormat::OS_RGBX);
   if (NS_FAILED(rv)) {
     return Transition::TerminateFailure();
   }

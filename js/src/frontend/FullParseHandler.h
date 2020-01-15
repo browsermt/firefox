@@ -15,6 +15,7 @@
 
 #include "frontend/ParseNode.h"
 #include "frontend/SharedContext.h"
+#include "frontend/Stencil.h"
 #include "vm/JSContext.h"
 
 namespace js {
@@ -102,7 +103,22 @@ class FullParseHandler {
         lazyOuterFunction_(cx, lazyOuterFunction),
         lazyInnerFunctionIndex(0),
         lazyClosedOverBindingIndex(0),
-        sourceKind_(kind) {}
+        sourceKind_(kind) {
+    // The LazyScript::gcthings() array contains the inner function list
+    // followed by the closed-over bindings data. Advance the index for
+    // closed-over bindings to the end of the inner functions. The
+    // nextLazyInnerFunction / nextLazyClosedOverBinding accessors confirm we
+    // have the expected types. See also: LazyScript::Create.
+    if (lazyOuterFunction) {
+      for (JS::GCCellPtr gcThing : lazyOuterFunction->gcthings()) {
+        if (gcThing.is<JSObject>()) {
+          lazyClosedOverBindingIndex++;
+        } else {
+          break;
+        }
+      }
+    }
+  }
 
   static NullNode null() { return NullNode(); }
 
@@ -148,6 +164,13 @@ class FullParseHandler {
     return new_<BigIntLiteral>(box, pos);
   }
 
+  // This variant requires two phase initializaton to ensure ownership is clear
+  // in an OOM situation.
+  BigIntLiteralType newBigInt(BigIntIndex index, ParseInfo& parseInfo,
+                              const TokenPos& pos) {
+    return new_<BigIntLiteral>(index, parseInfo, pos);
+  }
+
   BooleanLiteralType newBooleanLiteral(bool cond, const TokenPos& pos) {
     return new_<BooleanLiteral>(cond, pos);
   }
@@ -179,6 +202,9 @@ class FullParseHandler {
   void addToCallSiteObject(CallSiteNodeType callSiteObj, Node rawNode,
                            Node cookedNode) {
     MOZ_ASSERT(callSiteObj->isKind(ParseNodeKind::CallSiteObj));
+    MOZ_ASSERT(rawNode->isKind(ParseNodeKind::TemplateStringExpr));
+    MOZ_ASSERT(cookedNode->isKind(ParseNodeKind::TemplateStringExpr) ||
+               cookedNode->isKind(ParseNodeKind::RawUndefinedExpr));
 
     addArrayElement(callSiteObj, cookedNode);
     addArrayElement(callSiteObj->rawNodes(), rawNode);
@@ -213,6 +239,10 @@ class FullParseHandler {
       return null();
     }
     return new_<RegExpLiteral>(objbox, pos);
+  }
+
+  RegExpLiteralType newRegExp(RegExpIndex index, const TokenPos& pos) {
+    return new_<RegExpLiteral>(index, pos);
   }
 
   ConditionalExpressionType newConditional(Node cond, Node thenExpr,
@@ -894,6 +924,7 @@ class FullParseHandler {
 
   bool isUsableAsObjectPropertyName(Node node) {
     return node->isKind(ParseNodeKind::NumberExpr) ||
+           node->isKind(ParseNodeKind::BigIntExpr) ||
            node->isKind(ParseNodeKind::ObjectPropertyName) ||
            node->isKind(ParseNodeKind::StringExpr) ||
            node->isKind(ParseNodeKind::ComputedName);
@@ -1026,15 +1057,23 @@ class FullParseHandler {
   bool canSkipLazyInnerFunctions() { return !!lazyOuterFunction_; }
   bool canSkipLazyClosedOverBindings() { return !!lazyOuterFunction_; }
   JSFunction* nextLazyInnerFunction() {
-    MOZ_ASSERT(lazyInnerFunctionIndex <
-               lazyOuterFunction_->numInnerFunctions());
-    return lazyOuterFunction_->innerFunctions()[lazyInnerFunctionIndex++];
+    return &lazyOuterFunction_->gcthings()[lazyInnerFunctionIndex++]
+                .as<JSObject>()
+                .as<JSFunction>();
   }
   JSAtom* nextLazyClosedOverBinding() {
-    MOZ_ASSERT(lazyClosedOverBindingIndex <
-               lazyOuterFunction_->numClosedOverBindings());
-    return lazyOuterFunction_
-        ->closedOverBindings()[lazyClosedOverBindingIndex++];
+    auto gcthings = lazyOuterFunction_->gcthings();
+
+    // Trailing nullptrs were elided in PerHandlerParser::finishFunction().
+    if (lazyClosedOverBindingIndex >= gcthings.Length()) {
+      return nullptr;
+    }
+
+    // These entries are either JSAtom* or nullptr, so use the 'asCell()'
+    // accessor which is faster.
+    gc::Cell* cell = gcthings[lazyClosedOverBindingIndex++].asCell();
+    MOZ_ASSERT_IF(cell, cell->is<JSAtom>());
+    return static_cast<JSAtom*>(cell);
   }
 };
 

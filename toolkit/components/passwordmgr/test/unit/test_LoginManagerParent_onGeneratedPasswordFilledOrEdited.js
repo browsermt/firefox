@@ -5,7 +5,7 @@
 "use strict";
 
 const { sinon } = ChromeUtils.import("resource://testing-common/Sinon.jsm");
-const { LoginManagerParent: LMP } = ChromeUtils.import(
+const { LoginManagerParent } = ChromeUtils.import(
   "resource://gre/modules/LoginManagerParent.jsm"
 );
 const { LoginManagerPrompter } = ChromeUtils.import(
@@ -18,6 +18,8 @@ const loginTemplate = Object.freeze({
   origin: "https://www.example.com",
   formActionOrigin: "https://www.mozilla.org",
 });
+
+let LMP = new LoginManagerParent();
 
 function stubPrompter() {
   let fakePromptToSavePassword = sinon.stub();
@@ -57,14 +59,17 @@ function stubPrompter() {
 }
 
 function stubGeneratedPasswordForBrowsingContextId(id) {
-  ok(LMP._browsingContextGlobal, "Check _browsingContextGlobal exists");
   ok(
-    !LMP._browsingContextGlobal.get(id),
+    LoginManagerParent._browsingContextGlobal,
+    "Check _browsingContextGlobal exists"
+  );
+  ok(
+    !LoginManagerParent._browsingContextGlobal.get(id),
     `BrowsingContext ${id} shouldn't exist yet`
   );
   info(`Stubbing BrowsingContext.get(${id})`);
   let stub = sinon
-    .stub(LMP._browsingContextGlobal, "get")
+    .stub(LoginManagerParent._browsingContextGlobal, "get")
     .withArgs(id)
     .callsFake(() => {
       return {
@@ -73,13 +78,26 @@ function stubGeneratedPasswordForBrowsingContextId(id) {
             "https://www.example.com^userContextId=6"
           ),
         },
+        get embedderElement() {
+          info("returning embedderElement");
+          let browser = MockDocument.createTestDocument(
+            "chrome://browser/content/browser.xhtml",
+            `<box xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+              <browser></browser>
+             </box>`,
+            "application/xml",
+            true
+          ).querySelector("browser");
+          MockDocument.mockBrowsingContextProperty(browser, this);
+          return browser;
+        },
         get top() {
           return this;
         },
       };
     });
   ok(
-    LMP._browsingContextGlobal.get(id),
+    LoginManagerParent._browsingContextGlobal.get(id),
     `Checking BrowsingContext.get(${id}) stub`
   );
 
@@ -90,15 +108,19 @@ function stubGeneratedPasswordForBrowsingContextId(id) {
     LoginTestUtils.generation.LENGTH,
     "Check password length"
   );
-  equal(LMP._generatedPasswordsByPrincipalOrigin.size, 1, "1 added to cache");
   equal(
-    LMP._generatedPasswordsByPrincipalOrigin.get(
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().size,
+    1,
+    "1 added to cache"
+  );
+  equal(
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
       "https://www.example.com^userContextId=6"
     ).value,
     generatedPassword,
     "Cache key and value"
   );
-  LMP._browsingContextGlobal.get.resetHistory();
+  LoginManagerParent._browsingContextGlobal.get.resetHistory();
 
   return {
     stub,
@@ -112,37 +134,41 @@ function checkEditTelemetryRecorded(expectedCount, msg) {
     Ci.nsITelemetry.DATASET_PRERELEASE_CHANNELS,
     false
   );
-  const telemetryProps = Object.freeze({
-    category: "pwmgr",
-    method: "filled_field_edited",
-    object: "generatedpassword",
-  });
-  const results = snapshot.parent.filter(([time, category, method, object]) => {
-    return (
-      category === telemetryProps.category &&
-      method === telemetryProps.method &&
-      object === telemetryProps.object
+  let resultsCount = 0;
+  if ("parent" in snapshot) {
+    const telemetryProps = Object.freeze({
+      category: "pwmgr",
+      method: "filled_field_edited",
+      object: "generatedpassword",
+    });
+    const results = snapshot.parent.filter(
+      ([time, category, method, object]) => {
+        return (
+          category === telemetryProps.category &&
+          method === telemetryProps.method &&
+          object === telemetryProps.object
+        );
+      }
     );
-  });
+    resultsCount = results.length;
+  }
   equal(
-    results.length,
+    resultsCount,
     expectedCount,
     "Check count of pwmgr.filled_field_edited for generatedpassword: " + msg
   );
 }
 
 function startTestConditions(contextId) {
+  LMP.useBrowsingContext(contextId);
+
   ok(
     LMP._onGeneratedPasswordFilledOrEdited,
     "LMP._onGeneratedPasswordFilledOrEdited exists"
   );
+  equal(LMP.getGeneratedPassword(), null, "Null with no BrowsingContext");
   equal(
-    LMP.getGeneratedPassword(contextId),
-    null,
-    "Null with no BrowsingContext"
-  );
-  equal(
-    LMP._generatedPasswordsByPrincipalOrigin.size,
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().size,
     0,
     "Empty cache to start"
   );
@@ -193,7 +219,7 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited() {
     "Should have no saved logins at the start of the test"
   );
 
-  LMP._onGeneratedPasswordFilledOrEdited({
+  await LMP._onGeneratedPasswordFilledOrEdited({
     browsingContextId: 99,
     formActionOrigin: "https://www.mozilla.org",
     password: generatedPassword,
@@ -216,11 +242,11 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited() {
     "Checking promptToChangePassword was called"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[2],
+    fakePromptToChangePassword.getCall(0).args[3],
     "promptToChangePassword had a truthy 'dismissed' argument"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[3],
+    fakePromptToChangePassword.getCall(0).args[4],
     "promptToChangePassword had a truthy 'notifySaved' argument"
   );
 
@@ -236,7 +262,7 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited() {
     username: "someusername",
     password: newPassword,
   });
-  let generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+  let generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
     "https://www.example.com^userContextId=6"
   );
   ok(generatedPW.edited, "Cached edited boolean should be true");
@@ -265,7 +291,7 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited() {
     username: "someusername",
     password: newerPassword,
   });
-  generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+  generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
     "https://www.example.com^userContextId=6"
   );
   ok(generatedPW.edited, "Cached edited state should remain true");
@@ -282,9 +308,9 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited() {
 
   checkEditTelemetryRecorded(1, "with auto-save");
 
-  LMP._browsingContextGlobal.get.restore();
+  LoginManagerParent._browsingContextGlobal.get.restore();
   restorePrompter();
-  LMP._generatedPasswordsByPrincipalOrigin.clear();
+  LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
   Services.logins.removeAllLogins();
   Services.telemetry.clearEvents();
 });
@@ -305,7 +331,7 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited_editToEmpty() {
     "Should have no saved logins at the start of the test"
   );
 
-  LMP._onGeneratedPasswordFilledOrEdited({
+  await LMP._onGeneratedPasswordFilledOrEdited({
     browsingContextId: 99,
     formActionOrigin: "https://www.mozilla.org",
     password: generatedPassword,
@@ -328,11 +354,11 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited_editToEmpty() {
     "Checking promptToChangePassword was called"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[2],
+    fakePromptToChangePassword.getCall(0).args[3],
     "promptToChangePassword had a truthy 'dismissed' argument"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[3],
+    fakePromptToChangePassword.getCall(0).args[4],
     "promptToChangePassword had a truthy 'notifySaved' argument"
   );
 
@@ -344,7 +370,7 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited_editToEmpty() {
     username: "someusername",
     password: newPassword,
   });
-  let generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+  let generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
     "https://www.example.com^userContextId=6"
   );
   ok(!generatedPW.edited, "Cached edited boolean should be false");
@@ -356,9 +382,9 @@ add_task(async function test_onGeneratedPasswordFilledOrEdited_editToEmpty() {
 
   checkEditTelemetryRecorded(0, "Blanking doesn't count as an edit");
 
-  LMP._browsingContextGlobal.get.restore();
+  LoginManagerParent._browsingContextGlobal.get.restore();
   restorePrompter();
-  LMP._generatedPasswordsByPrincipalOrigin.clear();
+  LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
   Services.logins.removeAllLogins();
   Services.telemetry.clearEvents();
 });
@@ -379,7 +405,7 @@ add_task(async function test_addUsernameBeforeAutoSaveEdit() {
     "Should have no saved logins at the start of the test"
   );
 
-  LMP._onGeneratedPasswordFilledOrEdited({
+  await LMP._onGeneratedPasswordFilledOrEdited({
     browsingContextId: 99,
     formActionOrigin: "https://www.mozilla.org",
     password: generatedPassword,
@@ -402,18 +428,18 @@ add_task(async function test_addUsernameBeforeAutoSaveEdit() {
     "Checking promptToChangePassword was called"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[2],
+    fakePromptToChangePassword.getCall(0).args[3],
     "promptToChangePassword had a truthy 'dismissed' argument"
   );
   ok(
-    fakePromptToChangePassword.getCall(0).args[3],
+    fakePromptToChangePassword.getCall(0).args[4],
     "promptToChangePassword had a truthy 'notifySaved' argument"
   );
 
   info("Add a username in storage");
   let loginWithUsername = login.clone();
   loginWithUsername.username = "added_username";
-  LoginManagerPrompter.prototype._updateLogin(login, loginWithUsername);
+  LoginManagerPrompter._updateLogin(login, loginWithUsername);
 
   info("Edit the password");
   const newPassword = generatedPassword + "🔥";
@@ -427,7 +453,7 @@ add_task(async function test_addUsernameBeforeAutoSaveEdit() {
     username: "someusername",
     password: newPassword,
   });
-  let generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+  let generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
     "https://www.example.com^userContextId=6"
   );
   ok(generatedPW.edited, "Cached edited boolean should be true");
@@ -457,7 +483,7 @@ add_task(async function test_addUsernameBeforeAutoSaveEdit() {
     username: "someusername",
     password: newerPassword,
   });
-  generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+  generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
     "https://www.example.com^userContextId=6"
   );
   ok(generatedPW.edited, "Cached edited state should remain true");
@@ -475,9 +501,9 @@ add_task(async function test_addUsernameBeforeAutoSaveEdit() {
 
   checkEditTelemetryRecorded(1, "with auto-save");
 
-  LMP._browsingContextGlobal.get.restore();
+  LoginManagerParent._browsingContextGlobal.get.restore();
   restorePrompter();
-  LMP._generatedPasswordsByPrincipalOrigin.clear();
+  LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
   Services.logins.removeAllLogins();
   Services.telemetry.clearEvents();
 });
@@ -503,9 +529,9 @@ add_task(
     ok(LMP._getPrompter.notCalled, "Checking _getPrompter wasn't called");
 
     // Clean up
-    LMP._browsingContextGlobal.get.restore();
+    LoginManagerParent._browsingContextGlobal.get.restore();
     restorePrompter();
-    LMP._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
     Services.logins.setLoginSavingEnabled("https://www.example.com", true);
     Services.logins.removeAllLogins();
   }
@@ -513,7 +539,7 @@ add_task(
 
 add_task(
   async function test_onGeneratedPasswordFilledOrEdited_withSavedEmptyUsername() {
-    startTestConditions();
+    startTestConditions(99);
     let login0Props = Object.assign({}, loginTemplate, {
       username: "",
       password: "qweqweq",
@@ -549,11 +575,11 @@ add_task(
       "Checking promptToChangePassword was called"
     );
     ok(
-      fakePromptToChangePassword.getCall(0).args[2],
+      fakePromptToChangePassword.getCall(0).args[3],
       "promptToChangePassword had a truthy 'dismissed' argument"
     );
     ok(
-      !fakePromptToChangePassword.getCall(0).args[3],
+      !fakePromptToChangePassword.getCall(0).args[4],
       "promptToChangePassword had a falsey 'notifySaved' argument"
     );
 
@@ -565,7 +591,7 @@ add_task(
       username: "someusername",
       password: newPassword,
     });
-    let generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+    let generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
       "https://www.example.com^userContextId=6"
     );
     ok(generatedPW.edited, "Cached edited boolean should be true");
@@ -581,9 +607,9 @@ add_task(
 
     checkEditTelemetryRecorded(1, "Updating cache, not storage (no auto-save)");
 
-    LMP._browsingContextGlobal.get.restore();
+    LoginManagerParent._browsingContextGlobal.get.restore();
     restorePrompter();
-    LMP._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
     Services.logins.removeAllLogins();
     Services.telemetry.clearEvents();
   }
@@ -592,7 +618,7 @@ add_task(
 add_task(
   async function test_onGeneratedPasswordFilledOrEdited_withSavedEmptyUsernameAndUsernameValue() {
     // Save as the above task but with a non-empty username field value.
-    startTestConditions();
+    startTestConditions(99);
     let login0Props = Object.assign({}, loginTemplate, {
       username: "",
       password: "qweqweq",
@@ -637,11 +663,11 @@ add_task(
       "Checking promptToSavePassword was called"
     );
     ok(
-      fakePromptToSavePassword.getCall(0).args[1],
+      fakePromptToSavePassword.getCall(0).args[2],
       "promptToSavePassword had a truthy 'dismissed' argument"
     );
     ok(
-      !fakePromptToSavePassword.getCall(0).args[2],
+      !fakePromptToSavePassword.getCall(0).args[3],
       "promptToSavePassword had a falsey 'notifySaved' argument"
     );
 
@@ -662,15 +688,15 @@ add_task(
       "Checking promptToSavePassword was called again"
     );
     ok(
-      fakePromptToSavePassword.getCall(1).args[1],
+      fakePromptToSavePassword.getCall(1).args[2],
       "promptToSavePassword had a truthy 'dismissed' argument"
     );
     ok(
-      !fakePromptToSavePassword.getCall(1).args[2],
+      !fakePromptToSavePassword.getCall(1).args[3],
       "promptToSavePassword had a falsey 'notifySaved' argument"
     );
 
-    let generatedPW = LMP._generatedPasswordsByPrincipalOrigin.get(
+    let generatedPW = LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().get(
       "https://www.example.com^userContextId=6"
     );
     ok(generatedPW.edited, "Cached edited boolean should be true");
@@ -689,9 +715,9 @@ add_task(
       "Updating cache, not storage (no auto-save) with username in field"
     );
 
-    LMP._browsingContextGlobal.get.restore();
+    LoginManagerParent._browsingContextGlobal.get.restore();
     restorePrompter();
-    LMP._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
     Services.logins.removeAllLogins();
     Services.telemetry.clearEvents();
   }
@@ -699,7 +725,7 @@ add_task(
 
 add_task(
   async function test_onGeneratedPasswordFilledOrEdited_withEmptyUsernameDifferentFormActionOrigin() {
-    startTestConditions();
+    startTestConditions(99);
     let login0Props = Object.assign({}, loginTemplate, {
       username: "",
       password: "qweqweq",
@@ -740,24 +766,24 @@ add_task(
       "Checking promptToChangePassword was called"
     );
     ok(
-      fakePromptToChangePassword.getCall(0).args[1],
+      fakePromptToChangePassword.getCall(0).args[2],
       "promptToChangePassword had a truthy 'dismissed' argument"
     );
     ok(
-      fakePromptToChangePassword.getCall(0).args[2],
+      fakePromptToChangePassword.getCall(0).args[3],
       "promptToChangePassword had a truthy 'notifySaved' argument"
     );
 
-    LMP._browsingContextGlobal.get.restore();
+    LoginManagerParent._browsingContextGlobal.get.restore();
     restorePrompter();
-    LMP._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
     Services.logins.removeAllLogins();
   }
 );
 
 add_task(
   async function test_onGeneratedPasswordFilledOrEdited_withSavedUsername() {
-    startTestConditions();
+    startTestConditions(99);
     let login0Props = Object.assign({}, loginTemplate, {
       username: "previoususer",
       password: "qweqweq",
@@ -796,17 +822,17 @@ add_task(
       "Checking promptToChangePassword was called"
     );
     ok(
-      fakePromptToChangePassword.getCall(0).args[1],
+      fakePromptToChangePassword.getCall(0).args[2],
       "promptToChangePassword had a truthy 'dismissed' argument"
     );
     ok(
-      fakePromptToChangePassword.getCall(0).args[2],
+      fakePromptToChangePassword.getCall(0).args[3],
       "promptToChangePassword had a truthy 'notifySaved' argument"
     );
 
-    LMP._browsingContextGlobal.get.restore();
+    LoginManagerParent._browsingContextGlobal.get.restore();
     restorePrompter();
-    LMP._generatedPasswordsByPrincipalOrigin.clear();
+    LoginManagerParent.getGeneratedPasswordsByPrincipalOrigin().clear();
     Services.logins.removeAllLogins();
   }
 );

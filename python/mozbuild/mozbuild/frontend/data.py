@@ -242,6 +242,10 @@ class HostDefines(BaseDefines):
     pass
 
 
+class WasmDefines(BaseDefines):
+    pass
+
+
 class WebIDLCollection(ContextDerived):
     """Collects WebIDL info referenced during the build."""
 
@@ -402,8 +406,6 @@ class Linkable(ContextDerived):
         'lib_defines',
         'linked_libraries',
         'linked_system_libs',
-        'no_pgo_sources',
-        'no_pgo',
         'sources',
     )
 
@@ -414,8 +416,6 @@ class Linkable(ContextDerived):
         self.linked_system_libs = []
         self.lib_defines = Defines(context, {})
         self.sources = defaultdict(list)
-        self.no_pgo_sources = []
-        self.no_pgo = False
 
     def link_library(self, obj):
         assert isinstance(obj, BaseLibrary)
@@ -457,12 +457,12 @@ class Linkable(ContextDerived):
 
         return [mozpath.join(self.objdir, '%s%s.%s' % (obj_prefix,
                                                        mozpath.splitext(mozpath.basename(f))[0],
-                                                       self.config.substs.get('OBJ_SUFFIX', '')))
+                                                       self._obj_suffix()))
                 for f in sources]
 
-    @property
-    def no_pgo_objs(self):
-        return self._get_objs(self.no_pgo_sources)
+    def _obj_suffix(self):
+        """Can be overridden by a base class for custom behavior."""
+        return self.config.substs.get('OBJ_SUFFIX', '')
 
     @property
     def objs(self):
@@ -668,6 +668,32 @@ class StaticLibrary(Library):
         Library.__init__(self, context, basename, real_name)
         self.link_into = link_into
         self.no_expand_lib = no_expand_lib
+
+
+class SandboxedWasmLibrary(Library):
+    """Context derived container object for a static sandboxed wasm library"""
+    # This is a real static library; make it known to the build system.
+    no_expand_lib = True
+    KIND = 'wasm'
+
+    def __init__(self, context, basename, real_name=None):
+        Library.__init__(self, context, basename, real_name)
+
+        # TODO: WASM sandboxed libraries are in a weird place: they are
+        # built in a different way, but they should share some code with
+        # SharedLibrary.  This is the minimal configuration needed to work
+        # with Linux, but it would need to be extended for other platforms.
+        assert context.config.substs['OS_TARGET'] == 'Linux'
+
+        self.lib_name = '%s%s%s' % (
+            context.config.dll_prefix,
+            real_name or basename,
+            context.config.dll_suffix,
+        )
+
+    def _obj_suffix(self):
+        """Can be overridden by a base class for custom behavior."""
+        return self.config.substs.get('WASM_OBJ_SUFFIX', '')
 
 
 class BaseRustLibrary(object):
@@ -1034,6 +1060,20 @@ class HostGeneratedSources(HostMixin, BaseSources):
         BaseSources.__init__(self, context, files, canonical_suffix)
 
 
+class WasmSources(BaseSources):
+    """Represents files to be compiled with the wasm compiler during the build."""
+
+    def __init__(self, context, files, canonical_suffix):
+        BaseSources.__init__(self, context, files, canonical_suffix)
+
+
+class WasmGeneratedSources(BaseSources):
+    """Represents generated files to be compiled with the wasm compiler during the build."""
+
+    def __init__(self, context, files, canonical_suffix):
+        BaseSources.__init__(self, context, files, canonical_suffix)
+
+
 class UnifiedSources(BaseSources):
     """Represents files to be compiled in a unified fashion during the build."""
 
@@ -1206,19 +1246,27 @@ class GeneratedFile(ContextDerived):
         self.localized = localized
         self.force = force
 
-        suffixes = (
+        suffixes = [
             '.h',
             '.inc',
             '.py',
             '.rs',
-            'node.stub',  # To avoid VPATH issues with installing node files:
-                          # https://bugzilla.mozilla.org/show_bug.cgi?id=1461714#c55
             # We need to compile Java to generate JNI wrappers for native code
             # compilation to consume.
             'android_apks',
             '.profdata',
             '.webidl'
-        )
+        ]
+
+        try:
+            lib_suffix = context.config.substs['LIB_SUFFIX']
+            suffixes.append('.' + lib_suffix)
+        except KeyError:
+            # Tests may not define LIB_SUFFIX
+            pass
+
+        suffixes = tuple(suffixes)
+
         self.required_before_compile = [
             f for f in self.outputs if f.endswith(suffixes) or 'stl_wrappers/' in f]
 

@@ -18,7 +18,6 @@ DIRS += [
     'source-map',
     'sourceeditor',
     'vendor',
-    'webpack',
     'widgets',
 ]
 
@@ -31,7 +30,6 @@ DevToolsModules(
     'curl.js',
     'demangle.js',
     'devices.js',
-    'DOMHelpers.jsm',
     'enum.js',
     'events.js',
     'focus.js',
@@ -53,6 +51,7 @@ DevToolsModules(
     'suggestion-picker.js',
     'telemetry.js',
     'theme.js',
+    'thread-utils.js',
     'undo.js',
     'unicode-url.js',
     'view-source.js',

@@ -32,20 +32,19 @@ var security = {
 
   viewCert() {
     if (Services.prefs.getBoolPref("security.aboutcertificate.enabled")) {
-      let certChain = getCertificateChain(this.securityInfo.certChain);
+      let certChain = this.securityInfo.certChain;
       let certs = certChain.map(elem =>
         encodeURIComponent(elem.getBase64DERString())
       );
       let certsStringURL = certs.map(elem => `cert=${elem}`);
       certsStringURL = certsStringURL.join("&");
       let url = `about:certificate?${certsStringURL}`;
-      openTrustedLinkIn(url, "tab", {
-        triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
-      });
+      let win = BrowserWindowTracker.getTopWindow();
+      win.switchToTabHavingURI(url, true, {});
     } else {
       Services.ww.openWindow(
         window,
-        "chrome://pippki/content/certViewer.xul",
+        "chrome://pippki/content/certViewer.xhtml",
         "_blank",
         "centerscreen,chrome",
         this.securityInfo.cert
@@ -81,6 +80,13 @@ var security = {
         issuerName = cert.issuerOrganization || cert.issuerName;
       }
 
+      let certChainArray = [];
+      if (secInfo.succeededCertChain.length) {
+        certChainArray = secInfo.succeededCertChain;
+      } else {
+        certChainArray = secInfo.failedCertChain;
+      }
+
       var retval = {
         cAName: issuerName,
         encryptionAlgorithm: undefined,
@@ -90,7 +96,7 @@ var security = {
         isMixed,
         isEV,
         cert,
-        certChain: secInfo.succeededCertChain || secInfo.failedCertChain,
+        certChain: certChainArray,
         certificateTransparency: undefined,
       };
 
@@ -183,7 +189,7 @@ var security = {
     let usage = this.siteData.reduce((acc, site) => acc + site.usage, 0);
     if (usage > 0) {
       let size = DownloadUtils.convertByteUnits(usage);
-      let hasCookies = this.siteData.some(site => site.cookies.length > 0);
+      let hasCookies = this.siteData.some(site => !!site.cookies.length);
       if (hasCookies) {
         document.l10n.setAttributes(
           siteDataLabel,
@@ -264,7 +270,7 @@ async function securityOnLoad(uri, windowInfo) {
       // treating these certs as domain-validated only.
       document.l10n.setAttributes(
         document.getElementById("security-identity-owner-value"),
-        "security-no-owner"
+        "page-info-security-no-owner"
       );
       setText(
         "security-identity-verifier-value",
@@ -275,11 +281,11 @@ async function securityOnLoad(uri, windowInfo) {
     // We don't have valid identity credentials.
     document.l10n.setAttributes(
       document.getElementById("security-identity-owner-value"),
-      "security-no-owner"
+      "page-info-security-no-owner"
     );
     document.l10n.setAttributes(
       document.getElementById("security-identity-verifier-value"),
-      "not-set-verified-by"
+      "page-info-not-specified"
     );
   }
 
@@ -383,19 +389,11 @@ function setText(id, value) {
   if (!element) {
     return;
   }
-  if (element.localName == "textbox" || element.localName == "label") {
+  if (element.localName == "input" || element.localName == "label") {
     element.value = value;
   } else {
     element.textContent = value;
   }
-}
-
-function getCertificateChain(certChain, options = {}) {
-  let certificates = [];
-  for (let cert of certChain.getEnumerator()) {
-    certificates.push(cert);
-  }
-  return certificates;
 }
 
 /**

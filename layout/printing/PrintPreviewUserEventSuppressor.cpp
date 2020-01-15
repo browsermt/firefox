@@ -9,10 +9,8 @@
 #include "mozilla/TextEvents.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/Event.h"  // for Event
-#include "nsIDOMWindow.h"
 #include "nsPIDOMWindow.h"
 #include "mozilla/dom/Document.h"
-#include "nsIDocShell.h"
 #include "nsPresContext.h"
 #include "nsFocusManager.h"
 #include "nsLiteralString.h"
@@ -158,7 +156,7 @@ PrintPreviewUserEventSuppressor::HandleEvent(Event* aEvent) {
           }
         }
       }
-        MOZ_FALLTHROUGH;
+        [[fallthrough]];
       case eEventAction_Suppress:
         aEvent->StopPropagation();
         aEvent->PreventDefault();

@@ -5,9 +5,12 @@
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 EXPORTS.mozilla.net += [
+    'ADocumentChannelBridge.h',
     'ChannelEventQueue.h',
+    'DocumentChannel.h',
     'DocumentChannelChild.h',
     'DocumentChannelParent.h',
+    'DocumentLoadListener.h',
     'NeckoChild.h',
     'NeckoCommon.h',
     'NeckoMessageUtils.h',
@@ -23,8 +26,10 @@ EXPORTS.mozilla.net += [
 
 UNIFIED_SOURCES += [
     'ChannelEventQueue.cpp',
+    'DocumentChannel.cpp',
     'DocumentChannelChild.cpp',
     'DocumentChannelParent.cpp',
+    'DocumentLoadListener.cpp',
     'NeckoChild.cpp',
     'NeckoCommon.cpp',
     'NeckoParent.cpp',
@@ -52,9 +57,9 @@ IPDL_SOURCES = [
 # needed so --disable-webrtc builds work (yes, a bit messy)
 if not CONFIG['MOZ_WEBRTC']:
   IPDL_SOURCES += [
-      '../../media/mtransport/ipc/PProxyConfigLookup.ipdl',
       '../../media/mtransport/ipc/PStunAddrsRequest.ipdl',
-      '../../media/mtransport/ipc/PWebrtcProxyChannel.ipdl',
+      '../../media/mtransport/ipc/PWebrtcTCPSocket.ipdl',
+      '../../media/mtransport/ipc/WebrtcProxyConfig.ipdlh',
   ]
   EXPORTS.mozilla.net += [
       '../../media/mtransport/ipc/NrIceStunAddrMessageUtils.h',

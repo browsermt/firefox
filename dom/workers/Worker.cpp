@@ -9,8 +9,10 @@
 #include "MessageEventRunnable.h"
 #include "mozilla/dom/WorkerBinding.h"
 #include "mozilla/TimelineConsumers.h"
+#include "mozilla/Unused.h"
 #include "mozilla/WorkerTimelineMarker.h"
 #include "nsContentUtils.h"
+#include "nsGlobalWindowOuter.h"
 #include "WorkerPrivate.h"
 
 #ifdef XP_WIN
@@ -100,7 +102,20 @@ void Worker::PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,
         MarkerTracingType::START);
   }
 
-  runnable->Write(aCx, aMessage, transferable, JS::CloneDataPolicy(), aRv);
+  JS::CloneDataPolicy clonePolicy;
+  if (NS_IsMainThread()) {
+    nsGlobalWindowInner* win = nsContentUtils::CallerInnerWindow();
+    if (win && win->IsSharedMemoryAllowed()) {
+      clonePolicy.allowSharedMemory();
+    }
+  } else {
+    WorkerPrivate* worker = GetCurrentThreadWorkerPrivate();
+    if (worker && worker->IsSharedMemoryAllowed()) {
+      clonePolicy.allowSharedMemory();
+    }
+  }
+
+  runnable->Write(aCx, aMessage, transferable, clonePolicy, aRv);
 
   if (isTimelineRecording) {
     end = MakeUnique<WorkerTimelineMarker>(
@@ -116,9 +131,10 @@ void Worker::PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,
     return;
   }
 
-  if (!runnable->Dispatch()) {
-    aRv.Throw(NS_ERROR_FAILURE);
-  }
+  // The worker could have closed between the time we entered this function and
+  // checked ParentStatusProtected and now, which could cause the dispatch to
+  // fail.
+  Unused << NS_WARN_IF(!runnable->Dispatch());
 }
 
 void Worker::PostMessage(JSContext* aCx, JS::Handle<JS::Value> aMessage,

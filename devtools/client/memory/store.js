@@ -4,11 +4,12 @@
 
 "use strict";
 
-const createStore = require("../shared/redux/create-store");
-const reducers = require("./reducers");
+const createStore = require("devtools/client/shared/redux/create-store");
+const reducers = require("devtools/client/memory/reducers");
 
 module.exports = () =>
   createStore(reducers, {
+    enableTaskMiddleware: true,
     // Uncomment this for logging in tests.
     // shouldLog: true,
   });

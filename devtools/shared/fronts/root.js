@@ -19,6 +19,12 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
+  "FrameDescriptorFront",
+  "devtools/shared/fronts/descriptors/frame",
+  true
+);
+loader.lazyRequireGetter(
+  this,
   "BrowsingContextTargetFront",
   "devtools/shared/fronts/targets/browsing-context",
   true
@@ -88,20 +94,7 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
       // List service worker registrations
       ({ registrations } = await this.listServiceWorkerRegistrations());
 
-      // List workers from the Parent process
-      ({ workers } = await this.listWorkers());
-
-      // And then from the Child processes
-      const { processes } = await this.listProcesses();
-      for (const processDescriptorFront of processes) {
-        // Ignore parent process
-        if (processDescriptorFront.isParent) {
-          continue;
-        }
-        const front = await processDescriptorFront.getTarget();
-        const response = await front.listWorkers();
-        workers = workers.concat(response.workers);
-      }
+      workers = await this.listAllWorkerTargets();
     } catch (e) {
       // Something went wrong, maybe our client is disconnected?
     }
@@ -113,8 +106,14 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     };
 
     registrations.forEach(front => {
-      const { activeWorker, waitingWorker, installingWorker } = front;
-      const newestWorker = activeWorker || waitingWorker || installingWorker;
+      const {
+        activeWorker,
+        waitingWorker,
+        installingWorker,
+        evaluatingWorker,
+      } = front;
+      const newestWorker =
+        activeWorker || waitingWorker || installingWorker || evaluatingWorker;
 
       // All the information is simply mirrored from the registration front.
       // However since registering workers will fetch similar information from the worker
@@ -143,6 +142,16 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
       switch (front.type) {
         case Ci.nsIWorkerDebugger.TYPE_SERVICE:
           const registration = result.service.find(r => {
+            // If registrationFront is missing, it means this entry is actually
+            // a workerFront that has been augmented and pushed to
+            // result.service in an earlier iteration.
+            // This should no longer happen after Bug 1595964 is resolved.
+            if (!r.registrationFront) {
+              // We can safely return false here since `r` is not a full
+              // service worker registration, but merely a worker.
+              return false;
+            }
+
             /**
              * Older servers will not define `ServiceWorkerFront.id` (the value
              * of `r.newestWorkerId`), and a `ServiceWorkerFront`'s ID will only
@@ -162,19 +171,28 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
           });
 
           if (registration) {
-            // XXX: Race, sometimes a ServiceWorkerRegistrationInfo doesn't
-            // have a scriptSpec, but its associated WorkerDebugger does.
+            // Before bug 1595964, URLs were not available for registrations
+            // whose worker's main script is being evaluated. Now, URLs are
+            // always available, and this test deals with older servers.
+            // @backward-compatibility: remove in Firefox 75
             if (!registration.url) {
               registration.name = registration.url = front.url;
             }
             registration.workerTargetFront = front;
           } else {
-            worker.fetch = front.fetch;
+            // If we are missing the registration, augment the worker front with
+            // fields expected on service worker registration fronts so that it
+            // can be displayed in UIs handling on service worker registrations.
 
-            // If a service worker registration could not be found, this means we are in
-            // e10s, and registrations are not forwarded to other processes until they
-            // reach the activated state. Augment the worker as a registration worker to
-            // display it in aboutdebugging.
+            // When does this happen:
+            // A - If parent intercept is disabled:
+            //   If a service worker registration could not be found, this means we are in
+            //   e10s, and registrations are not forwarded to other processes until they
+            //   reach the activated state.
+            // B - If parent intercept is enabled:
+            //   This can apparently happen when the registration is currently
+            //   in evaluating state. Cleanup is tracked in Bug 1595964.
+            worker.fetch = front.fetch;
             worker.scope = front.scope;
             worker.active = false;
             result.service.push(worker);
@@ -189,6 +207,28 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     });
 
     return result;
+  }
+
+  /** Get the target fronts for all worker threads running in any process. */
+  async listAllWorkerTargets() {
+    // List workers from the Parent process
+    let { workers } = await this.listWorkers();
+
+    // And then from the Child processes
+    const { processes } = await this.listProcesses();
+    for (const processDescriptorFront of processes) {
+      // Ignore parent process
+      if (processDescriptorFront.isParent) {
+        continue;
+      }
+      const front = await processDescriptorFront.getTarget();
+      if (front) {
+        const response = await front.listWorkers();
+        workers = workers.concat(response.workers);
+      }
+    }
+
+    return workers;
   }
 
   async listProcesses() {
@@ -241,11 +281,11 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     // which is a ParentProcessTargetActor, but not in xpcshell, which uses a
     // ContentProcessTargetActor. So select the right front based on the actor ID.
     if (form.actor.includes("contentProcessTarget")) {
-      front = new ContentProcessTargetFront(this._client);
+      front = new ContentProcessTargetFront(this._client, null, this);
     } else {
       // ParentProcessTargetActor doesn't have a specific front, instead it uses
       // BrowsingContextTargetFront on the client side.
-      front = new BrowsingContextTargetFront(this._client);
+      front = new BrowsingContextTargetFront(this._client, null, this);
     }
     // As these fronts aren't instantiated by protocol.js, we have to set their actor ID
     // manually like that:
@@ -253,6 +293,26 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     front.form(form);
     this.manage(front);
 
+    return front;
+  }
+
+  /**
+   * This exists as a polyfill for now for tabTargets, which do not have descriptors.
+   * The mainRoot fills the role of the descriptor
+   */
+
+  /**
+   *  Get the previous frame descriptor front if it exists, create a new one if not
+   */
+  _getFrameDescriptorFront(form) {
+    let front = this.actor(form.actor);
+    if (front) {
+      return front;
+    }
+    front = new FrameDescriptorFront(this._client, null, this);
+    front.form(form);
+    front.actorID = form.actor;
+    this.manage(front);
     return front;
   }
 
@@ -268,11 +328,19 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     if (front) {
       return front;
     }
-    front = new ProcessDescriptorFront(this._client);
+    front = new ProcessDescriptorFront(this._client, null, this);
     front.form(form);
     front.actorID = form.actor;
     this.manage(front);
     return front;
+  }
+
+  async getBrowsingContextDescriptor(id) {
+    const form = await super.getBrowsingContextDescriptor(id);
+    if (form.actor && form.actor.includes("processDescriptor")) {
+      return this._getProcessDescriptorFront(form);
+    }
+    return this._getFrameDescriptorFront(form);
   }
 
   /**
@@ -339,9 +407,9 @@ class RootFront extends FrontClassWithSpec(rootSpec) {
     // devtools/client/framework/test/browser_toolbox_target.js is passing such
     // a fake tab.
     if (filter && filter.tab && filter.tab.tagName == "tab") {
-      front = new LocalTabTargetFront(this._client, filter.tab);
+      front = new LocalTabTargetFront(this._client, null, this, filter.tab);
     } else {
-      front = new BrowsingContextTargetFront(this._client);
+      front = new BrowsingContextTargetFront(this._client, null, this);
     }
     // As these fronts aren't instantiated by protocol.js, we have to set their actor ID
     // manually like that:

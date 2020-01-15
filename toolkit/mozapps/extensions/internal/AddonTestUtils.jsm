@@ -41,13 +41,16 @@ ChromeUtils.defineModuleGetter(
   "ExtensionTestCommon",
   "resource://testing-common/ExtensionTestCommon.jsm"
 );
-XPCOMUtils.defineLazyGetter(this, "Management", () => {
-  let { Management } = ChromeUtils.import(
-    "resource://gre/modules/Extension.jsm",
-    null
-  );
-  return Management;
-});
+ChromeUtils.defineModuleGetter(
+  this,
+  "Management",
+  "resource://gre/modules/Extension.jsm"
+);
+ChromeUtils.defineModuleGetter(
+  this,
+  "ExtensionAddonObserver",
+  "resource://gre/modules/Extension.jsm"
+);
 
 ChromeUtils.defineModuleGetter(
   this,
@@ -634,13 +637,29 @@ var AddonTestUtils = {
   },
 
   cleanupTempXPIs() {
+    let didGC = false;
+
     for (let file of this.tempXPIs.splice(0)) {
       if (file.exists()) {
         try {
           Services.obs.notifyObservers(file, "flush-cache-entry");
           file.remove(false);
         } catch (e) {
-          Cu.reportError(e);
+          if (didGC) {
+            Cu.reportError(`Failed to remove ${file.path}: ${e}`);
+          } else {
+            // Bug 1606684 - Sometimes XPI files are still in use by a process
+            // after the test has been finished. Force a GC once and try again.
+            this.info(`Force a GC`);
+            Cu.forceGC();
+            didGC = true;
+
+            try {
+              file.remove(false);
+            } catch (e) {
+              Cu.reportError(`Failed to remove ${file.path} after GC: ${e}`);
+            }
+          }
         }
       }
     }
@@ -950,6 +969,10 @@ var AddonTestUtils = {
         });
       }
     }
+    // AddonListeners are removed when the addonManager is shutdown,
+    // ensure the Extension observer is added.  We call uninit in
+    // promiseShutdown to allow re-initialization.
+    ExtensionAddonObserver.init();
 
     let XPIScope = ChromeUtils.import(
       "resource://gre/modules/addons/XPIProvider.jsm",
@@ -1048,6 +1071,7 @@ var AddonTestUtils = {
       "resource://gre/modules/Extension.jsm",
       null
     );
+    ExtensionAddonObserver.uninit();
     ChromeUtils.defineModuleGetter(
       ExtensionScope,
       "XPIProvider",
@@ -1148,10 +1172,11 @@ var AddonTestUtils = {
 
       let stream = ArrayBufferInputStream(data, 0, data.byteLength);
 
-      // Note these files are being created in the XPI archive with date "0" which is 1970-01-01.
+      // Note these files are being created in the XPI archive with date
+      // 1 << 49, which is a valid time for ZipWriter.
       zipW.addEntryStream(
         path,
-        0,
+        Math.pow(2, 49),
         Ci.nsIZipWriter.COMPRESSION_NONE,
         stream,
         false

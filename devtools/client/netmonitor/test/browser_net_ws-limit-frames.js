@@ -22,7 +22,7 @@ add_task(async function() {
   store.dispatch(Actions.batchEnable(false));
 
   // Wait for WS connections to be established + send messages
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.openConnection(20);
   });
 
@@ -30,7 +30,7 @@ add_task(async function() {
   is(requests.length, 1, "There should be one request");
 
   // Wait for truncated message notification to appear
-  wait = waitForDOM(document, "#messages-panel .truncated-message");
+  const wait = waitForDOM(document, "#messages-panel .truncated-message");
 
   // Select the first request
   EventUtils.sendMouseEvent({ type: "mousedown" }, requests[0]);
@@ -56,7 +56,7 @@ add_task(async function() {
   );
 
   // Close WS connection
-  await ContentTask.spawn(tab.linkedBrowser, {}, async () => {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async () => {
     await content.wrappedJSObject.closeConnection();
   });
 

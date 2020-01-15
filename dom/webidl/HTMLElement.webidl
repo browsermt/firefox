@@ -12,8 +12,10 @@
  * and create derivative works of this document.
  */
 
-[HTMLConstructor]
+[Exposed=Window]
 interface HTMLElement : Element {
+  [HTMLConstructor] constructor();
+
   // metadata attributes
   [CEReactions]
            attribute DOMString title;
@@ -56,6 +58,10 @@ interface HTMLElement : Element {
   //readonly attribute boolean? commandHidden;
   //readonly attribute boolean? commandDisabled;
   //readonly attribute boolean? commandChecked;
+
+  // https://html.spec.whatwg.org/multipage/custom-elements.html#dom-attachinternals
+  [Pref="dom.webcomponents.elementInternals.enabled", Throws]
+  ElementInternals attachInternals();
 };
 
 // http://dev.w3.org/csswg/cssom-view/#extensions-to-the-htmlelement-interface
@@ -68,8 +74,7 @@ partial interface HTMLElement {
   readonly attribute long offsetHeight;
 };
 
-[NoInterfaceObject]
-interface TouchEventHandlers {
+interface mixin TouchEventHandlers {
   [Func="nsGenericHTMLElement::LegacyTouchAPIEnabled"]
            attribute EventHandler ontouchstart;
   [Func="nsGenericHTMLElement::LegacyTouchAPIEnabled"]
@@ -84,7 +89,8 @@ HTMLElement includes GlobalEventHandlers;
 HTMLElement includes HTMLOrForeignElement;
 HTMLElement includes DocumentAndElementEventHandlers;
 HTMLElement includes ElementCSSInlineStyle;
-HTMLElement implements TouchEventHandlers;
-HTMLElement implements OnErrorEventHandlerForNodes;
+HTMLElement includes TouchEventHandlers;
+HTMLElement includes OnErrorEventHandlerForNodes;
 
+[Exposed=Window]
 interface HTMLUnknownElement : HTMLElement {};

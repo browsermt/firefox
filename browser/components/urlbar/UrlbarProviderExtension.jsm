@@ -214,23 +214,49 @@ class UrlbarProviderExtension extends UrlbarProvider {
   }
 
   /**
+   * This method is called when a result from the provider without a URL is
+   * picked, but currently only for tip results.  The provider should handle the
+   * pick.
+   *
+   * @param {UrlbarResult} result
+   *   The result that was picked.
+   */
+  pickResult(result) {
+    this._notifyListener("resultPicked", result.payload);
+  }
+
+  /**
+   * This method is called when the user starts and ends an engagement with the
+   * urlbar.
+   *
+   * @param {boolean} isPrivate
+   *   True if the engagement is in a private context.
+   * @param {string} state
+   *   The state of the engagement, one of: start, engagement, abandonment,
+   *   discard.
+   */
+  onEngagement(isPrivate, state) {
+    this._notifyListener("engagement", isPrivate, state);
+  }
+
+  /**
    * Calls a listener function set by the extension API implementation, if any.
    *
    * @param {string} eventName
    *   The name of the listener to call (i.e., the name of the event to fire).
-   * @param {UrlbarQueryContext} context
-   *   The query context relevant to the event.
+   * @param {*} args
+   *   Arguments to the listener function.
    * @returns {*}
    *   The value returned by the listener function, if any.
    */
-  async _notifyListener(eventName, context) {
+  async _notifyListener(eventName, ...args) {
     let listener = this._eventListeners.get(eventName);
     if (!listener) {
       return undefined;
     }
     let result;
     try {
-      result = listener(context);
+      result = listener(...args);
     } catch (error) {
       Cu.reportError(error);
       return undefined;
@@ -298,7 +324,7 @@ class UrlbarProviderExtension extends UrlbarProvider {
       extResult.payload.engine = engine.name;
     }
 
-    return new UrlbarResult(
+    let result = new UrlbarResult(
       UrlbarProviderExtension.RESULT_TYPES[extResult.type],
       UrlbarProviderExtension.SOURCE_TYPES[extResult.source],
       ...UrlbarResult.payloadAndSimpleHighlights(
@@ -306,6 +332,17 @@ class UrlbarProviderExtension extends UrlbarProvider {
         extResult.payload || {}
       )
     );
+    if (extResult.heuristic && this.behavior == "restricting") {
+      // The muxer chooses the final heuristic result by taking the first one
+      // that claims to be the heuristic.  We don't want extensions to clobber
+      // UnifiedComplete's heuristic, so we allow this only if the provider is
+      // restricting.
+      result.heuristic = extResult.heuristic;
+    }
+    if (extResult.suggestedIndex !== undefined) {
+      result.suggestedIndex = extResult.suggestedIndex;
+    }
+    return result;
   }
 }
 
@@ -316,6 +353,7 @@ UrlbarProviderExtension.RESULT_TYPES = {
   remote_tab: UrlbarUtils.RESULT_TYPE.REMOTE_TAB,
   search: UrlbarUtils.RESULT_TYPE.SEARCH,
   tab: UrlbarUtils.RESULT_TYPE.TAB_SWITCH,
+  tip: UrlbarUtils.RESULT_TYPE.TIP,
   url: UrlbarUtils.RESULT_TYPE.URL,
 };
 

@@ -26,10 +26,10 @@ add_task(async function() {
   ok(true, "The filter bar has the narrow layout");
 
   info("Check that the filter bar layout changes when opening the sidebar");
-  resizeWindow(800, win);
+  resizeWindow(750, win);
   await waitForFilterBarLayout(hud, ".wide");
   const onMessage = waitForMessage(hud, "world");
-  ContentTask.spawn(gBrowser.selectedBrowser, null, () => {
+  SpecialPowers.spawn(gBrowser.selectedBrowser, [], () => {
     content.console.log({ hello: "world" });
   });
   const { node } = await onMessage;

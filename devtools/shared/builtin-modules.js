@@ -41,9 +41,7 @@ const debuggerSandbox = Cu.Sandbox(systemPrincipal, {
   // This sandbox is also reused for ChromeDebugger implementation.
   // As we want to load the `Debugger` API for debugging chrome contexts,
   // we have to ensure loading it in a distinct compartment from its debuggee.
-  // invisibleToDebugger does that and helps the Debugger API identify the boundaries
-  // between debuggee and debugger code.
-  invisibleToDebugger: true,
+  freshCompartment: true,
 
   wantGlobalProperties: [
     "atob",
@@ -340,7 +338,6 @@ exports.globals = {
   NodeFilter,
   DOMRect,
   Element,
-  Event,
   FileReader,
   FormData,
   isWorker: false,
@@ -402,10 +399,19 @@ lazyGlobal("indexedDB", () => {
 lazyGlobal("isReplaying", () => {
   return exports.modules.Debugger.recordReplayProcessKind() == "Middleman";
 });
-lazyGlobal("CSSRule", () => {
-  if (exports.modules.Debugger.recordReplayProcessKind() == "Middleman") {
-    const ReplayInspector = require("devtools/server/actors/replay/inspector");
-    return ReplayInspector.createCSSRule(CSSRule);
-  }
-  return CSSRule;
-});
+
+// Globals which the ReplayInspector provides an alternate implementation for.
+const inspectorGlobals = {
+  CSSRule,
+  Event,
+};
+
+for (const [name, value] of Object.entries(inspectorGlobals)) {
+  lazyGlobal(name, () => {
+    if (exports.modules.Debugger.recordReplayProcessKind() == "Middleman") {
+      const ReplayInspector = require("devtools/server/actors/replay/inspector");
+      return ReplayInspector[`create${name}`](value);
+    }
+    return value;
+  });
+}

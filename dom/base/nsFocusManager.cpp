@@ -15,7 +15,6 @@
 #include "nsContentUtils.h"
 #include "ContentParent.h"
 #include "nsPIDOMWindow.h"
-#include "nsIDOMChromeWindow.h"
 #include "nsIDocShell.h"
 #include "nsIDocShellTreeOwner.h"
 #include "nsIFormControl.h"
@@ -24,7 +23,7 @@
 #include "nsIWebNavigation.h"
 #include "nsCaret.h"
 #include "nsIBaseWindow.h"
-#include "nsIXULWindow.h"
+#include "nsIAppWindow.h"
 #include "nsViewManager.h"
 #include "nsFrameSelection.h"
 #include "mozilla/dom/Document.h"
@@ -35,7 +34,6 @@
 #include "nsIPrincipal.h"
 #include "nsIObserverService.h"
 #include "nsIObjectFrame.h"
-#include "nsBindingManager.h"
 #include "BrowserChild.h"
 #include "nsFrameLoader.h"
 #include "nsHTMLDocument.h"
@@ -157,8 +155,7 @@ NS_IMPL_CYCLE_COLLECTING_RELEASE(nsFocusManager)
 
 NS_IMPL_CYCLE_COLLECTION(nsFocusManager, mActiveWindow, mFocusedWindow,
                          mFocusedElement, mFirstBlurEvent, mFirstFocusEvent,
-                         mWindowBeingLowered, mDelayedBlurFocusEvents,
-                         mMouseButtonEventHandlingDocument)
+                         mWindowBeingLowered, mDelayedBlurFocusEvents)
 
 nsFocusManager* nsFocusManager::sInstance = nullptr;
 bool nsFocusManager::sMouseFocusesFormControl = false;
@@ -172,8 +169,8 @@ static const char* kObservedPrefs[] = {
 nsFocusManager::nsFocusManager() : mEventHandlingNeedsFlush(false) {}
 
 nsFocusManager::~nsFocusManager() {
-  Preferences::UnregisterCallbacks(
-      PREF_CHANGE_METHOD(nsFocusManager::PrefChanged), kObservedPrefs, this);
+  Preferences::UnregisterCallbacks(nsFocusManager::PrefChanged, kObservedPrefs,
+                                   this);
 
   nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
   if (obs) {
@@ -196,8 +193,8 @@ nsresult nsFocusManager::Init() {
 
   sTestMode = Preferences::GetBool("focusmanager.testmode", false);
 
-  Preferences::RegisterCallbacks(
-      PREF_CHANGE_METHOD(nsFocusManager::PrefChanged), kObservedPrefs, fm);
+  Preferences::RegisterCallbacks(nsFocusManager::PrefChanged, kObservedPrefs,
+                                 fm);
 
   nsCOMPtr<nsIObserverService> obs = mozilla::services::GetObserverService();
   if (obs) {
@@ -209,6 +206,11 @@ nsresult nsFocusManager::Init() {
 
 // static
 void nsFocusManager::Shutdown() { NS_IF_RELEASE(sInstance); }
+
+// static
+void nsFocusManager::PrefChanged(const char* aPref, void* aSelf) {
+  static_cast<nsFocusManager*>(aSelf)->PrefChanged(aPref);
+}
 
 void nsFocusManager::PrefChanged(const char* aPref) {
   nsDependentCString pref(aPref);
@@ -237,7 +239,6 @@ nsFocusManager::Observe(nsISupports* aSubject, const char* aTopic,
     mFirstFocusEvent = nullptr;
     mWindowBeingLowered = nullptr;
     mDelayedBlurFocusEvents.Clear();
-    mMouseButtonEventHandlingDocument = nullptr;
   }
 
   return NS_OK;
@@ -335,17 +336,12 @@ Element* nsFocusManager::GetRedirectedFocus(nsIContent* aContent) {
 
 #ifdef MOZ_XUL
   if (aContent->IsXULElement()) {
-    if (aContent->IsXULElement(nsGkAtoms::textbox)) {
-      return aContent->OwnerDoc()->GetAnonymousElementByAttribute(
-          aContent, nsGkAtoms::anonid, NS_LITERAL_STRING("input"));
-    } else {
-      nsCOMPtr<nsIDOMXULMenuListElement> menulist =
-          aContent->AsElement()->AsXULMenuList();
-      if (menulist) {
-        RefPtr<Element> inputField;
-        menulist->GetInputField(getter_AddRefs(inputField));
-        return inputField;
-      }
+    nsCOMPtr<nsIDOMXULMenuListElement> menulist =
+        aContent->AsElement()->AsXULMenuList();
+    if (menulist) {
+      RefPtr<Element> inputField;
+      menulist->GetInputField(getter_AddRefs(inputField));
+      return inputField;
     }
   }
 #endif
@@ -698,10 +694,10 @@ nsFocusManager::WindowRaised(mozIDOMWindowProxy* aWindow) {
   NS_ASSERTION(currentWindow, "window raised with no window current");
   if (!currentWindow) return NS_OK;
 
-  // If there is no nsIXULWindow, then this is an embedded or child process
+  // If there is no nsIAppWindow, then this is an embedded or child process
   // window. Pass false for aWindowRaised so that commands get updated.
-  nsCOMPtr<nsIXULWindow> xulWin(do_GetInterface(baseWindow));
-  Focus(currentWindow, currentFocus, 0, true, false, xulWin != nullptr, true);
+  nsCOMPtr<nsIAppWindow> appWin(do_GetInterface(baseWindow));
+  Focus(currentWindow, currentFocus, 0, true, false, appWin != nullptr, true);
 
   return NS_OK;
 }
@@ -1106,12 +1102,6 @@ void nsFocusManager::EnsureCurrentWidgetFocused() {
   widget->SetFocus(nsIWidget::Raise::No);
 }
 
-bool ActivateOrDeactivateChild(BrowserParent* aParent, void* aArg) {
-  bool active = static_cast<bool>(aArg);
-  Unused << aParent->SendParentActivated(active);
-  return false;
-}
-
 void nsFocusManager::ActivateOrDeactivate(nsPIDOMWindowOuter* aWindow,
                                           bool aActive) {
   if (!aWindow) {
@@ -1133,8 +1123,11 @@ void nsFocusManager::ActivateOrDeactivate(nsPIDOMWindowOuter* aWindow,
 
   // Look for any remote child frames, iterate over them and send the activation
   // notification.
-  nsContentUtils::CallOnAllRemoteChildren(aWindow, ActivateOrDeactivateChild,
-                                          (void*)aActive);
+  nsContentUtils::CallOnAllRemoteChildren(
+      aWindow, [&aActive](BrowserParent* aBrowserParent) -> CallState {
+        Unused << aBrowserParent->SendParentActivated(aActive);
+        return CallState::Stop;
+      });
 }
 
 void nsFocusManager::SetFocusInner(Element* aNewContent, int32_t aFlags,
@@ -1256,24 +1249,14 @@ void nsFocusManager::SetFocusInner(Element* aNewContent, int32_t aFlags,
   bool sendFocusEvent =
       isElementInActiveWindow && allowFrameSwitch && IsWindowVisible(newWindow);
 
-  // When the following conditions are true:
-  //  * an element has focus
-  //  * isn't called by trusted event (i.e., called by untrusted event or by js)
-  //  * the focus is moved to another document's element
-  // we need to check the permission.
+  // Don't allow to steal the focus from chrome nodes if the caller cannot
+  // access them.
   if (sendFocusEvent && mFocusedElement &&
+      mFocusedElement->OwnerDoc() != aNewContent->OwnerDoc() &&
+      mFocusedElement->NodePrincipal()->IsSystemPrincipal() &&
       !nsContentUtils::LegacyIsCallerNativeCode() &&
-      mFocusedElement->OwnerDoc() != aNewContent->OwnerDoc()) {
-    // If the caller cannot access the current focused node, the caller should
-    // not be able to steal focus from it. E.g., When the current focused node
-    // is in chrome, any web contents should not be able to steal the focus.
-    sendFocusEvent = nsContentUtils::CanCallerAccess(mFocusedElement);
-    if (!sendFocusEvent && mMouseButtonEventHandlingDocument) {
-      // However, while mouse button event is handling, the handling document's
-      // script should be able to steal focus.
-      sendFocusEvent =
-          nsContentUtils::CanCallerAccess(mMouseButtonEventHandlingDocument);
-    }
+      !nsContentUtils::CanCallerAccess(mFocusedElement)) {
+    sendFocusEvent = false;
   }
 
   LOGCONTENT("Shift Focus: %s", elementToFocus.get());
@@ -3008,9 +2991,9 @@ void ScopedContentTraversal::Prev() {
 
 /**
  * Returns scope owner of aContent.
- * A scope owner is either a document root, shadow host, or slot.
+ * A scope owner is either a shadow host, or slot.
  */
-static nsIContent* FindOwner(nsIContent* aContent) {
+static nsIContent* FindScopeOwner(nsIContent* aContent) {
   nsIContent* currentContent = aContent;
   while (currentContent) {
     nsIContent* parent = currentContent->GetFlattenedTreeParent();
@@ -3190,7 +3173,7 @@ nsIContent* nsFocusManager::GetNextTabbableContentInAncestorScopes(
     nsIContent* aStartOwner, nsIContent** aStartContent,
     nsIContent* aOriginalStartContent, bool aForward, int32_t* aCurrentTabIndex,
     bool aIgnoreTabIndex, bool aForDocumentNavigation) {
-  MOZ_ASSERT(aStartOwner == FindOwner(*aStartContent),
+  MOZ_ASSERT(aStartOwner == FindScopeOwner(*aStartContent),
              "aStartOWner should be the scope owner of aStartContent");
   MOZ_ASSERT(IsHostOrSlot(aStartOwner), "scope owner should be host or slot");
 
@@ -3213,7 +3196,7 @@ nsIContent* nsFocusManager::GetNextTabbableContentInAncestorScopes(
     }
 
     startContent = owner;
-    owner = FindOwner(startContent);
+    owner = FindScopeOwner(startContent);
   }
 
   // If not found in shadow DOM, search from the top level shadow host in light
@@ -3229,14 +3212,15 @@ static nsIContent* GetTopLevelScopeOwner(nsIContent* aContent) {
   while (aContent) {
     if (HTMLSlotElement* slot = aContent->GetAssignedSlot()) {
       aContent = slot;
+      topLevelScopeOwner = aContent;
     } else if (ShadowRoot* shadowRoot = aContent->GetContainingShadow()) {
       aContent = shadowRoot->Host();
       topLevelScopeOwner = aContent;
     } else {
-      if (HTMLSlotElement::FromNode(aContent)) {
+      aContent = aContent->GetParent();
+      if (aContent && HTMLSlotElement::FromNode(aContent)) {
         topLevelScopeOwner = aContent;
       }
-      aContent = aContent->GetParent();
     }
   }
 
@@ -3273,7 +3257,7 @@ nsresult nsFocusManager::GetNextTabbableContent(
 
   // If aStartContent is in a scope owned by Shadow DOM search from scope
   // including aStartContent
-  if (nsIContent* owner = FindOwner(aStartContent)) {
+  if (nsIContent* owner = FindScopeOwner(aStartContent)) {
     nsIContent* contentToFocus = GetNextTabbableContentInAncestorScopes(
         owner, &aStartContent, aOriginalStartContent, aForward,
         &aCurrentTabIndex, aIgnoreTabIndex, aForDocumentNavigation);
@@ -3287,7 +3271,7 @@ nsresult nsFocusManager::GetNextTabbableContent(
   // We need to continue searching in light DOM, starting at the top level
   // shadow host in light DOM (updated aStartContent) and its tabindex
   // (updated aCurrentTabIndex).
-  MOZ_ASSERT(!FindOwner(aStartContent),
+  MOZ_ASSERT(!FindScopeOwner(aStartContent),
              "aStartContent should not be owned by Shadow DOM at this point");
 
   nsPresContext* presContext = aPresShell->GetPresContext();
@@ -3375,10 +3359,8 @@ nsresult nsFocusManager::GetNextTabbableContent(
       // that is not owned by document in frame traversal.
       nsIContent* currentContent = frame->GetContent();
       nsIContent* oldTopLevelScopeOwner = currentTopLevelScopeOwner;
-      if (!aForward || oldTopLevelScopeOwner != currentContent) {
+      if (!aForward || currentTopLevelScopeOwner != currentContent) {
         currentTopLevelScopeOwner = GetTopLevelScopeOwner(currentContent);
-      } else {
-        currentTopLevelScopeOwner = currentContent;
       }
       if (currentTopLevelScopeOwner &&
           currentTopLevelScopeOwner == oldTopLevelScopeOwner) {
@@ -3445,7 +3427,7 @@ nsresult nsFocusManager::GetNextTabbableContent(
       //  append ELEMENT to NAVIGATION-ORDER."
       // and later in "For each element ELEMENT in NAVIGATION-ORDER: "
       // hosts and slots are handled before other elements.
-      if (IsHostOrSlot(currentTopLevelScopeOwner)) {
+      if (currentTopLevelScopeOwner) {
         bool focusableHostSlot;
         int32_t tabIndex = HostOrSlotTabIndexValue(currentTopLevelScopeOwner,
                                                    &focusableHostSlot);
@@ -3462,7 +3444,14 @@ nsresult nsFocusManager::GetNextTabbableContent(
             return NS_OK;
           }
         }
+        // There is no next tabbable content in currentTopLevelScopeOwner's
+        // scope. We should continue the loop in order to skip all contents that
+        // is in currentTopLevelScopeOwner's scope.
+        continue;
       }
+
+      MOZ_ASSERT(!GetTopLevelScopeOwner(currentContent),
+                 "currentContent should be in top-level-scope at this point");
 
       // TabIndex not set defaults to 0 for form elements, anchors and other
       // elements that are normally focusable. Tabindex defaults to -1
@@ -4054,10 +4043,6 @@ void nsFocusManager::MarkUncollectableForCCGeneration(uint32_t aGeneration) {
   if (sInstance->mFirstFocusEvent) {
     sInstance->mFirstFocusEvent->OwnerDoc()->MarkUncollectableForCCGeneration(
         aGeneration);
-  }
-  if (sInstance->mMouseButtonEventHandlingDocument) {
-    sInstance->mMouseButtonEventHandlingDocument
-        ->MarkUncollectableForCCGeneration(aGeneration);
   }
 }
 

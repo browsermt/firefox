@@ -6,14 +6,12 @@
 #include "nsComponentManagerUtils.h"
 #include "nsCycleCollectionParticipant.h"
 #include "nsISelectionController.h"
-#include "nsIController.h"
-#include "nsIControllers.h"
+#include "nsIDocShell.h"
 #include "nsIObserver.h"
 #include "nsUnicharUtils.h"
 #include "nsIFind.h"
 #include "nsIWebBrowserFind.h"
 #include "nsWeakReference.h"
-#include "nsIDocShellTreeItem.h"
 #include "nsITypeAheadFind.h"
 #include "nsISound.h"
 
@@ -53,6 +51,10 @@ class nsTypeAheadFind : public nsITypeAheadFind,
   nsresult GetWebBrowserFind(nsIDocShell* aDocShell,
                              nsIWebBrowserFind** aWebBrowserFind);
 
+  nsresult FindInternal(uint32_t aMode, const nsAString& aSearchString,
+                        bool aLinksOnly, bool aDontIterateFrames,
+                        uint16_t* aResult);
+
   void RangeStartsInsideLink(nsRange* aRange, bool* aIsInsideLink,
                              bool* aIsStartingLink);
 
@@ -66,8 +68,9 @@ class nsTypeAheadFind : public nsITypeAheadFind,
                       bool* aUsesIndependentSelection);
   bool IsRangeRendered(nsRange* aRange);
   MOZ_CAN_RUN_SCRIPT_BOUNDARY
-  nsresult FindItNow(bool aIsLinksOnly, bool aIsFirstVisiblePreferred,
-                     bool aFindPrev, uint16_t* aResult);
+  nsresult FindItNow(uint32_t aMode, bool aIsLinksOnly,
+                     bool aIsFirstVisiblePreferred, bool aDontIterateFrames,
+                     uint16_t* aResult);
   nsresult GetSearchContainers(nsISupports* aContainer,
                                nsISelectionController* aSelectionController,
                                bool aIsFirstVisiblePreferred, bool aFindPrev,
@@ -115,6 +118,7 @@ class nsTypeAheadFind : public nsITypeAheadFind,
 
   bool mCaseSensitive;
   bool mEntireWord;
+  bool mMatchDiacritics;
 
   bool EnsureFind() {
     if (mFind) {
@@ -128,6 +132,7 @@ class nsTypeAheadFind : public nsITypeAheadFind,
 
     mFind->SetCaseSensitive(mCaseSensitive);
     mFind->SetEntireWord(mEntireWord);
+    mFind->SetMatchDiacritics(mMatchDiacritics);
 
     return true;
   }

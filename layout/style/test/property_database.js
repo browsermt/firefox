@@ -315,7 +315,6 @@ var validGradientAndElementValues = [
   // radial w/ no color stops (valid) and a several different radius values:
   "-webkit-gradient(radial, 1 2, 8, 3 4, 9)",
   "-webkit-gradient(radial, 0 0, 10, 0 0, 5)",
-  "-webkit-gradient(radial, 1 2, -1.5, center center, +99999.9999)",
 
   // radial w/ color stops
   // (mostly leaning on more-robust 'linear' tests above; just testing a few
@@ -584,6 +583,7 @@ var invalidGradientAndElementValues = [
   "-webkit-gradient(radial, 1 2, 8, 3)", // Incomplete 2nd <point>
   "-webkit-gradient(radial, 1 2, 8, 3 4)", // Missing 2nd radius
   "-webkit-gradient(radial, 1 2, 3 4, 9)", // Missing 1st radius
+  "-webkit-gradient(radial, 1 2, -1.5, center center, +99999.9999)", // Negative radius
 
   // radial w/ incorrect units on radius (invalid; expecting <number>)
   "-webkit-gradient(radial, 1 2, 8%,      3 4, 9)",
@@ -968,8 +968,7 @@ if (/* mozGradientsEnabled */ true) {
     "-moz-radial-gradient(calc(100px + -25%) top, red, blue)",
     "-moz-radial-gradient(left calc(100px + -25%), red, blue)",
     "-moz-radial-gradient(calc(100px + -25px) top, red, blue)",
-    "-moz-radial-gradient(left calc(100px + -25px), red, blue)",
-    "-moz-radial-gradient(40%, -100px -10%, red, blue)"
+    "-moz-radial-gradient(left calc(100px + -25px), red, blue)"
   );
 
   invalidGradientAndElementValues.push(
@@ -1031,6 +1030,9 @@ if (/* mozGradientsEnabled */ true) {
     "-moz-repeating-linear-gradient(30grad left 35px, red, blue)",
     "-moz-repeating-linear-gradient(10deg 20px, red, blue)",
     "-moz-repeating-linear-gradient(.414rad bottom, red, blue)",
+
+    /* Negative radii */
+    "-moz-radial-gradient(40%, -100px -10%, red, blue)",
 
     /* no quirks mode colors */
     "-moz-radial-gradient(10% bottom, ffffff, black) scroll no-repeat",
@@ -1474,14 +1476,6 @@ var gCSSProperties = {
     type: CSS_TYPE_LONGHAND,
     initial_values: ["none"],
     other_values: ["radio", "menulist"],
-    invalid_values: [],
-  },
-  "-moz-binding": {
-    domProp: "MozBinding",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["none"],
-    other_values: ["url(foo.xml)"],
     invalid_values: [],
   },
   "border-inline": {
@@ -2674,6 +2668,21 @@ var gCSSProperties = {
     alias_for: "column-rule-color",
     subproperties: ["column-rule-color"],
   },
+  "column-span": {
+    domProp: "columnSpan",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: ["all"],
+    invalid_values: ["-1", "0", "auto", "2px"],
+  },
+  "-moz-column-span": {
+    domProp: "MozColumnSpan",
+    inherited: false,
+    type: CSS_TYPE_SHORTHAND_AND_LONGHAND,
+    alias_for: "column-span",
+    subproperties: ["column-span"],
+  },
   "column-width": {
     domProp: "columnWidth",
     inherited: false,
@@ -3576,14 +3585,6 @@ var gCSSProperties = {
     other_values: ["both", "horizontal", "vertical", "inline", "block"],
     invalid_values: [],
   },
-  "-moz-stack-sizing": {
-    domProp: "MozStackSizing",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["stretch-to-fit"],
-    other_values: ["ignore", "ignore-horizontal", "ignore-vertical"],
-    invalid_values: [],
-  },
   "-moz-tab-size": {
     domProp: "MozTabSize",
     inherited: true,
@@ -3640,9 +3641,23 @@ var gCSSProperties = {
       "rotate(0.25turn)",
       "rotate(0)",
       "scalex(10)",
+      "scalex(10%)",
+      "scalex(-10)",
+      "scalex(-10%)",
       "scaley(10)",
+      "scaley(10%)",
+      "scaley(-10)",
+      "scaley(-10%)",
       "scale(10)",
+      "scale(10%)",
       "scale(10, 20)",
+      "scale(10%, 20%)",
+      "scale(-10)",
+      "scale(-10%)",
+      "scale(-10, 20)",
+      "scale(10%, -20%)",
+      "scale(10, 20%)",
+      "scale(-10, 20%)",
       "skewx(30deg)",
       "skewx(0)",
       "skewy(0)",
@@ -3677,9 +3692,13 @@ var gCSSProperties = {
       "translate3d(2em, 3px, 1em)",
       "translatex(2px) translate3d(4px, 5px, 6px) translatey(1px)",
       "scale3d(4, 4, 4)",
+      "scale3d(4%, 4%, 4%)",
       "scale3d(-2, 3, -7)",
+      "scale3d(-2%, 3%, -7%)",
       "scalez(4)",
+      "scalez(4%)",
       "scalez(-6)",
+      "scalez(-6%)",
       "rotate3d(2, 3, 4, 45deg)",
       "rotate3d(-3, 7, 0, 12rad)",
       "rotatex(15deg)",
@@ -3706,7 +3725,6 @@ var gCSSProperties = {
       "translatex(red)",
       "translatey()",
       "matrix(1px, 2px, 3px, 4px, 5px, 6px)",
-      "scale(150%)",
       "skewx(red)",
       "matrix(1%, 0, 0, 0, 0px, 0px)",
       "matrix(0, 1%, 2, 3, 4px,5px)",
@@ -5267,7 +5285,7 @@ var gCSSProperties = {
     inherited: false,
     type: CSS_TYPE_LONGHAND,
     applies_to_marker: true,
-    /* XXX needs to be on pseudo-elements */
+    // XXX This really depends on pseudo-element-ness.
     initial_values: ["normal", "none"],
     other_values: [
       '""',
@@ -7187,6 +7205,336 @@ var gCSSProperties = {
     other_values: ["smooth"],
     invalid_values: ["none", "1px"],
   },
+  "scroll-snap-type": {
+    domProp: "scrollSnapType",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "both mandatory",
+      "y mandatory",
+      "inline proximity",
+      "both",
+      "x",
+      "y",
+      "block",
+      "inline",
+    ],
+    invalid_values: [
+      "auto",
+      "1px",
+      "x y",
+      "block mandatory inline",
+      "mandatory",
+      "proximity",
+      "mandatory inline",
+      "proximity both",
+      "mandatory x",
+      "proximity y",
+      "mandatory block",
+      "proximity mandatory",
+    ],
+  },
+  "scroll-snap-align": {
+    domProp: "scrollSnapAlign",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["none"],
+    other_values: [
+      "start",
+      "end",
+      "center",
+      "start none",
+      "center end",
+      "start start",
+    ],
+    invalid_values: ["auto", "start invalid", "start end center"],
+  },
+  "scroll-margin": {
+    domProp: "scrollMargin",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: [
+      "scroll-margin-top",
+      "scroll-margin-right",
+      "scroll-margin-bottom",
+      "scroll-margin-left",
+    ],
+    initial_values: ["0"],
+    other_values: [
+      "-10px",
+      "calc(2em + 3ex)",
+      "1px 2px",
+      "1px 2px 3px",
+      "1px 2px 3px 4px",
+    ],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px 4px 5px"],
+  },
+  "scroll-margin-top": {
+    domProp: "scrollMarginTop",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-right": {
+    domProp: "scrollMarginRight",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-bottom": {
+    domProp: "scrollMarginBottom",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-left": {
+    domProp: "scrollMarginLeft",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-inline": {
+    domProp: "scrollMarginInline",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: ["scroll-margin-inline-start", "scroll-margin-inline-end"],
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)", "1px 2px"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px"],
+  },
+  "scroll-margin-inline-start": {
+    domProp: "scrollMarginInlineStart",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-inline-end": {
+    domProp: "scrollMarginInlineEnd",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-block": {
+    domProp: "scrollMarginBlock",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: ["scroll-margin-block-start", "scroll-margin-block-end"],
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)", "1px 2px"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px"],
+  },
+  "scroll-margin-block-start": {
+    domProp: "scrollMarginBlockStart",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-margin-block-end": {
+    domProp: "scrollMarginBlockEnd",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["0"],
+    other_values: ["-10px", "calc(2em + 3ex)"],
+    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
+  },
+  "scroll-padding": {
+    domProp: "scrollPadding",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: [
+      "scroll-padding-top",
+      "scroll-padding-right",
+      "scroll-padding-bottom",
+      "scroll-padding-left",
+    ],
+    initial_values: ["auto"],
+    other_values: [
+      "10px",
+      "0",
+      "20%",
+      "calc(2em + 3ex)",
+      "1px 2px",
+      "1px 2px 3%",
+      "1px 2px 3% 4px",
+      "1px auto",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-top": {
+    domProp: "scrollPaddingTop",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-right": {
+    domProp: "scrollPaddingRight",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-bottom": {
+    domProp: "scrollPaddingBottom",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-left": {
+    domProp: "scrollPaddingLeft",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-inline": {
+    domProp: "scrollPaddingInline",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: ["scroll-padding-inline-start", "scroll-padding-inline-end"],
+    initial_values: ["auto", "auto auto"],
+    other_values: [
+      "10px",
+      "0",
+      "20%",
+      "calc(2em + 3ex)",
+      "1px 2px",
+      "1px auto",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-inline-start": {
+    domProp: "scrollPaddingInlineStart",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-inline-end": {
+    domProp: "scrollPaddingInlineEnd",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-block": {
+    domProp: "scrollPaddingBlock",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: ["scroll-padding-block-start", "scroll-padding-block-end"],
+    initial_values: ["auto", "auto auto"],
+    other_values: [
+      "10px",
+      "0",
+      "20%",
+      "calc(2em + 3ex)",
+      "1px 2px",
+      "1px auto",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-block-start": {
+    domProp: "scrollPaddingBlockStart",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
+  "scroll-padding-block-end": {
+    domProp: "scrollPaddingBlockEnd",
+    inherited: false,
+    type: CSS_TYPE_LONGHAND,
+    logical: true,
+    initial_values: ["auto"],
+    other_values: [
+      "0",
+      "10px",
+      "20%",
+      "calc(2em + 3ex)",
+      "calc(50% + 60px)",
+      "calc(-50px)",
+    ],
+    invalid_values: ["20", "-20px"],
+  },
   "table-layout": {
     domProp: "tableLayout",
     inherited: false,
@@ -7422,6 +7770,34 @@ var gCSSProperties = {
       "43%",
       "-10%",
       "from font",
+    ],
+  },
+  "text-underline-position": {
+    domProp: "textUnderlinePosition",
+    inherited: true,
+    type: CSS_TYPE_LONGHAND,
+    applies_to_first_letter: true,
+    applies_to_first_line: true,
+    applies_to_placeholder: true,
+    initial_values: ["auto"],
+    other_values: [
+      "under",
+      "left",
+      "right",
+      "left under",
+      "under left",
+      "right under",
+      "under right",
+    ],
+    invalid_values: [
+      "none",
+      "auto under",
+      "left right",
+      "right auto",
+      "0",
+      "1px",
+      "10%",
+      "from-font",
     ],
   },
   "text-emphasis": {
@@ -11066,6 +11442,7 @@ function get_computed_value(cs, property) {
   var info = gCSSProperties[property];
   if (
     info.type == CSS_TYPE_TRUE_SHORTHAND ||
+    info.type == CSS_TYPE_LEGACY_SHORTHAND ||
     (info.type == CSS_TYPE_SHORTHAND_AND_LONGHAND &&
       (property == "text-decoration" || property == "mask"))
   ) {
@@ -11167,15 +11544,25 @@ if (IsCSSPropertyPrefEnabled("layout.css.individual-transform.enabled")) {
     initial_values: ["none"],
     other_values: [
       "10",
+      "10%",
       "10 20",
+      "10% 20%",
       "10 20 30",
+      "10% 20% 30%",
+      "10 20% 30",
+      "-10",
+      "-10%",
+      "-10 20",
+      "-10% 20%",
+      "-10 20 -30",
+      "-10% 20% -30%",
+      "-10 20% -30",
       "0 2.0",
       /* valid calc() values */
       "calc(1 + 2)",
       "calc(10) calc(20) 30",
     ],
     invalid_values: [
-      "150%",
       "10px",
       "10deg",
       "10, 20, 30",
@@ -12075,6 +12462,24 @@ if (IsCSSPropertyPrefEnabled("layout.css.overscroll-behavior.enabled")) {
     other_values: ["contain", "none"],
     invalid_values: ["left", "1px"],
   };
+  gCSSProperties["overscroll-behavior-inline"] = {
+    domProp: "overscrollBehaviorInline",
+    inherited: false,
+    logical: true,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: ["contain", "none"],
+    invalid_values: ["left", "1px"],
+  };
+  gCSSProperties["overscroll-behavior-block"] = {
+    domProp: "overscrollBehaviorBlock",
+    inherited: false,
+    logical: true,
+    type: CSS_TYPE_LONGHAND,
+    initial_values: ["auto"],
+    other_values: ["contain", "none"],
+    invalid_values: ["left", "1px"],
+  };
   gCSSProperties["overscroll-behavior"] = {
     domProp: "overscrollBehavior",
     inherited: false,
@@ -12091,340 +12496,6 @@ if (IsCSSPropertyPrefEnabled("layout.css.overscroll-behavior.enabled")) {
     invalid_values: ["left", "1px", "contain auto none", "contain nonsense"],
   };
 }
-
-if (IsCSSPropertyPrefEnabled("layout.css.scroll-snap-v1.enabled")) {
-  gCSSProperties["scroll-snap-type"] = {
-    domProp: "scrollSnapType",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["none"],
-    other_values: [
-      "both mandatory",
-      "y mandatory",
-      "inline proximity",
-      "both",
-      "x",
-      "y",
-      "block",
-      "inline",
-    ],
-    invalid_values: [
-      "auto",
-      "1px",
-      "x y",
-      "block mandatory inline",
-      "mandatory",
-      "proximity",
-      "mandatory inline",
-      "proximity both",
-      "mandatory x",
-      "proximity y",
-      "mandatory block",
-      "proximity mandatory",
-    ],
-  };
-  gCSSProperties["scroll-snap-align"] = {
-    domProp: "scrollSnapAlign",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["none"],
-    other_values: [
-      "start",
-      "end",
-      "center",
-      "start none",
-      "center end",
-      "start start",
-    ],
-    invalid_values: ["auto", "start invalid", "start end center"],
-  };
-  gCSSProperties["scroll-margin"] = {
-    domProp: "scrollMargin",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: [
-      "scroll-margin-top",
-      "scroll-margin-right",
-      "scroll-margin-bottom",
-      "scroll-margin-left",
-    ],
-    initial_values: ["0"],
-    other_values: [
-      "-10px",
-      "calc(2em + 3ex)",
-      "1px 2px",
-      "1px 2px 3px",
-      "1px 2px 3px 4px",
-    ],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px 4px 5px"],
-  };
-  gCSSProperties["scroll-margin-top"] = {
-    domProp: "scrollMarginTop",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-right"] = {
-    domProp: "scrollMarginRight",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-bottom"] = {
-    domProp: "scrollMarginBottom",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-left"] = {
-    domProp: "scrollMarginLeft",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-inline"] = {
-    domProp: "scrollMarginInline",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: ["scroll-margin-inline-start", "scroll-margin-inline-end"],
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)", "1px 2px"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px"],
-  };
-  gCSSProperties["scroll-margin-inline-start"] = {
-    domProp: "scrollMarginInlineStart",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-inline-end"] = {
-    domProp: "scrollMarginInlineEnd",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-block"] = {
-    domProp: "scrollMarginBlock",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: ["scroll-margin-block-start", "scroll-margin-block-end"],
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)", "1px 2px"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px 3px"],
-  };
-  gCSSProperties["scroll-margin-block-start"] = {
-    domProp: "scrollMarginBlockStart",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-margin-block-end"] = {
-    domProp: "scrollMarginBlockEnd",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["0"],
-    other_values: ["-10px", "calc(2em + 3ex)"],
-    invalid_values: ["auto", "20%", "-30%", "1px 2px"],
-  };
-  gCSSProperties["scroll-padding"] = {
-    domProp: "scrollPadding",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: [
-      "scroll-padding-top",
-      "scroll-padding-right",
-      "scroll-padding-bottom",
-      "scroll-padding-left",
-    ],
-    initial_values: ["auto"],
-    other_values: [
-      "10px",
-      "0",
-      "20%",
-      "calc(2em + 3ex)",
-      "1px 2px",
-      "1px 2px 3%",
-      "1px 2px 3% 4px",
-      "1px auto",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-top"] = {
-    domProp: "scrollPaddingTop",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-right"] = {
-    domProp: "scrollPaddingRight",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-bottom"] = {
-    domProp: "scrollPaddingBottom",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-left"] = {
-    domProp: "scrollPaddingLeft",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-inline"] = {
-    domProp: "scrollPaddingInline",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: ["scroll-padding-inline-start", "scroll-padding-inline-end"],
-    initial_values: ["auto", "auto auto"],
-    other_values: [
-      "10px",
-      "0",
-      "20%",
-      "calc(2em + 3ex)",
-      "1px 2px",
-      "1px auto",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-inline-start"] = {
-    domProp: "scrollPaddingInlineStart",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-inline-end"] = {
-    domProp: "scrollPaddingInlineEnd",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-block"] = {
-    domProp: "scrollPaddingBlock",
-    inherited: false,
-    type: CSS_TYPE_TRUE_SHORTHAND,
-    subproperties: ["scroll-padding-block-start", "scroll-padding-block-end"],
-    initial_values: ["auto", "auto auto"],
-    other_values: [
-      "10px",
-      "0",
-      "20%",
-      "calc(2em + 3ex)",
-      "1px 2px",
-      "1px auto",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-block-start"] = {
-    domProp: "scrollPaddingBlockStart",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-  gCSSProperties["scroll-padding-block-end"] = {
-    domProp: "scrollPaddingBlockEnd",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    logical: true,
-    initial_values: ["auto"],
-    other_values: [
-      "0",
-      "10px",
-      "20%",
-      "calc(2em + 3ex)",
-      "calc(50% + 60px)",
-      "calc(-50px)",
-    ],
-    invalid_values: ["20", "-20px"],
-  };
-}
-
 if (IsCSSPropertyPrefEnabled("layout.css.webkit-appearance.enabled")) {
   gCSSProperties["-webkit-appearance"] = {
     domProp: "webkitAppearance",
@@ -12502,24 +12573,6 @@ if (IsCSSPropertyPrefEnabled("layout.css.offset-logical-properties.enabled")) {
 
 gCSSProperties["display"].other_values.push("flow-root");
 
-if (IsCSSPropertyPrefEnabled("layout.css.column-span.enabled")) {
-  gCSSProperties["column-span"] = {
-    domProp: "columnSpan",
-    inherited: false,
-    type: CSS_TYPE_LONGHAND,
-    initial_values: ["none"],
-    other_values: ["all"],
-    invalid_values: ["-1", "0", "auto", "2px"],
-  };
-  gCSSProperties["-moz-column-span"] = {
-    domProp: "MozColumnSpan",
-    inherited: false,
-    type: CSS_TYPE_SHORTHAND_AND_LONGHAND,
-    alias_for: "column-span",
-    subproperties: ["column-span"],
-  };
-}
-
 if (IsCSSPropertyPrefEnabled("layout.css.webkit-line-clamp.enabled")) {
   gCSSProperties["-webkit-line-clamp"] = {
     domProp: "webkitLineClamp",
@@ -12583,9 +12636,23 @@ if (false) {
       "rotate(0.25turn)",
       "rotate(0)",
       "scalex(10)",
+      "scalex(10%)",
+      "scalex(-10)",
+      "scalex(-10%)",
       "scaley(10)",
+      "scaley(10%)",
+      "scaley(-10)",
+      "scaley(-10%)",
       "scale(10)",
+      "scale(10%)",
       "scale(10, 20)",
+      "scale(10%, 20%)",
+      "scale(-10)",
+      "scale(-10%)",
+      "scale(-10, 20)",
+      "scale(10%, -20%)",
+      "scale(10, 20%)",
+      "scale(-10, 20%)",
       "skewx(30deg)",
       "skewx(0)",
       "skewy(0)",
@@ -12620,9 +12687,13 @@ if (false) {
       "translate3d(2em, 3px, 1em)",
       "translatex(2px) translate3d(4px, 5px, 6px) translatey(1px)",
       "scale3d(4, 4, 4)",
+      "scale3d(4%, 4%, 4%)",
       "scale3d(-2, 3, -7)",
+      "scale3d(-2%, 3%, -7%)",
       "scalez(4)",
+      "scalez(4%)",
       "scalez(-6)",
+      "scalez(-6%)",
       "rotate3d(2, 3, 4, 45deg)",
       "rotate3d(-3, 7, 0, 12rad)",
       "rotatex(15deg)",
@@ -12648,7 +12719,6 @@ if (false) {
       "translatex(red)",
       "translatey()",
       "matrix(1px, 2px, 3px, 4px, 5px, 6px)",
-      "scale(150%)",
       "skewx(red)",
       "matrix(1%, 0, 0, 0, 0px, 0px)",
       "matrix(0, 1%, 2, 3, 4px,5px)",
@@ -12792,6 +12862,50 @@ if (IsCSSPropertyPrefEnabled("layout.css.scrollbar-width.enabled")) {
 }
 
 if (IsCSSPropertyPrefEnabled("layout.css.motion-path.enabled")) {
+  gCSSProperties["offset"] = {
+    domProp: "offset",
+    inherited: false,
+    type: CSS_TYPE_TRUE_SHORTHAND,
+    subproperties: [
+      "offset-path",
+      "offset-distance",
+      "offset-rotate",
+      "offset-anchor",
+    ],
+    initial_values: ["none"],
+    other_values: [
+      "none 30deg reverse",
+      "none 50px reverse 30deg",
+      "none calc(10px + 20%) auto",
+      "none reverse",
+      "none / left center",
+      "path('M 0 0 H 1') -200% auto",
+      "path('M 0 0 H 1') -200%",
+      "path('M 0 0 H 1') 50px",
+      "path('M 0 0 H 1') auto",
+      "path('M 0 0 H 1') reverse 30deg 50px",
+      "path('M 0 0 H 1')",
+      "path('m 20 0 h 100') -7rad 8px / auto",
+      "path('m 0 30 v 100') -7rad 8px / left top",
+      "path('m 0 0 h 100') -7rad 8px",
+      "path('M 0 0 H 100') 100px 0deg",
+    ],
+    invalid_values: [
+      "100px 0deg path('m 0 0 h 100')",
+      "30deg",
+      "auto 30deg 100px",
+      "auto / none",
+      "none /",
+      "none / 100px 20px 30deg",
+      "path('M 20 30 A 60 70 80') bottom",
+      "path('M 20 30 A 60 70 80') bottom top",
+      "path('M 20 30 A 60 70 80') 100px 200px",
+      "path('M 20 30 A 60 70 80') reverse auto",
+      "path('M 20 30 A 60 70 80') reverse 10px 30deg",
+      "path('M 20 30 A 60 70 80') /",
+    ],
+  };
+
   gCSSProperties["offset-path"] = {
     domProp: "offsetPath",
     inherited: false,
@@ -12807,6 +12921,13 @@ if (IsCSSPropertyPrefEnabled("layout.css.motion-path.enabled")) {
       "path('M 80 80 A 45 45, 0, 0, 0, 1.25e2 1.25e2 L 125 80 Z')",
       "path('M100-200h20z')",
       "path('M10,10L20.6.5z')",
+      "ray(45deg closest-side)",
+      "ray(0rad farthest-side)",
+      "ray(0.5turn closest-corner contain)",
+      "ray(200grad farthest-corner)",
+      "ray(sides 180deg)",
+      "ray(contain farthest-side 180deg)",
+      "ray(calc(180deg - 45deg) farthest-side)",
     ],
     invalid_values: [
       "path('')",
@@ -12815,6 +12936,10 @@ if (IsCSSPropertyPrefEnabled("layout.css.motion-path.enabled")) {
       "path('M 10 Z')",
       "path('M 10-10 20')",
       "path('M 10 10 C 20 20 40 20')",
+      "ray(0deg)",
+      "ray(closest-side)",
+      "ray(0deg, closest-side)",
+      "ray(contain 0deg closest-side contain)",
     ],
   };
 
@@ -12904,6 +13029,18 @@ if (IsCSSPropertyPrefEnabled("layout.css.backdrop-filter.enabled")) {
     initial_values: ["none"],
     other_values: gCSSProperties["filter"].other_values,
     invalid_values: gCSSProperties["filter"].invalid_values,
+  };
+}
+
+if (IsCSSPropertyPrefEnabled("layout.css.zoom-transform-hack.enabled")) {
+  gCSSProperties["zoom"] = {
+    domProp: "zoom",
+    inherited: false,
+    type: CSS_TYPE_LEGACY_SHORTHAND,
+    subproperties: ["transform", "transform-origin"],
+    initial_values: ["normal", "1.0", "0", "0%", "100%"],
+    other_values: ["10%", "2", "2.5"],
+    invalid_values: ["0 0", "foo", "10px"],
   };
 }
 

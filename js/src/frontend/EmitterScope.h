@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "ds/Nestable.h"
+#include "frontend/AbstractScope.h"
 #include "frontend/NameAnalysisTypes.h"
 #include "frontend/NameCollections.h"
 #include "frontend/ParseContext.h"
@@ -61,7 +62,6 @@ class EmitterScope : public Nestable<EmitterScope> {
 
   MOZ_MUST_USE bool ensureCache(BytecodeEmitter* bce);
 
-  template <typename BindingIter>
   MOZ_MUST_USE bool checkSlotLimits(BytecodeEmitter* bce,
                                     const BindingIter& bi);
 
@@ -77,7 +77,7 @@ class EmitterScope : public Nestable<EmitterScope> {
 
   EmitterScope* enclosing(BytecodeEmitter** bce) const;
 
-  Scope* enclosingScope(BytecodeEmitter* bce) const;
+  AbstractScope enclosingScope(BytecodeEmitter* bce) const;
 
   static bool nameCanBeFree(BytecodeEmitter* bce, JSAtom* name);
 
@@ -88,8 +88,16 @@ class EmitterScope : public Nestable<EmitterScope> {
   template <typename ScopeCreator>
   MOZ_MUST_USE bool internScope(BytecodeEmitter* bce, ScopeCreator createScope);
   template <typename ScopeCreator>
+  MOZ_MUST_USE bool internScopeCreationData(BytecodeEmitter* bce,
+                                            ScopeCreator createScope);
+
+  template <typename ScopeCreator>
   MOZ_MUST_USE bool internBodyScope(BytecodeEmitter* bce,
                                     ScopeCreator createScope);
+
+  template <typename ScopeCreator>
+  MOZ_MUST_USE bool internBodyScopeCreationData(BytecodeEmitter* bce,
+                                                ScopeCreator createScope);
   MOZ_MUST_USE bool appendScopeNote(BytecodeEmitter* bce);
 
   MOZ_MUST_USE bool deadZoneFrameSlotRange(BytecodeEmitter* bce,
@@ -126,7 +134,7 @@ class EmitterScope : public Nestable<EmitterScope> {
 
   uint32_t noteIndex() const { return noteIndex_; }
 
-  Scope* scope(const BytecodeEmitter* bce) const;
+  AbstractScope scope(const BytecodeEmitter* bce) const;
 
   bool hasEnvironment() const { return hasEnvironment_; }
 

@@ -20,6 +20,8 @@
 #include "jit/JitFrames.h"
 #include "jit/MacroAssembler.h"
 #include "jit/MoveEmitter.h"
+#include "util/Memory.h"
+#include "vm/JitActivation.h"  // js::jit::JitActivation
 
 #include "jit/MacroAssembler-inl.h"
 
@@ -4305,7 +4307,6 @@ void MacroAssembler::patchNopToCall(uint8_t* call, uint8_t* target) {
              reinterpret_cast<Instruction*>(inst)->is<InstNOP>());
 
   new (inst) InstBLImm(BOffImm(target - inst), Assembler::Always);
-  AutoFlushICache::flush(uintptr_t(inst), 4);
 }
 
 void MacroAssembler::patchCallToNop(uint8_t* call) {
@@ -4313,7 +4314,6 @@ void MacroAssembler::patchCallToNop(uint8_t* call) {
   MOZ_ASSERT(reinterpret_cast<Instruction*>(inst)->is<InstBLImm>() ||
              reinterpret_cast<Instruction*>(inst)->is<InstNOP>());
   new (inst) InstNOP();
-  AutoFlushICache::flush(uintptr_t(inst), 4);
 }
 
 void MacroAssembler::pushReturnAddress() { push(lr); }
@@ -4568,7 +4568,8 @@ void MacroAssembler::branchValueIsNurseryCell(Condition cond,
   Register tag = temp;
   tag = extractTag(address, tag);
   branchTestObject(Assembler::Equal, tag, &checkAddress);
-  branchTestString(Assembler::NotEqual, tag,
+  branchTestString(Assembler::Equal, tag, &checkAddress);
+  branchTestBigInt(Assembler::NotEqual, tag,
                    cond == Assembler::Equal ? &done : label);
 
   bind(&checkAddress);
@@ -4586,7 +4587,8 @@ void MacroAssembler::branchValueIsNurseryCell(Condition cond,
   Label done, checkAddress;
 
   branchTestObject(Assembler::Equal, value.typeReg(), &checkAddress);
-  branchTestString(Assembler::NotEqual, value.typeReg(),
+  branchTestString(Assembler::Equal, value.typeReg(), &checkAddress);
+  branchTestBigInt(Assembler::NotEqual, value.typeReg(),
                    cond == Assembler::Equal ? &done : label);
 
   bind(&checkAddress);
@@ -6049,6 +6051,7 @@ void MacroAssemblerARM::wasmUnalignedLoadImpl(
     Register tmp2, Register tmp3) {
   MOZ_ASSERT(ptr == ptrScratch);
   MOZ_ASSERT(tmp != ptr);
+  MOZ_ASSERT(!Assembler::SupportsFastUnalignedAccesses());
 
   uint32_t offset = access.offset();
   MOZ_ASSERT(offset < wasm::MaxOffsetGuardLimit);

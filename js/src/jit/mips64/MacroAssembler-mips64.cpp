@@ -16,6 +16,8 @@
 #include "jit/mips64/Simulator-mips64.h"
 #include "jit/MoveEmitter.h"
 #include "jit/SharedICRegisters.h"
+#include "util/Memory.h"
+#include "vm/JitActivation.h"  // js::jit::JitActivation
 
 #include "jit/MacroAssembler-inl.h"
 
@@ -342,7 +344,13 @@ void MacroAssemblerMIPS64::ma_dctz(Register rd, Register rs) {
   as_dclz(rd, rd);
   ma_dnegu(SecondScratchReg, rd);
   ma_daddu(SecondScratchReg, Imm32(0x3f));
+#ifdef MIPS64
+  as_selnez(SecondScratchReg, SecondScratchReg, ScratchRegister);
+  as_seleqz(rd, rd, ScratchRegister);
+  as_or(rd, rd, SecondScratchReg);
+#else
   as_movn(rd, SecondScratchReg, ScratchRegister);
+#endif
 }
 
 // Arithmetic-based ops.
@@ -412,7 +420,13 @@ void MacroAssemblerMIPS64::ma_subTestOverflow(Register rd, Register rs,
 
 void MacroAssemblerMIPS64::ma_dmult(Register rs, Imm32 imm) {
   ma_li(ScratchRegister, imm);
+#ifdef MIPSR6
+  as_dmul(rs, ScratchRegister, SecondScratchReg);
+  as_dmuh(rs, ScratchRegister, rs);
+  ma_move(rs, SecondScratchReg);
+#else
   as_dmult(rs, ScratchRegister);
+#endif
 }
 
 // Memory.
@@ -1155,6 +1169,14 @@ void MacroAssembler::clampDoubleToUint8(FloatRegister input, Register output) {
   as_roundwd(ScratchDoubleReg, input);
   ma_li(ScratchRegister, Imm32(255));
   as_mfc1(output, ScratchDoubleReg);
+#ifdef MIPSR6
+  as_slti(SecondScratchReg, output, 0);
+  as_seleqz(output, output, SecondScratchReg);
+  as_sltiu(SecondScratchReg, output, 255);
+  as_selnez(output, output, SecondScratchReg);
+  as_seleqz(ScratchRegister, ScratchRegister, SecondScratchReg);
+  as_or(output, output, ScratchRegister);
+#else
   zeroDouble(ScratchDoubleReg);
   as_sltiu(SecondScratchReg, output, 255);
   as_colt(DoubleFloat, ScratchDoubleReg, input);
@@ -1162,6 +1184,7 @@ void MacroAssembler::clampDoubleToUint8(FloatRegister input, Register output) {
   as_movz(output, ScratchRegister, SecondScratchReg);
   // if !(input > 0); res = 0;
   as_movf(output, zero);
+#endif
 }
 
 void MacroAssemblerMIPS64Compat::testNullSet(Condition cond,
@@ -1511,6 +1534,9 @@ void MacroAssemblerMIPS64Compat::tagValue(JSValueType type, Register payload,
   ma_li(ScratchRegister, ImmTag(JSVAL_TYPE_TO_TAG(type)));
   ma_dins(dest.valueReg(), ScratchRegister, Imm32(JSVAL_TAG_SHIFT),
           Imm32(64 - JSVAL_TAG_SHIFT));
+  if (type == JSVAL_TYPE_INT32 || type == JSVAL_TYPE_BOOLEAN) {
+    ma_dins(dest.valueReg(), zero, Imm32(32), Imm32(JSVAL_TAG_SHIFT - 32));
+  }
 }
 
 void MacroAssemblerMIPS64Compat::pushValue(ValueOperand val) {
@@ -1984,14 +2010,19 @@ void MacroAssembler::branchValueIsNurseryCell(Condition cond,
                                               Label* label) {
   MOZ_ASSERT(cond == Assembler::Equal || cond == Assembler::NotEqual);
 
-  Label done, checkAddress, checkObjectAddress;
+  Label done, checkAddress, checkObjectAddress, checkStringAddress;
   SecondScratchRegisterScope scratch2(*this);
 
   splitTag(value, scratch2);
   branchTestObject(Assembler::Equal, scratch2, &checkObjectAddress);
-  branchTestString(Assembler::NotEqual, scratch2,
+  branchTestString(Assembler::Equal, scratch2, &checkStringAddress);
+  branchTestBigInt(Assembler::NotEqual, scratch2,
                    cond == Assembler::Equal ? &done : label);
 
+  unboxBigInt(value, scratch2);
+  jump(&checkAddress);
+
+  bind(&checkStringAddress);
   unboxString(value, scratch2);
   jump(&checkAddress);
 

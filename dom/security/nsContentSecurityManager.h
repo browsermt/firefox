@@ -23,8 +23,6 @@ class nsIStreamListener;
     }                                                \
   }
 
-typedef mozilla::Pair<nsCString, mozilla::Maybe<nsString>> FilenameType;
-
 class nsContentSecurityManager : public nsIContentSecurityManager,
                                  public nsIChannelEventSink {
  public:
@@ -40,14 +38,10 @@ class nsContentSecurityManager : public nsIContentSecurityManager,
   static bool AllowTopLevelNavigationToDataURI(nsIChannel* aChannel);
   static bool AllowInsecureRedirectToDataURI(nsIChannel* aNewChannel);
 
-  static FilenameType FilenameToEvalType(const nsString& fileName);
-  static void AssertEvalNotRestricted(JSContext* cx,
-                                      nsIPrincipal* aSubjectPrincipal,
-                                      const nsAString& aScript);
-
  private:
   static nsresult CheckChannel(nsIChannel* aChannel);
   static nsresult CheckFTPSubresourceLoad(nsIChannel* aChannel);
+  static nsresult CheckSystemPrincipalLoads(nsIChannel* aChannel);
 
   virtual ~nsContentSecurityManager() {}
 };

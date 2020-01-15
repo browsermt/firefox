@@ -888,7 +888,7 @@ function eventMatchesKey(aEvent, aKey) {
     aEvent.getModifierState(modifier)
   );
   // Check if aEvent has a modifier and aKey doesn't
-  if (eventModifiers.length > 0 && keyModifiers.length == 0) {
+  if (eventModifiers.length && !keyModifiers.length) {
     return false;
   }
   // Check whether aKey's modifiers match aEvent's modifiers
@@ -991,7 +991,7 @@ function openAboutDialog() {
     features += "centerscreen,dependent,dialog=no";
   }
 
-  window.openDialog("chrome://browser/content/aboutDialog.xul", "", features);
+  window.openDialog("chrome://browser/content/aboutDialog.xhtml", "", features);
 }
 
 function openPreferences(paneID, extraArgs) {
@@ -1126,45 +1126,6 @@ function isElementVisible(aElement) {
 function makeURLAbsolute(aBase, aUrl) {
   // Note:  makeURI() will throw if aUri is not a valid URI
   return makeURI(aUrl, null, makeURI(aBase)).spec;
-}
-
-/**
- * openNewTabWith: opens a new tab with the given URL.
- *
- * @param aURL
- *        The URL to open (as a string).
- * @param aShiftKey
- *        True if shift key is held.  This value is used for the purpose of
- *        determining whether to open in the background.
- * @param aParams
- *        parameters passed to openLinkIn
- */
-function openNewTabWith(aURL, aShiftKey, aParams = {}) {
-  // As in openNewWindowWith(), we want to pass the charset of the
-  // current document over to a new tab.
-  if (
-    document.documentElement.getAttribute("windowtype") == "navigator:browser"
-  ) {
-    aParams.charset = gBrowser.selectedBrowser.characterSet;
-  }
-
-  openLinkIn(aURL, aShiftKey ? "tabshifted" : "tab", aParams);
-}
-
-/**
- * openNewWindowWith: opens a new window with the given URL.
- * See openNewTabWith for parameters.
- */
-function openNewWindowWith(aURL, aParams = {}) {
-  // Extract the current charset menu setting from the current document and
-  // use it to initialize the new browser window...
-  if (
-    document.documentElement.getAttribute("windowtype") == "navigator:browser"
-  ) {
-    aParams.charset = gBrowser.selectedBrowser.characterSet;
-  }
-
-  openLinkIn(aURL, "window", aParams);
 }
 
 function getHelpLinkURL(aHelpTopic) {

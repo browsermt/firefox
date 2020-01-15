@@ -13,6 +13,8 @@
 
 class nsIRunnable;
 
+class BackgroundEventTarget;
+
 class nsThreadManager : public nsIThreadManager {
  public:
   NS_DECL_ISUPPORTS
@@ -53,13 +55,17 @@ class nsThreadManager : public nsIThreadManager {
   nsThread* CreateCurrentThread(mozilla::SynchronizedEventQueue* aQueue,
                                 nsThread::MainThreadFlag aMainThread);
 
+  nsresult DispatchToBackgroundThread(nsIRunnable* aEvent,
+                                      uint32_t aDispatchFlags);
+
+  already_AddRefed<nsISerialEventTarget> CreateBackgroundTaskQueue(
+      const char* aName);
+
   // Returns the maximal number of threads that have been in existence
   // simultaneously during the execution of the thread manager.
   uint32_t GetHighestNumberOfThreads();
 
-  // This needs to be public in order to support static instantiation of this
-  // class with older compilers (e.g., egcs-2.91.66).
-  ~nsThreadManager() {}
+  ~nsThreadManager();
 
   void EnableMainThreadEventPrioritization();
   void FlushInputEventPrioritization();
@@ -69,8 +75,7 @@ class nsThreadManager : public nsIThreadManager {
   static bool MainThreadHasPendingHighPriorityEvents();
 
  private:
-  nsThreadManager()
-      : mCurThreadIndex(0), mMainPRThread(nullptr), mInitialized(false) {}
+  nsThreadManager();
 
   nsresult SpinEventLoopUntilInternal(nsINestedEventLoopCondition* aCondition,
                                       bool aCheckingShutdown);
@@ -83,6 +88,9 @@ class nsThreadManager : public nsIThreadManager {
   mozilla::Atomic<bool, mozilla::SequentiallyConsistent,
                   mozilla::recordreplay::Behavior::DontPreserve>
       mInitialized;
+
+  // Shared event target used for background runnables.
+  RefPtr<BackgroundEventTarget> mBackgroundEventTarget;
 };
 
 #define NS_THREADMANAGER_CID                         \

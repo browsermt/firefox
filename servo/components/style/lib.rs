@@ -78,7 +78,6 @@ extern crate parking_lot;
 extern crate precomputed_hash;
 extern crate rayon;
 extern crate selectors;
-#[cfg(feature = "servo")]
 #[macro_use]
 extern crate serde;
 pub extern crate servo_arc;
@@ -174,10 +173,12 @@ pub mod values;
 pub use crate::gecko_string_cache as string_cache;
 #[cfg(feature = "gecko")]
 pub use crate::gecko_string_cache::Atom;
+/// The namespace prefix type for Gecko, which is just an atom.
 #[cfg(feature = "gecko")]
-pub use crate::gecko_string_cache::Atom as Prefix;
+pub type Prefix = crate::gecko_string_cache::Atom;
+/// The local name of an element for Gecko, which is just an atom.
 #[cfg(feature = "gecko")]
-pub use crate::gecko_string_cache::Atom as LocalName;
+pub type LocalName = crate::gecko_string_cache::Atom;
 #[cfg(feature = "gecko")]
 pub use crate::gecko_string_cache::Namespace;
 

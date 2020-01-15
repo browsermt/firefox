@@ -83,6 +83,20 @@ newtab-menu-delete-history = Delete from History
 newtab-menu-save-to-pocket = Save to { -pocket-brand-name }
 newtab-menu-delete-pocket = Delete from { -pocket-brand-name }
 newtab-menu-archive-pocket = Archive in { -pocket-brand-name }
+newtab-menu-show-privacy-info = Our sponsors & your privacy
+
+## Message displayed in a modal window to explain privacy and provide context for sponsored content.
+
+newtab-privacy-modal-button-done = Done
+newtab-privacy-modal-header = Your privacy matters.
+newtab-privacy-modal-paragraph-2 =
+    In addition to dishing up captivating stories, we also show you relevant,
+    highly-vetted content from select sponsors. Rest assured, <strong>your browsing
+    data never leaves your personal copy of { -brand-product-name }</strong> — we don’t see it, and our
+    sponsors don’t either.
+newtab-privacy-modal-link = Learn how privacy works on the new tab
+
+##
 
 # Bookmark is a noun in this case, "Remove bookmark".
 newtab-menu-remove-bookmark = Remove Bookmark
@@ -171,7 +185,7 @@ newtab-discovery-empty-section-topstories-timed-out = Oops! We almost loaded thi
 # This is shown at the bottom of the trending stories section and precedes a list of links to popular topics.
 newtab-pocket-read-more = Popular Topics:
 newtab-pocket-more-recommendations = More Recommendations
-newtab-pocket-how-it-works = How it works
+newtab-pocket-whats-pocket = What’s { -pocket-brand-name }?
 newtab-pocket-cta-button = Get { -pocket-brand-name }
 newtab-pocket-cta-text = Save the stories you love in { -pocket-brand-name }, and fuel your mind with fascinating reads.
 

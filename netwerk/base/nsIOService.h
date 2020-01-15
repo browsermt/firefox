@@ -117,7 +117,9 @@ class nsIOService final : public nsIIOService,
   void OnProcessLaunchComplete(SocketProcessHost* aHost, bool aSucceeded);
   void OnProcessUnexpectedShutdown(SocketProcessHost* aHost);
   bool SocketProcessReady();
+  static void NotifySocketProcessPrefsChanged(const char* aName, void* aSelf);
   void NotifySocketProcessPrefsChanged(const char* aName);
+  bool UseSocketProcess();
 
   bool IsSocketProcessLaunchComplete();
 
@@ -151,6 +153,7 @@ class nsIOService final : public nsIIOService,
   nsresult RecheckCaptivePortalIfLocalRedirect(nsIChannel* newChan);
 
   // Prefs wrangling
+  static void PrefsChanged(const char* pref, void* self);
   void PrefsChanged(const char* pref = nullptr);
   void ParsePortList(const char* pref, bool remove);
 

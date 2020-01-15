@@ -23,6 +23,58 @@
 namespace mozilla {
 namespace wr {
 
+void wr_compositor_add_surface(void* aCompositor, wr::NativeSurfaceId aId,
+                               wr::DeviceIntPoint aPosition,
+                               wr::DeviceIntRect aClipRect) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->AddSurface(aId, aPosition, aClipRect);
+}
+
+void wr_compositor_begin_frame(void* aCompositor) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->CompositorBeginFrame();
+}
+
+void wr_compositor_bind(void* aCompositor, wr::NativeTileId aId,
+                        wr::DeviceIntPoint* aOffset, uint32_t* aFboId,
+                        wr::DeviceIntRect aDirtyRect) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->Bind(aId, aOffset, aFboId, aDirtyRect);
+}
+
+void wr_compositor_create_surface(void* aCompositor, wr::NativeSurfaceId aId,
+                                  wr::DeviceIntSize aTileSize, bool aIsOpaque) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->CreateSurface(aId, aTileSize, aIsOpaque);
+}
+
+void wr_compositor_create_tile(void* aCompositor, wr::NativeSurfaceId aId,
+                               int32_t aX, int32_t aY) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->CreateTile(aId, aX, aY);
+}
+
+void wr_compositor_destroy_tile(void* aCompositor, wr::NativeSurfaceId aId,
+                                int32_t aX, int32_t aY) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->DestroyTile(aId, aX, aY);
+}
+
+void wr_compositor_destroy_surface(void* aCompositor, NativeSurfaceId aId) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->DestroySurface(aId);
+}
+
+void wr_compositor_end_frame(void* aCompositor) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->CompositorEndFrame();
+}
+
+void wr_compositor_unbind(void* aCompositor) {
+  RenderCompositor* compositor = static_cast<RenderCompositor*>(aCompositor);
+  compositor->Unbind();
+}
+
 /* static */
 UniquePtr<RenderCompositor> RenderCompositor::Create(
     RefPtr<widget::CompositorWidget>&& aWidget) {

@@ -29,7 +29,6 @@
 #include "nsRepeatService.h"
 #include "nsBoxLayoutState.h"
 #include "nsSprocketLayout.h"
-#include "nsIServiceManager.h"
 #include "nsContentUtils.h"
 #include "nsLayoutUtils.h"
 #include "nsDisplayList.h"
@@ -42,7 +41,6 @@
 #include "mozilla/PresShell.h"
 #include "mozilla/Telemetry.h"
 #include "mozilla/dom/Event.h"
-#include "mozilla/gfx/gfxVars.h"
 #include "mozilla/layers/APZCCallbackHelper.h"
 #include "mozilla/layers/AsyncDragMetrics.h"
 #include "mozilla/layers/InputAPZContext.h"
@@ -367,7 +365,8 @@ void nsSliderFrame::BuildDisplayListForChildren(
           ScrollbarData::CreateForThumb(*scrollDirection, GetThumbRatio(),
                                         thumbStart, thumbLength,
                                         isAsyncDraggable, sliderTrackStart,
-                                        sliderTrackLength, scrollTargetId));
+                                        sliderTrackLength, scrollTargetId),
+          true, false, nsDisplayOwnLayer::OwnLayerForScrollThumb);
 
       return;
     }
@@ -598,7 +597,7 @@ nsresult nsSliderFrame::HandleEvent(nsPresContext* aPresContext,
     DragThumb(true);
 
 #ifdef MOZ_WIDGET_GTK
-    RefPtr<Element> thumb = thumbFrame->GetContent()->AsElement();
+    RefPtr<dom::Element> thumb = thumbFrame->GetContent()->AsElement();
     thumb->SetAttr(kNameSpaceID_None, nsGkAtoms::active,
                    NS_LITERAL_STRING("true"), true);
 #endif
@@ -770,8 +769,8 @@ void nsSliderFrame::CurrentPositionChanged() {
   mCurPos = curPos;
 }
 
-static void UpdateAttribute(Element* aScrollbar, nscoord aNewPos, bool aNotify,
-                            bool aIsSmooth) {
+static void UpdateAttribute(dom::Element* aScrollbar, nscoord aNewPos,
+                            bool aNotify, bool aIsSmooth) {
   nsAutoString str;
   str.AppendInt(aNewPos);
 
@@ -927,25 +926,16 @@ class AsyncScrollbarDragStarter final : public nsAPostRefreshObserver {
   AsyncDragMetrics mDragMetrics;
 };
 
-static bool UsesSVGEffects(nsIFrame* aFrame) {
-  return aFrame->StyleEffects()->HasFilters() ||
-         nsSVGIntegrationUtils::UsingMaskOrClipPathForFrame(aFrame);
-}
-
 static bool ScrollFrameWillBuildScrollInfoLayer(nsIFrame* aScrollFrame) {
   /*
    * Note: if changing the conditions in this function, make a corresponding
    * change to nsDisplayListBuilder::ShouldBuildScrollInfoItemsForHoisting()
    * in nsDisplayList.cpp.
    */
-  if (gfx::gfxVars::UseWebRender()) {
-    // If WebRender is enabled, even scrollframes enclosed in SVG effects can
-    // be drag-scrolled by APZ.
-    return false;
-  }
   nsIFrame* current = aScrollFrame;
   while (current) {
-    if (UsesSVGEffects(current)) {
+    if (nsSVGIntegrationUtils::UsesSVGEffectsNotSupportedInCompositor(
+            current)) {
       return true;
     }
     current = nsLayoutUtils::GetParentOrPlaceholderForCrossDoc(current);
@@ -1095,7 +1085,7 @@ nsresult nsSliderFrame::StartDrag(Event* aEvent) {
   }
 
 #ifdef MOZ_WIDGET_GTK
-  RefPtr<Element> thumb = thumbFrame->GetContent()->AsElement();
+  RefPtr<dom::Element> thumb = thumbFrame->GetContent()->AsElement();
   thumb->SetAttr(kNameSpaceID_None, nsGkAtoms::active,
                  NS_LITERAL_STRING("true"), true);
 #endif
@@ -1132,7 +1122,7 @@ nsresult nsSliderFrame::StopDrag() {
 #ifdef MOZ_WIDGET_GTK
   nsIFrame* thumbFrame = mFrames.FirstChild();
   if (thumbFrame) {
-    RefPtr<Element> thumb = thumbFrame->GetContent()->AsElement();
+    RefPtr<dom::Element> thumb = thumbFrame->GetContent()->AsElement();
     thumb->UnsetAttr(kNameSpaceID_None, nsGkAtoms::active, true);
   }
 #endif

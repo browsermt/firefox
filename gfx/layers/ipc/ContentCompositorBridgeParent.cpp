@@ -16,7 +16,9 @@
 #include "gfxUtils.h"
 #ifdef XP_WIN
 #  include "mozilla/gfx/DeviceManagerDx.h"  // for DeviceManagerDx
+#  include "mozilla/layers/ImageDataSerializer.h"
 #endif
+#include "mozilla/dom/WebGLParent.h"
 #include "mozilla/ipc/Transport.h"           // for Transport
 #include "mozilla/layers/AnimationHelper.h"  // for CompositorAnimationStorage
 #include "mozilla/layers/APZCTreeManagerParent.h"  // for APZCTreeManagerParent
@@ -31,6 +33,7 @@
 #include "mozilla/layers/RemoteContentController.h"
 #include "mozilla/layers/WebRenderBridgeParent.h"
 #include "mozilla/layers/AsyncImagePipelineManager.h"
+#include "mozilla/webgpu/WebGPUParent.h"
 #include "mozilla/mozalloc.h"  // for operator new, etc
 #include "nsDebug.h"           // for NS_ASSERTION, etc
 #include "nsTArray.h"          // for nsTArray
@@ -271,6 +274,19 @@ bool ContentCompositorBridgeParent::DeallocPWebRenderBridgeParent(
   return true;
 }
 
+webgpu::PWebGPUParent* ContentCompositorBridgeParent::AllocPWebGPUParent() {
+  webgpu::WebGPUParent* parent = new webgpu::WebGPUParent();
+  parent->AddRef();  // IPDL reference
+  return parent;
+}
+
+bool ContentCompositorBridgeParent::DeallocPWebGPUParent(
+    webgpu::PWebGPUParent* aActor) {
+  webgpu::WebGPUParent* parent = static_cast<webgpu::WebGPUParent*>(aActor);
+  parent->Release();  // IPDL reference
+  return true;
+}
+
 mozilla::ipc::IPCResult ContentCompositorBridgeParent::RecvNotifyChildCreated(
     const LayersId& child, CompositorOptions* aOptions) {
   MonitorAutoLock lock(*sIndirectLayerTreesLock);
@@ -361,17 +377,37 @@ void ContentCompositorBridgeParent::ShadowLayersUpdated(
 
   auto endTime = TimeStamp::Now();
 #ifdef MOZ_GECKO_PROFILER
-  if (profiler_is_active()) {
+  if (profiler_can_accept_markers()) {
     class ContentBuildPayload : public ProfilerMarkerPayload {
      public:
       ContentBuildPayload(const mozilla::TimeStamp& aStartTime,
                           const mozilla::TimeStamp& aEndTime)
           : ProfilerMarkerPayload(aStartTime, aEndTime) {}
-      virtual void StreamPayload(SpliceableJSONWriter& aWriter,
-                                 const TimeStamp& aProcessStartTime,
-                                 UniqueStacks& aUniqueStacks) override {
+      mozilla::BlocksRingBuffer::Length TagAndSerializationBytes()
+          const override {
+        return CommonPropsTagAndSerializationBytes();
+      }
+      void SerializeTagAndPayload(
+          mozilla::BlocksRingBuffer::EntryWriter& aEntryWriter) const override {
+        static const DeserializerTag tag = TagForDeserializer(Deserialize);
+        SerializeTagAndCommonProps(tag, aEntryWriter);
+      }
+      void StreamPayload(SpliceableJSONWriter& aWriter,
+                         const TimeStamp& aProcessStartTime,
+                         UniqueStacks& aUniqueStacks) const override {
         StreamCommonProps("CONTENT_FULL_PAINT_TIME", aWriter, aProcessStartTime,
                           aUniqueStacks);
+      }
+
+     private:
+      explicit ContentBuildPayload(CommonProps&& aCommonProps)
+          : ProfilerMarkerPayload(std::move(aCommonProps)) {}
+      static mozilla::UniquePtr<ProfilerMarkerPayload> Deserialize(
+          mozilla::BlocksRingBuffer::EntryReader& aEntryReader) {
+        ProfilerMarkerPayload::CommonProps props =
+            DeserializeCommonProps(aEntryReader);
+        return UniquePtr<ProfilerMarkerPayload>(
+            new ContentBuildPayload(std::move(props)));
       }
     };
     AUTO_PROFILER_STATS(add_marker_with_ContentBuildPayload);
@@ -607,10 +643,17 @@ bool ContentCompositorBridgeParent::DeallocPTextureParent(
 mozilla::ipc::IPCResult ContentCompositorBridgeParent::RecvInitPCanvasParent(
     Endpoint<PCanvasParent>&& aEndpoint) {
   MOZ_RELEASE_ASSERT(!mCanvasParent,
-                     "Canvas Parent should only be created once per "
-                     "CrossProcessCompositorBridgeParent.");
+                     "Canvas Parent must be released before recreating.");
 
   mCanvasParent = CanvasParent::Create(std::move(aEndpoint));
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult
+ContentCompositorBridgeParent::RecvReleasePCanvasParent() {
+  MOZ_RELEASE_ASSERT(mCanvasParent, "Canvas Parent hasn't been created.");
+
+  mCanvasParent = nullptr;
   return IPC_OK();
 }
 
@@ -664,6 +707,70 @@ void ContentCompositorBridgeParent::ObserveLayersUpdate(
   }
 
   Unused << state->mParent->SendObserveLayersUpdate(aLayersId, aEpoch, aActive);
+}
+
+static inline bool AllowDirectDXGISurfaceDrawing() {
+  if (!StaticPrefs::dom_ipc_plugins_asyncdrawing_enabled()) {
+    return false;
+  }
+#if defined(XP_WIN)
+  gfx::DeviceManagerDx* dm = gfx::DeviceManagerDx::Get();
+  MOZ_ASSERT(dm);
+  if (!dm || !dm->GetCompositorDevice() || !dm->TextureSharingWorks()) {
+    return false;
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+mozilla::ipc::IPCResult
+ContentCompositorBridgeParent::RecvSupportsAsyncDXGISurface(bool* value) {
+  *value = AllowDirectDXGISurfaceDrawing();
+  return IPC_OK();
+}
+
+mozilla::ipc::IPCResult ContentCompositorBridgeParent::RecvPreferredDXGIAdapter(
+    DxgiAdapterDesc* aOutDesc) {
+  PodZero(aOutDesc);
+#ifdef XP_WIN
+  if (!AllowDirectDXGISurfaceDrawing()) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+
+  RefPtr<ID3D11Device> device = gfx::DeviceManagerDx::Get()->GetCompositorDevice();
+  if (!device) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+
+  RefPtr<IDXGIDevice> dxgi;
+  if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice),
+                                    getter_AddRefs(dxgi))) ||
+      !dxgi) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+  RefPtr<IDXGIAdapter> adapter;
+  if (FAILED(dxgi->GetAdapter(getter_AddRefs(adapter))) || !adapter) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+
+  DXGI_ADAPTER_DESC desc;
+  if (FAILED(adapter->GetDesc(&desc))) {
+    return IPC_FAIL_NO_REASON(this);
+  }
+
+  *aOutDesc = DxgiAdapterDesc::From(desc);
+#endif
+  return IPC_OK();
+}
+
+already_AddRefed<dom::PWebGLParent>
+ContentCompositorBridgeParent::AllocPWebGLParent(
+    const webgl::InitContextDesc& aInitDesc,
+    webgl::InitContextResult* const out) {
+  RefPtr<dom::PWebGLParent> ret = dom::WebGLParent::Create(aInitDesc, out);
+  return ret.forget();
 }
 
 }  // namespace layers

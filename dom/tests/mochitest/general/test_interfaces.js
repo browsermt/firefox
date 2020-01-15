@@ -49,9 +49,10 @@ const isFennec =
 // IMPORTANT: Do not change this list without review from
 //            a JavaScript Engine peer!
 var ecmaGlobals = [
+  { name: "AggregateError", insecureContext: true, nightly: true },
   { name: "Array", insecureContext: true },
   { name: "ArrayBuffer", insecureContext: true },
-  { name: "Atomics", insecureContext: true, disabled: true },
+  { name: "Atomics", insecureContext: true, nightly: true },
   { name: "BigInt", insecureContext: true },
   { name: "BigInt64Array", insecureContext: true },
   { name: "BigUint64Array", insecureContext: true },
@@ -85,7 +86,11 @@ var ecmaGlobals = [
   { name: "Reflect", insecureContext: true },
   { name: "RegExp", insecureContext: true },
   { name: "Set", insecureContext: true },
-  { name: "SharedArrayBuffer", insecureContext: true, disabled: true },
+  {
+    name: "SharedArrayBuffer",
+    insecureContext: true,
+    nightly: true,
+  },
   { name: "String", insecureContext: true },
   { name: "Symbol", insecureContext: true },
   { name: "SyntaxError", insecureContext: true },
@@ -179,8 +184,6 @@ var interfaceNamesInGlobalScope = [
   { name: "BarProp", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "BaseAudioContext", insecureContext: true },
-  // IMPORTANT: Do not change this list without review from a DOM peer!
-  { name: "BatteryManager", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "BeforeUnloadEvent", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
@@ -350,6 +353,8 @@ var interfaceNamesInGlobalScope = [
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "Element", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "ElementInternals", insecureContext: true, nightly: true },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "ErrorEvent", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "Event", insecureContext: true },
@@ -384,7 +389,7 @@ var interfaceNamesInGlobalScope = [
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "FormData", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
-  { name: "FormDataEvent", insecureContext: true, nightly: true },
+  { name: "FormDataEvent", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "FontFace", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
@@ -411,6 +416,14 @@ var interfaceNamesInGlobalScope = [
   { name: "GamepadPose", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "GamepadTouch", insecureContext: false, disabled: true },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "Geolocation", insecureContext: true },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "GeolocationCoordinates", insecureContext: false },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "GeolocationPosition", insecureContext: false },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "GeolocationPositionError", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "HashChangeEvent", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
@@ -631,6 +644,8 @@ var interfaceNamesInGlobalScope = [
   { name: "KeyframeEffect", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "Location", insecureContext: true },
+  // IMPORTANT: Do not change this list without review from a DOM peer!
+  { name: "MathMLElement", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "MediaCapabilities", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
@@ -1233,8 +1248,6 @@ var interfaceNamesInGlobalScope = [
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "SVGViewElement", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
-  { name: "SVGZoomAndPan", insecureContext: true },
-  // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "Text", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "TextDecoder", insecureContext: true },
@@ -1283,43 +1296,37 @@ var interfaceNamesInGlobalScope = [
   // IMPORTANT: Do not change this list without review from a DOM peer!
   { name: "VisualViewport", insecureContext: true },
   // IMPORTANT: Do not change this list without review from a DOM peer!
-  { name: "VRDisplay", insecureContext: true, releaseNonWindowsAndMac: false },
+  { name: "VRDisplay", releaseNonWindowsAndMac: false },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VRDisplayCapabilities",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VRDisplayEvent",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VREyeParameters",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VRFieldOfView",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VRFrameData",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!
-  { name: "VRPose", insecureContext: true, releaseNonWindowsAndMac: false },
+  { name: "VRPose", releaseNonWindowsAndMac: false },
   // IMPORTANT: Do not change this list without review from a DOM peer!
   {
     name: "VRStageParameters",
-    insecureContext: true,
     releaseNonWindowsAndMac: false,
   },
   // IMPORTANT: Do not change this list without review from a DOM peer!

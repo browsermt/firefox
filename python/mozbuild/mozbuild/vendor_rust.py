@@ -31,13 +31,32 @@ CARGO_CONFIG_TEMPLATE = '''\
 {config}
 
 # Take advantage of the fact that cargo will treat lines starting with #
-# as comments to add preprocessing directives for when this file is included
-# from .cargo/config.in.
+# as comments to add preprocessing directives. This file can thus by copied
+# as-is to $topsrcdir/.cargo/config with no preprocessing to be used there
+# (for e.g. independent tasks building rust code), or be preprocessed by
+# the build system to produce a .cargo/config with the right content.
 #define REPLACE_NAME {replace_name}
 #define VENDORED_DIRECTORY {directory}
-#ifndef top_srcdir
-{replace}
+# We explicitly exclude the following section when preprocessing because
+# it would overlap with the preprocessed [source."@REPLACE_NAME@"], and
+# cargo would fail.
+#ifndef REPLACE_NAME
+[source.{replace_name}]
+directory = "{directory}"
 #endif
+
+# Thankfully, @REPLACE_NAME@ is unlikely to be a legitimate source, so
+# cargo will ignore it when it's here verbatim.
+#filter substitution
+[source."@REPLACE_NAME@"]
+directory = "@top_srcdir@/@VENDORED_DIRECTORY@"
+'''
+
+
+CARGO_LOCK_NOTICE = '''
+NOTE: `cargo vendor` may have made changes to your Cargo.lock. To restore your
+Cargo.lock to the HEAD version, run `git checkout -- Cargo.lock` or
+`hg revert Cargo.lock`.
 '''
 
 
@@ -58,10 +77,10 @@ class VendorRust(MozbuildObject):
         Ensure that cargo is new enough. cargo 1.37 added support
         for the vendor command.
         '''
-        out = subprocess.check_output([cargo, '--version']).splitlines()[0]
+        out = subprocess.check_output([cargo, '--version']).splitlines()[0].decode('UTF-8')
         if not out.startswith('cargo'):
             return False
-        return LooseVersion(out.split()[1]) >= b'1.37'
+        return LooseVersion(out.split()[1]) >= '1.37'
 
     def check_modified_files(self):
         '''
@@ -152,13 +171,13 @@ Please commit or stash these changes before vendoring, or re-run with `--ignore-
         'MIT',
         'MPL-2.0',
         'Unlicense',
+        'Zlib',
     ]
 
     # Licenses for code used at build time (e.g. code generators). Please see the above
     # comments before adding anything to this list.
     BUILDTIME_LICENSE_WHITELIST = {
         'BSD-3-Clause': [
-            'adler32',
             'bindgen',
             'fuchsia-zircon',
             'fuchsia-zircon-sys',
@@ -263,7 +282,7 @@ Please commit or stash these changes before vendoring, or re-run with `--ignore-
             # with [target.'cfg(...)'.dependencies sections, so we resort
             # to scanning individual lines.
             with open(toml_file, 'r') as f:
-                license_lines = [l for l in f if l.strip().startswith(b'license')]
+                license_lines = [l for l in f if l.strip().startswith('license')]
                 license_matches = list(
                     filter(lambda x: x, [LICENSE_LINE_RE.match(l) for l in license_lines]))
                 license_file_matches = list(
@@ -305,7 +324,7 @@ to the whitelist of packages whose licenses are suitable.
                     approved_hash = self.RUNTIME_LICENSE_FILE_PACKAGE_WHITELIST[package]
                     license_contents = open(os.path.join(
                         vendor_dir, package, license_file), 'r').read()
-                    current_hash = hashlib.sha256(license_contents).hexdigest()
+                    current_hash = hashlib.sha256(license_contents.encode('UTF-8')).hexdigest()
                     if current_hash != approved_hash:
                         self.log(logging.ERROR, 'package_license_file_mismatch', {},
                                  '''Package {} has changed its license file: {} (hash {}).
@@ -338,13 +357,6 @@ license file's hash.
         relative_vendor_dir = 'third_party/rust'
         vendor_dir = mozpath.join(self.topsrcdir, relative_vendor_dir)
 
-        cargo_config = os.path.join(self.topsrcdir, '.cargo', 'config')
-        # First, remove .cargo/config
-        try:
-            os.remove(cargo_config)
-        except Exception:
-            pass
-
         # We use check_call instead of mozprocess to ensure errors are displayed.
         # We do an |update -p| here to regenerate the Cargo.lock file with minimal
         # changes. See bug 1324462
@@ -352,7 +364,7 @@ license file's hash.
 
         output = subprocess.check_output([cargo, 'vendor', vendor_dir],
                                          stderr=subprocess.STDOUT,
-                                         cwd=self.topsrcdir)
+                                         cwd=self.topsrcdir).decode('UTF-8')
 
         # Get the snippet of configuration that cargo vendor outputs, and
         # update .cargo/config with it.
@@ -408,18 +420,21 @@ license file's hash.
                         dump = dump.replace('[%s]' % k, '')
             return dump.strip()
 
+        cargo_config = os.path.join(self.topsrcdir, '.cargo', 'config.in')
         with open(cargo_config, 'w') as fh:
             fh.write(CARGO_CONFIG_TEMPLATE.format(
                 config=toml_dump(config),
                 replace_name=replace_name,
                 directory=replace['directory'],
-                replace=toml_dump({'source': {replace_name: replace}}),
             ))
 
         if not self._check_licenses(vendor_dir):
             self.log(
                 logging.ERROR, 'license_check_failed', {},
-                '''The changes from `mach vendor rust` will NOT be added to version control.''')
+                '''The changes from `mach vendor rust` will NOT be added to version control.
+
+{notice}'''.format(notice=CARGO_LOCK_NOTICE))
+            self.repository.clean_directory(vendor_dir)
             sys.exit(1)
 
         self.repository.add_remove_files(vendor_dir)
@@ -447,8 +462,11 @@ Please find a way to reduce the sizes of these files or talk to a build
 peer about the particular large files you are adding.
 
 The changes from `mach vendor rust` will NOT be added to version control.
-'''.format(files='\n'.join(sorted(large_files)), size=FILESIZE_LIMIT))
+
+{notice}'''.format(files='\n'.join(sorted(large_files)), size=FILESIZE_LIMIT,
+                   notice=CARGO_LOCK_NOTICE))
             self.repository.forget_add_remove_files(vendor_dir)
+            self.repository.clean_directory(vendor_dir)
             sys.exit(1)
 
         # Only warn for large imports, since we may just have large code

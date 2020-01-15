@@ -15,6 +15,8 @@
 #include "jit/JitFrames.h"
 #include "jit/MacroAssembler.h"
 #include "jit/MoveEmitter.h"
+#include "util/Memory.h"
+#include "vm/JitActivation.h"  // js::jit::JitActivation
 
 #include "jit/MacroAssembler-inl.h"
 #include "vm/JSScript-inl.h"
@@ -512,7 +514,8 @@ void MacroAssembler::branchValueIsNurseryCell(Condition cond,
   Register tag = extractTag(address, temp);
   MOZ_ASSERT(tag == temp);
   branchTestObject(Assembler::Equal, tag, &checkAddress);
-  branchTestString(Assembler::NotEqual, tag,
+  branchTestString(Assembler::Equal, tag, &checkAddress);
+  branchTestBigInt(Assembler::NotEqual, tag,
                    cond == Assembler::Equal ? &done : label);
 
   bind(&checkAddress);
@@ -528,7 +531,8 @@ void MacroAssembler::branchValueIsNurseryCell(Condition cond,
   Label done, checkAddress;
 
   branchTestObject(Assembler::Equal, value, &checkAddress);
-  branchTestString(Assembler::NotEqual, value,
+  branchTestString(Assembler::Equal, value, &checkAddress);
+  branchTestBigInt(Assembler::NotEqual, value,
                    cond == Assembler::Equal ? &done : label);
 
   bind(&checkAddress);

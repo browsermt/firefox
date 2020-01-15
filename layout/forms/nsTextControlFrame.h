@@ -8,19 +8,20 @@
 #define nsTextControlFrame_h___
 
 #include "mozilla/Attributes.h"
+#include "mozilla/TextControlElement.h"
 #include "mozilla/dom/Element.h"
 #include "nsContainerFrame.h"
 #include "nsIAnonymousContentCreator.h"
 #include "nsIContent.h"
 #include "nsITextControlFrame.h"
-#include "nsITextControlElement.h"
 #include "nsIStatefulFrame.h"
 
 class nsISelectionController;
 class EditorInitializerEntryTracker;
-class nsTextEditorState;
 namespace mozilla {
+class AutoTextControlHandlingState;
 class TextEditor;
+class TextControlState;
 enum class PseudoStyleType : uint8_t;
 namespace dom {
 class Element;
@@ -40,8 +41,17 @@ class nsTextControlFrame final : public nsContainerFrame,
                               nsPresContext* aPresContext);
   virtual ~nsTextControlFrame();
 
-  virtual void DestroyFrom(nsIFrame* aDestructRoot,
-                           PostDestroyData& aPostDestroyData) override;
+  /**
+   * DestroyFrom() causes preparing to destroy editor and that may cause
+   * running selection listeners of specllchecker selection and document
+   * state listeners.  Not sure whether the former does something or not,
+   * but nobody should run content script.  The latter is currently only
+   * FinderHighlighter to clean up its fields at destruction.  Thus, the
+   * latter won't run content script too.  Therefore, this won't run
+   * unsafe script.
+   */
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual void DestroyFrom(
+      nsIFrame* aDestructRoot, PostDestroyData& aPostDestroyData) override;
 
   virtual nsIScrollableFrame* GetScrollTargetFrame() override {
     return do_QueryFrame(PrincipalChildList().FirstChild());
@@ -97,8 +107,6 @@ class nsTextControlFrame final : public nsContainerFrame,
 #endif
 
   virtual bool IsFrameOfType(uint32_t aFlags) const override {
-    // nsStackFrame is already both of these, but that's somewhat bogus,
-    // and we really mean it.
     return nsContainerFrame::IsFrameOfType(
         aFlags & ~(nsIFrame::eReplaced | nsIFrame::eReplacedContainsBlock));
   }
@@ -124,16 +132,18 @@ class nsTextControlFrame final : public nsContainerFrame,
 
   //==== BEGIN NSIFORMCONTROLFRAME
   virtual void SetFocus(bool aOn, bool aRepaint) override;
-  virtual nsresult SetFormProperty(nsAtom* aName,
-                                   const nsAString& aValue) override;
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsresult SetFormProperty(
+      nsAtom* aName, const nsAString& aValue) override;
 
   //==== END NSIFORMCONTROLFRAME
 
   //==== NSITEXTCONTROLFRAME
 
-  NS_IMETHOD_(already_AddRefed<mozilla::TextEditor>) GetTextEditor() override;
-  NS_IMETHOD SetSelectionRange(uint32_t aSelectionStart, uint32_t aSelectionEnd,
-                               SelectionDirection aDirection = eNone) override;
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY NS_IMETHOD_(already_AddRefed<mozilla::TextEditor>)
+      GetTextEditor() override;
+  MOZ_CAN_RUN_SCRIPT NS_IMETHOD
+  SetSelectionRange(uint32_t aSelectionStart, uint32_t aSelectionEnd,
+                    SelectionDirection aDirection = eNone) override;
   NS_IMETHOD GetOwnedSelectionController(
       nsISelectionController** aSelCon) override;
   virtual nsFrameSelection* GetOwnedFrameSelection() override;
@@ -143,7 +153,8 @@ class nsTextControlFrame final : public nsContainerFrame,
    * @throws NS_ERROR_NOT_INITIALIZED if mEditor has not been created
    * @throws various and sundry other things
    */
-  virtual nsresult EnsureEditorInitialized() override;
+  MOZ_CAN_RUN_SCRIPT_BOUNDARY virtual nsresult EnsureEditorInitialized()
+      override;
 
   //==== END NSITEXTCONTROLFRAME
 
@@ -161,6 +172,13 @@ class nsTextControlFrame final : public nsContainerFrame,
                                     int32_t aModType) override;
 
   void GetText(nsString& aText);
+
+  /**
+   * TextEquals() is designed for internal use so that aValue shouldn't
+   * include \r character.  It should be handled before calling this with
+   * nsContentUtils::PlatformToDOMLineBreaks().
+   */
+  bool TextEquals(const nsAString& aText) const;
 
   virtual nsresult PeekOffset(nsPeekOffsetStruct* aPos) override;
 
@@ -186,11 +204,11 @@ class nsTextControlFrame final : public nsContainerFrame,
   nsresult MaybeBeginSecureKeyboardInput();
   void MaybeEndSecureKeyboardInput();
 
-#define DEFINE_TEXTCTRL_CONST_FORWARDER(type, name)                            \
-  type name() const {                                                          \
-    nsCOMPtr<nsITextControlElement> txtCtrl = do_QueryInterface(GetContent()); \
-    NS_ASSERTION(txtCtrl, "Content not a text control element");               \
-    return txtCtrl->name();                                                    \
+#define DEFINE_TEXTCTRL_CONST_FORWARDER(type, name)          \
+  type name() const {                                        \
+    mozilla::TextControlElement* textControlElement =        \
+        mozilla::TextControlElement::FromNode(GetContent()); \
+    return textControlElement->name();                       \
   }
 
   DEFINE_TEXTCTRL_CONST_FORWARDER(bool, IsSingleLineTextControl)
@@ -204,7 +222,9 @@ class nsTextControlFrame final : public nsContainerFrame,
  protected:
   class EditorInitializer;
   friend class EditorInitializer;
-  friend class nsTextEditorState;  // needs access to UpdateValueDisplay
+  friend class mozilla::AutoTextControlHandlingState;  // needs access to
+                                                       // CacheValue
+  friend class mozilla::TextControlState;  // needs access to UpdateValueDisplay
 
   // Temp reference to scriptrunner
   NS_DECLARE_FRAME_PROPERTY_WITH_DTOR(TextControlInitializer, EditorInitializer,
@@ -290,12 +310,13 @@ class nsTextControlFrame final : public nsContainerFrame,
 
  private:
   // helper methods
-  nsresult SetSelectionInternal(nsINode* aStartNode, uint32_t aStartOffset,
-                                nsINode* aEndNode, uint32_t aEndOffset,
-                                SelectionDirection aDirection = eNone);
-  nsresult SelectAllOrCollapseToEndOfText(bool aSelect);
-  nsresult SetSelectionEndPoints(uint32_t aSelStart, uint32_t aSelEnd,
-                                 SelectionDirection aDirection = eNone);
+  MOZ_CAN_RUN_SCRIPT nsresult SetSelectionInternal(
+      nsINode* aStartNode, uint32_t aStartOffset, nsINode* aEndNode,
+      uint32_t aEndOffset, SelectionDirection aDirection = eNone);
+  MOZ_CAN_RUN_SCRIPT nsresult SelectAllOrCollapseToEndOfText(bool aSelect);
+  MOZ_CAN_RUN_SCRIPT nsresult
+  SetSelectionEndPoints(uint32_t aSelStart, uint32_t aSelEnd,
+                        SelectionDirection aDirection = eNone);
 
   void FinishedInitializer() { DeleteProperty(TextControlInitializer()); }
 
@@ -325,10 +346,10 @@ class nsTextControlFrame final : public nsContainerFrame,
     Placeholder,
     Preview,
   };
-  already_AddRefed<Element> CreateEmptyAnonymousDiv(
-      AnonymousDivType aAnonymousDivType) const;
-  already_AddRefed<Element> CreateEmptyAnonymousDivWithTextNode(
-      AnonymousDivType aAnonymousDivType) const;
+  already_AddRefed<mozilla::dom::Element> CreateEmptyAnonymousDiv(
+      AnonymousDivType) const;
+  already_AddRefed<mozilla::dom::Element> CreateEmptyAnonymousDivWithTextNode(
+      AnonymousDivType) const;
 
   bool ShouldInitializeEagerly() const;
   void InitializeEagerlyIfNeeded();

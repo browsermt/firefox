@@ -360,7 +360,7 @@ class ModuleEntry(object):
           mozilla::IsSame<already_AddRefed<T>, decltype(%(constructor)s())>::value,
           "Singleton constructor must return already_AddRefed");
       static_assert(
-          mozilla::IsBaseOf<%(type)s, T>::value,
+          std::is_base_of<%(type)s, T>::value,
           "Singleton constructor must return correct already_AddRefed");
 
 """ % {'type': self.type, 'constructor': self.constructor}
@@ -684,7 +684,7 @@ def read_manifest(filename):
     glbl = {'buildconfig': buildconfig,
             'defined': defined,
             'ProcessSelector': ProcessSelector}
-    execfile(filename, glbl)
+    exec(open(filename).read(), glbl)
     return glbl
 
 

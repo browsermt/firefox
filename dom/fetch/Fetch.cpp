@@ -8,7 +8,6 @@
 
 #include "mozilla/dom/Document.h"
 #include "nsIGlobalObject.h"
-#include "nsIStreamLoader.h"
 
 #include "nsCharSeparatedTokenizer.h"
 #include "nsDOMString.h"
@@ -36,7 +35,6 @@
 #include "mozilla/dom/ScriptSettings.h"
 #include "mozilla/dom/URLSearchParams.h"
 #include "mozilla/net/CookieSettings.h"
-#include "mozilla/Telemetry.h"
 
 #include "BodyExtractor.h"
 #include "EmptyBody.h"
@@ -496,16 +494,17 @@ already_AddRefed<Promise> FetchRequest(nsIGlobalObject* aGlobal,
         aRv.Throw(NS_ERROR_FAILURE);
         return nullptr;
       }
+
+      cookieSettings = mozilla::net::CookieSettings::Create();
+    }
+
+    if (!loadGroup) {
       nsresult rv = NS_NewLoadGroup(getter_AddRefs(loadGroup), principal);
       if (NS_WARN_IF(NS_FAILED(rv))) {
         aRv.Throw(rv);
         return nullptr;
       }
-
-      cookieSettings = mozilla::net::CookieSettings::Create();
     }
-
-    Telemetry::Accumulate(Telemetry::FETCH_IS_MAINTHREAD, 1);
 
     RefPtr<MainThreadFetchResolver> resolver = new MainThreadFetchResolver(
         p, observer, signalImpl, request->MozErrors());
@@ -522,8 +521,6 @@ already_AddRefed<Promise> FetchRequest(nsIGlobalObject* aGlobal,
   } else {
     WorkerPrivate* worker = GetCurrentThreadWorkerPrivate();
     MOZ_ASSERT(worker);
-
-    Telemetry::Accumulate(Telemetry::FETCH_IS_MAINTHREAD, 0);
 
     if (worker->IsServiceWorker()) {
       r->SetSkipServiceWorker();
@@ -585,10 +582,10 @@ void MainThreadFetchResolver::OnResponseAvailableInternal(
     nsCOMPtr<nsIGlobalObject> go = mPromise->GetParentObject();
     mResponse = new Response(go, aResponse, mSignalImpl);
     nsCOMPtr<nsPIDOMWindowInner> inner = do_QueryInterface(go);
-    nsPIDOMWindowInner* topLevel =
-        inner ? inner->GetWindowForDeprioritizedLoadRunner() : nullptr;
-    if (topLevel) {
-      topLevel->AddDeprioritizedLoadRunner(
+    BrowsingContext* bc = inner ? inner->GetBrowsingContext() : nullptr;
+    bc = bc ? bc->Top() : nullptr;
+    if (bc && bc->IsLoading()) {
+      bc->AddDeprioritizedLoadRunner(
           new ResolveFetchPromise(mPromise, mResponse));
     } else {
       mPromise->MaybeResolve(mResponse);
@@ -603,9 +600,7 @@ void MainThreadFetchResolver::OnResponseAvailableInternal(
       return;
     }
 
-    ErrorResult result;
-    result.ThrowTypeError<MSG_FETCH_FAILED>();
-    mPromise->MaybeReject(result);
+    mPromise->MaybeRejectWithTypeError<MSG_FETCH_FAILED>();
   }
 }
 
@@ -669,9 +664,7 @@ class WorkerFetchResponseRunnable final : public MainThreadWorkerRunnable {
         fetchObserver->SetState(FetchState::Errored);
       }
 
-      ErrorResult result;
-      result.ThrowTypeError<MSG_FETCH_FAILED>();
-      promise->MaybeReject(result);
+      promise->MaybeRejectWithTypeError<MSG_FETCH_FAILED>();
     }
     return true;
   }

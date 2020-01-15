@@ -7,13 +7,10 @@
 #include <math.h>
 
 #include "HTMLEditorEventListener.h"
-#include "HTMLEditRules.h"
 #include "HTMLEditUtils.h"
-#include "TextEditUtils.h"
 #include "mozilla/EditAction.h"
 #include "mozilla/Preferences.h"
 #include "mozilla/PresShell.h"
-#include "mozilla/TextEditRules.h"
 #include "mozilla/dom/Selection.h"
 #include "mozilla/dom/Element.h"
 #include "mozilla/dom/EventTarget.h"
@@ -27,9 +24,6 @@
 #include "nsGkAtoms.h"
 #include "nsIContent.h"
 #include "nsROCSSPrimitiveValue.h"
-#include "nsIDOMEventListener.h"
-#include "nsIDOMWindow.h"
-#include "nsIHTMLObjectResizer.h"
 #include "nsINode.h"
 #include "nsIPrincipal.h"
 #include "nsISupportsImpl.h"
@@ -55,32 +49,16 @@ nsresult HTMLEditor::SetSelectionToAbsoluteOrStaticAsAction(
     return NS_ERROR_NOT_INITIALIZED;
   }
 
-  AutoPlaceholderBatch treatAsOneTransaction(*this);
-  AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this,
-      aEnabled ? EditSubAction::eSetPositionToAbsolute
-               : EditSubAction::eSetPositionToStatic,
-      nsIEditor::eNext);
-
-  // the line below does not match the code; should it be removed?
-  // Find out if the selection is collapsed:
-
-  EditSubActionInfo subActionInfo(aEnabled
-                                      ? EditSubAction::eSetPositionToAbsolute
-                                      : EditSubAction::eSetPositionToStatic);
-  bool cancel, handled;
-  // Protect the edit rules object from dying
-  RefPtr<TextEditRules> rules(mRules);
-  nsresult rv = rules->WillDoAction(subActionInfo, &cancel, &handled);
-  if (NS_FAILED(rv) || cancel) {
-    return EditorBase::ToGenericNSResult(rv);
+  if (aEnabled) {
+    EditActionResult result = SetSelectionToAbsoluteAsSubAction();
+    NS_WARNING_ASSERTION(result.Succeeded(),
+                         "SetSelectionToAbsoluteAsSubAction() failed");
+    return result.Rv();
   }
-
-  rv = rules->DidDoAction(subActionInfo, rv);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    return EditorBase::ToGenericNSResult(rv);
-  }
-  return NS_OK;
+  EditActionResult result = SetSelectionToStaticAsSubAction();
+  NS_WARNING_ASSERTION(result.Succeeded(),
+                       "SetSelectionToStaticAsSubAction() failed");
+  return result.Rv();
 }
 
 already_AddRefed<Element>
@@ -154,30 +132,9 @@ nsresult HTMLEditor::AddZIndexAsAction(int32_t aChange,
     return NS_ERROR_NOT_INITIALIZED;
   }
 
-  AutoPlaceholderBatch treatAsOneTransaction(*this);
-  AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this,
-      aChange < 0 ? EditSubAction::eDecreaseZIndex
-                  : EditSubAction::eIncreaseZIndex,
-      nsIEditor::eNext);
-
-  // brade: can we get rid of this comment?
-  // Find out if the selection is collapsed:
-  EditSubActionInfo subActionInfo(aChange < 0 ? EditSubAction::eDecreaseZIndex
-                                              : EditSubAction::eIncreaseZIndex);
-  bool cancel, handled;
-  // Protect the edit rules object from dying
-  RefPtr<TextEditRules> rules(mRules);
-  nsresult rv = rules->WillDoAction(subActionInfo, &cancel, &handled);
-  if (cancel || NS_FAILED(rv)) {
-    return EditorBase::ToGenericNSResult(rv);
-  }
-
-  rv = rules->DidDoAction(subActionInfo, rv);
-  if (NS_WARN_IF(NS_FAILED(rv))) {
-    return EditorBase::ToGenericNSResult(rv);
-  }
-  return NS_OK;
+  EditActionResult result = AddZIndexAsSubAction(aChange);
+  NS_WARNING_ASSERTION(result.Succeeded(), "AddZIndexAsSubAction() failed");
+  return EditorBase::ToGenericNSResult(result.Rv());
 }
 
 int32_t HTMLEditor::GetZIndex(Element& aElement) {
@@ -554,7 +511,7 @@ nsresult HTMLEditor::SetPositionToStatic(Element& aElement) {
   }
 
   if (!aElement.IsHTMLElement(nsGkAtoms::div) ||
-      HasStyleOrIdOrClass(&aElement)) {
+      HTMLEditor::HasStyleOrIdOrClassAttribute(aElement)) {
     return NS_OK;
   }
 

@@ -20,6 +20,7 @@
 
 #include "js/GCAnnotations.h"
 #include "js/GCPolicyAPI.h"
+#include "js/GCTypeMacros.h"  // JS_FOR_EACH_PUBLIC_{,TAGGED_}GC_POINTER_TYPE
 #include "js/HeapAPI.h"
 #include "js/ProfilingStack.h"
 #include "js/Realm.h"
@@ -145,8 +146,8 @@ struct IsHeapConstructibleType {
   struct IsHeapConstructibleType<T> {         \
     static constexpr bool value = true;       \
   };
-FOR_EACH_PUBLIC_GC_POINTER_TYPE(DECLARE_IS_HEAP_CONSTRUCTIBLE_TYPE)
-FOR_EACH_PUBLIC_TAGGED_GC_POINTER_TYPE(DECLARE_IS_HEAP_CONSTRUCTIBLE_TYPE)
+JS_FOR_EACH_PUBLIC_GC_POINTER_TYPE(DECLARE_IS_HEAP_CONSTRUCTIBLE_TYPE)
+JS_FOR_EACH_PUBLIC_TAGGED_GC_POINTER_TYPE(DECLARE_IS_HEAP_CONSTRUCTIBLE_TYPE)
 #undef DECLARE_IS_HEAP_CONSTRUCTIBLE_TYPE
 
 template <typename T, typename Wrapper>
@@ -209,10 +210,19 @@ class Rooted;
 template <typename T>
 class PersistentRooted;
 
+JS_FRIEND_API void HeapObjectPostWriteBarrier(JSObject** objp, JSObject* prev,
+                                              JSObject* next);
+JS_FRIEND_API void HeapStringPostWriteBarrier(JSString** objp, JSString* prev,
+                                              JSString* next);
+JS_FRIEND_API void HeapBigIntPostWriteBarrier(JS::BigInt** bip,
+                                              JS::BigInt* prev,
+                                              JS::BigInt* next);
 JS_FRIEND_API void HeapObjectWriteBarriers(JSObject** objp, JSObject* prev,
                                            JSObject* next);
 JS_FRIEND_API void HeapStringWriteBarriers(JSString** objp, JSString* prev,
                                            JSString* next);
+JS_FRIEND_API void HeapBigIntWriteBarriers(JS::BigInt** bip, JS::BigInt* prev,
+                                           JS::BigInt* next);
 JS_FRIEND_API void HeapScriptWriteBarriers(JSScript** objp, JSScript* prev,
                                            JSScript* next);
 
@@ -274,9 +284,13 @@ inline void AssertGCThingIsNotNurseryAllocable(js::gc::Cell* cell) {}
  *
  * Heap<T> implements the following barriers:
  *
- *  - Pre-write barrier (necessary for incremental GC).
  *  - Post-write barrier (necessary for generational GC).
- *  - Read barrier (necessary for cycle collector integration).
+ *  - Read barrier (necessary for incremental GC and cycle collector
+ *    integration).
+ *
+ * Note Heap<T> does not have a pre-write barrier as used internally in the
+ * engine. The read barrier is used to mark anything read from a Heap<T> during
+ * an incremental GC.
  *
  * Heap<T> may be moved or destroyed outside of GC finalization and hence may be
  * used in dynamic storage such as a Vector.
@@ -312,9 +326,15 @@ class MOZ_NON_MEMMOVABLE Heap : public js::HeapBase<T, Heap<T>> {
    * that will be used for both lvalue and rvalue copies, so we can simply
    * omit the rvalue variant.
    */
-  explicit Heap(const Heap<T>& p) { init(p.ptr); }
+  explicit Heap(const Heap<T>& other) { init(other.ptr); }
 
-  ~Heap() { writeBarriers(ptr, SafelyInitialized<T>()); }
+  Heap& operator=(Heap<T>&& other) {
+    set(other.unbarrieredGet());
+    other.set(SafelyInitialized<T>());
+    return *this;
+  }
+
+  ~Heap() { postWriteBarrier(ptr, SafelyInitialized<T>()); }
 
   DECLARE_POINTER_CONSTREF_OPS(T);
   DECLARE_POINTER_ASSIGN_OPS(Heap, T);
@@ -327,6 +347,12 @@ class MOZ_NON_MEMMOVABLE Heap : public js::HeapBase<T, Heap<T>> {
     return ptr;
   }
   const T& unbarrieredGet() const { return ptr; }
+
+  void set(const T& newPtr) {
+    T tmp = ptr;
+    ptr = newPtr;
+    postWriteBarrier(tmp, ptr);
+  }
 
   T* unsafeGet() { return &ptr; }
 
@@ -342,17 +368,11 @@ class MOZ_NON_MEMMOVABLE Heap : public js::HeapBase<T, Heap<T>> {
  private:
   void init(const T& newPtr) {
     ptr = newPtr;
-    writeBarriers(SafelyInitialized<T>(), ptr);
+    postWriteBarrier(SafelyInitialized<T>(), ptr);
   }
 
-  void set(const T& newPtr) {
-    T tmp = ptr;
-    ptr = newPtr;
-    writeBarriers(tmp, ptr);
-  }
-
-  void writeBarriers(const T& prev, const T& next) {
-    js::BarrierMethods<T>::writeBarriers(&ptr, prev, next);
+  void postWriteBarrier(const T& prev, const T& next) {
+    js::BarrierMethods<T>::postWriteBarrier(&ptr, prev, next);
   }
 
   T ptr;
@@ -446,7 +466,6 @@ class TenuredHeap : public js::HeapBase<T, TenuredHeap<T>> {
   explicit TenuredHeap(const TenuredHeap<T>& p) : bits(0) {
     setPtr(p.getPtr());
   }
-  ~TenuredHeap() { pre(); }
 
   void setPtr(T newPtr) {
     MOZ_ASSERT((reinterpret_cast<uintptr_t>(newPtr) & flagsMask) == 0);
@@ -454,11 +473,6 @@ class TenuredHeap : public js::HeapBase<T, TenuredHeap<T>> {
     if (newPtr) {
       AssertGCThingMustBeTenured(newPtr);
     }
-    pre();
-    unbarrieredSetPtr(newPtr);
-  }
-
-  void unbarrieredSetPtr(T newPtr) {
     bits = (bits & flagsMask) | reinterpret_cast<uintptr_t>(newPtr);
   }
 
@@ -513,12 +527,6 @@ class TenuredHeap : public js::HeapBase<T, TenuredHeap<T>> {
     maskBits = 3,
     flagsMask = (1 << maskBits) - 1,
   };
-
-  void pre() {
-    if (T prev = unbarrieredGetPtr()) {
-      JS::IncrementalPreWriteBarrier(JS::GCCellPtr(prev));
-    }
-  }
 
   uintptr_t bits;
 };
@@ -703,10 +711,7 @@ struct PtrBarrierMethodsBase {
 
 template <typename T>
 struct BarrierMethods<T*> : public detail::PtrBarrierMethodsBase<T> {
-  static void writeBarriers(T** vp, T* prev, T* next) {
-    if (prev) {
-      JS::IncrementalPreWriteBarrier(JS::GCCellPtr(prev));
-    }
+  static void postWriteBarrier(T** vp, T* prev, T* next) {
     if (next) {
       JS::AssertGCThingIsNotNurseryAllocable(
           reinterpret_cast<js::gc::Cell*>(next));
@@ -717,8 +722,8 @@ struct BarrierMethods<T*> : public detail::PtrBarrierMethodsBase<T> {
 template <>
 struct BarrierMethods<JSObject*>
     : public detail::PtrBarrierMethodsBase<JSObject> {
-  static void writeBarriers(JSObject** vp, JSObject* prev, JSObject* next) {
-    JS::HeapObjectWriteBarriers(vp, prev, next);
+  static void postWriteBarrier(JSObject** vp, JSObject* prev, JSObject* next) {
+    JS::HeapObjectPostWriteBarrier(vp, prev, next);
   }
   static void exposeToJS(JSObject* obj) {
     if (obj) {
@@ -730,11 +735,11 @@ struct BarrierMethods<JSObject*>
 template <>
 struct BarrierMethods<JSFunction*>
     : public detail::PtrBarrierMethodsBase<JSFunction> {
-  static void writeBarriers(JSFunction** vp, JSFunction* prev,
-                            JSFunction* next) {
-    JS::HeapObjectWriteBarriers(reinterpret_cast<JSObject**>(vp),
-                                reinterpret_cast<JSObject*>(prev),
-                                reinterpret_cast<JSObject*>(next));
+  static void postWriteBarrier(JSFunction** vp, JSFunction* prev,
+                               JSFunction* next) {
+    JS::HeapObjectPostWriteBarrier(reinterpret_cast<JSObject**>(vp),
+                                   reinterpret_cast<JSObject*>(prev),
+                                   reinterpret_cast<JSObject*>(next));
   }
   static void exposeToJS(JSFunction* fun) {
     if (fun) {
@@ -746,16 +751,17 @@ struct BarrierMethods<JSFunction*>
 template <>
 struct BarrierMethods<JSString*>
     : public detail::PtrBarrierMethodsBase<JSString> {
-  static void writeBarriers(JSString** vp, JSString* prev, JSString* next) {
-    JS::HeapStringWriteBarriers(vp, prev, next);
+  static void postWriteBarrier(JSString** vp, JSString* prev, JSString* next) {
+    JS::HeapStringPostWriteBarrier(vp, prev, next);
   }
 };
 
 template <>
-struct BarrierMethods<JSScript*>
-    : public detail::PtrBarrierMethodsBase<JSScript> {
-  static void writeBarriers(JSScript** vp, JSScript* prev, JSScript* next) {
-    JS::HeapScriptWriteBarriers(vp, prev, next);
+struct BarrierMethods<JS::BigInt*>
+    : public detail::PtrBarrierMethodsBase<JS::BigInt> {
+  static void postWriteBarrier(JS::BigInt** vp, JS::BigInt* prev,
+                               JS::BigInt* next) {
+    JS::HeapBigIntPostWriteBarrier(vp, prev, next);
   }
 };
 
@@ -931,12 +937,11 @@ class RootingContext {
 class JS_PUBLIC_API AutoGCRooter {
  protected:
   enum class Tag : uint8_t {
-    Array,      /* js::AutoArrayRooter */
-    ValueArray, /* js::AutoValueArray */
-    Parser,     /* js::frontend::Parser */
-#if defined(JS_BUILD_BINAST)
-    BinASTParser,  /* js::frontend::BinASTParser */
-#endif             // defined(JS_BUILD_BINAST)
+    Array,         /* js::AutoArrayRooter */
+    ValueArray,    /* js::AutoValueArray */
+    Parser,        /* js::frontend::Parser */
+    BinASTParser,  /* js::frontend::BinASTParser; only used if built with
+                    * JS_BUILD_BINAST support */
     WrapperVector, /* js::AutoWrapperVector */
     Wrapper,       /* js::AutoWrapperRooter */
     Custom         /* js::CustomAutoRooter */
@@ -1172,38 +1177,6 @@ class HandleBase<JSObject*, Container>
   JS::Handle<U*> as() const;
 };
 
-/**
- * Types for a variable that either should or shouldn't be rooted, depending on
- * the template parameter allowGC. Used for implementing functions that can
- * operate on either rooted or unrooted data.
- *
- * The toHandle() and toMutableHandle() functions are for calling functions
- * which require handle types and are only called in the CanGC case. These
- * allow the calling code to type check.
- */
-enum AllowGC { NoGC = 0, CanGC = 1 };
-template <typename T, AllowGC allowGC>
-class MaybeRooted {};
-
-template <typename T>
-class MaybeRooted<T, CanGC> {
- public:
-  typedef JS::Handle<T> HandleType;
-  typedef JS::Rooted<T> RootType;
-  typedef JS::MutableHandle<T> MutableHandleType;
-
-  static inline JS::Handle<T> toHandle(HandleType v) { return v; }
-
-  static inline JS::MutableHandle<T> toMutableHandle(MutableHandleType v) {
-    return v;
-  }
-
-  template <typename T2>
-  static inline JS::Handle<T2*> downcastHandle(HandleType v) {
-    return v.template as<T2>();
-  }
-};
-
 } /* namespace js */
 
 namespace JS {
@@ -1396,13 +1369,13 @@ class PersistentRooted
     return ptr;
   }
 
- private:
   template <typename U>
   void set(U&& value) {
     MOZ_ASSERT(initialized());
     ptr = std::forward<U>(value);
   }
 
+ private:
   detail::MaybeWrapped<T> ptr;
 } JS_HAZ_ROOTED;
 

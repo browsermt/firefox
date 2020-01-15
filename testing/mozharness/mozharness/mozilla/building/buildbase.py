@@ -10,43 +10,34 @@ provides a base class for fx desktop builds
 author: Jordan Lund
 
 """
-import json
-
-import os
-import time
-import uuid
 import copy
 import glob
-
-# import the power of mozharness ;)
-import sys
-from datetime import datetime
+import json
+import os
 import re
-from mozharness.base.config import (
-    BaseConfig, parse_config_file, DEFAULT_CONFIG_PATH,
-)
+import sys
+import time
+import uuid
+from datetime import datetime
+
+import six
+
+from mozharness.base.config import (DEFAULT_CONFIG_PATH, BaseConfig,
+                                    parse_config_file)
 from mozharness.base.errors import MakefileErrorList
-from mozharness.base.log import ERROR, OutputParser, FATAL
+from mozharness.base.log import ERROR, FATAL, OutputParser
+from mozharness.base.python import (PerfherderResourceOptionsMixin,
+                                    VirtualenvMixin)
 from mozharness.base.script import PostScriptRun
 from mozharness.base.vcs.vcsbase import MercurialScript
-from mozharness.mozilla.automation import (
-    AutomationMixin,
-    EXIT_STATUS_DICT,
-    TBPL_STATUS_DICT,
-    TBPL_FAILURE,
-    TBPL_RETRY,
-    TBPL_WARNING,
-    TBPL_SUCCESS,
-    TBPL_WORST_LEVEL_TUPLE,
-)
+from mozharness.mozilla.automation import (EXIT_STATUS_DICT, TBPL_FAILURE,
+                                           TBPL_RETRY, TBPL_STATUS_DICT,
+                                           TBPL_SUCCESS, TBPL_WARNING,
+                                           TBPL_WORST_LEVEL_TUPLE,
+                                           AutomationMixin)
 from mozharness.mozilla.secrets import SecretsMixin
-from mozharness.base.python import (
-    PerfherderResourceOptionsMixin,
-    VirtualenvMixin,
-)
 
-AUTOMATION_EXIT_CODES = EXIT_STATUS_DICT.values()
-AUTOMATION_EXIT_CODES.sort()
+AUTOMATION_EXIT_CODES = sorted(EXIT_STATUS_DICT.values())
 
 MISSING_CFG_KEY_MSG = "The key '%s' could not be determined \
 Please add this to your config."
@@ -121,7 +112,8 @@ def get_mozconfig_path(script, config, dirs):
     """
     COMPOSITE_KEYS = {'mozconfig_variant', 'app_name', 'mozconfig_platform'}
     have_composite_mozconfig = COMPOSITE_KEYS <= set(config.keys())
-    have_partial_composite_mozconfig = len(COMPOSITE_KEYS & set(config.keys())) > 0
+    have_partial_composite_mozconfig = len(
+        COMPOSITE_KEYS & set(config.keys())) > 0
     have_src_mozconfig = 'src_mozconfig' in config
     have_src_mozconfig_manifest = 'src_mozconfig_manifest' in config
 
@@ -150,17 +142,24 @@ def get_mozconfig_path(script, config, dirs):
         }
         abs_mozconfig_path = os.path.join(dirs['abs_src_dir'], src_mozconfig)
     elif have_src_mozconfig:
-        abs_mozconfig_path = os.path.join(dirs['abs_src_dir'], config.get('src_mozconfig'))
+        abs_mozconfig_path = os.path.join(
+            dirs['abs_src_dir'], config.get('src_mozconfig'))
     elif have_src_mozconfig_manifest:
-        manifest = os.path.join(dirs['abs_work_dir'], config['src_mozconfig_manifest'])
+        manifest = os.path.join(
+            dirs['abs_work_dir'],
+            config['src_mozconfig_manifest'])
         if not os.path.exists(manifest):
             raise MozconfigPathError(
-                'src_mozconfig_manifest: "%s" not found. Does it exist?' % (manifest,))
+                'src_mozconfig_manifest: "%s" not found. Does it exist?' %
+                (manifest,))
         else:
             with script.opened(manifest, error_level=ERROR) as (fh, err):
                 if err:
-                    raise MozconfigPathError("%s exists but coud not read properties" % manifest)
-                abs_mozconfig_path = os.path.join(dirs['abs_src_dir'], json.load(fh)['gecko_path'])
+                    raise MozconfigPathError(
+                        "%s exists but coud not read properties" %
+                        manifest)
+                abs_mozconfig_path = os.path.join(
+                    dirs['abs_src_dir'], json.load(fh)['gecko_path'])
     else:
         raise MozconfigPathError(
             "Must provide 'app_name', 'mozconfig_platform' and 'mozconfig_variant'; "
@@ -270,7 +269,8 @@ class BuildOptionParser(object):
         'asan-tc': 'builds/releng_sub_%s_configs/%s_asan_tc.py',
         'asan-reporter-tc': 'builds/releng_sub_%s_configs/%s_asan_reporter_tc.py',
         'fuzzing-asan-tc': 'builds/releng_sub_%s_configs/%s_fuzzing_asan_tc.py',
-        'tsan': 'builds/releng_sub_%s_configs/%s_tsan.py',
+        'tsan-tc': 'builds/releng_sub_%s_configs/%s_tsan_tc.py',
+        'fuzzing-tsan-tc': 'builds/releng_sub_%s_configs/%s_fuzzing_tsan_tc.py',
         'cross-debug': 'builds/releng_sub_%s_configs/%s_cross_debug.py',
         'cross-debug-searchfox': 'builds/releng_sub_%s_configs/%s_cross_debug_searchfox.py',
         'cross-noopt-debug': 'builds/releng_sub_%s_configs/%s_cross_noopt_debug.py',
@@ -295,9 +295,6 @@ class BuildOptionParser(object):
         'api-16-debug-searchfox': 'builds/releng_sub_%s_configs/%s_api_16_debug_searchfox.py',
         'api-16-gradle': 'builds/releng_sub_%s_configs/%s_api_16_gradle.py',
         'api-16-profile-generate': 'builds/releng_sub_%s_configs/%s_api_16_profile_generate.py',
-        'api-16-profile-use': 'builds/releng_sub_%s_configs/%s_api_16_profile_use.py',
-        'api-16-without-google-play-services':
-            'builds/releng_sub_%s_configs/%s_api_16_without_google_play_services.py',
         'rusttests': 'builds/releng_sub_%s_configs/%s_rusttests.py',
         'rusttests-debug': 'builds/releng_sub_%s_configs/%s_rusttests_debug.py',
         'x86': 'builds/releng_sub_%s_configs/%s_x86.py',
@@ -309,6 +306,7 @@ class BuildOptionParser(object):
         'x86_64-beta': 'builds/releng_sub_%s_configs/%s_x86_64_beta.py',
         'x86_64-beta-debug': 'builds/releng_sub_%s_configs/%s_x86_64_beta_debug.py',
         'x86_64-debug': 'builds/releng_sub_%s_configs/%s_x86_64_debug.py',
+        'x86_64-fuzzing-asan': 'builds/releng_sub_%s_configs/%s_x86_64_fuzzing_asan.py',
         'api-16-partner-sample1': 'builds/releng_sub_%s_configs/%s_api_16_partner_sample1.py',
         'aarch64': 'builds/releng_sub_%s_configs/%s_aarch64.py',
         'aarch64-beta': 'builds/releng_sub_%s_configs/%s_aarch64_beta.py',
@@ -367,8 +365,12 @@ class BuildOptionParser(object):
                     cls.platform = 'android'
                     break
             else:
-                sys.exit(error_msg % (target_option, 'platform', '--platform',
-                                      '"linux", "windows", "mac", or "android"'))
+                sys.exit(
+                    error_msg %
+                    (target_option,
+                     'platform',
+                     '--platform',
+                     '"linux", "windows", "mac", or "android"'))
         return cls.bits, cls.platform
 
     @classmethod
@@ -416,13 +418,13 @@ class BuildOptionParser(object):
         if not valid_variant_cfg_path:
             # either the value was an indeterminable path or an invalid short
             # name
-            sys.exit("Whoops!\n'--custom-build-variant' was passed but an "
-                     "appropriate config file could not be determined. Tried "
-                     "using: '%s' but it was not:"
-                     "\n\t-- a valid shortname: %s "
-                     "\n\t-- a valid variant for the given platform and bits." % (
-                         prospective_cfg_path,
-                         str(cls.build_variants.keys())))
+            sys.exit(
+                "Whoops!\n'--custom-build-variant' was passed but an "
+                "appropriate config file could not be determined. Tried "
+                "using: '%s' but it was not:"
+                "\n\t-- a valid shortname: %s "
+                "\n\t-- a valid variant for the given platform and bits." %
+                (prospective_cfg_path, str(list(cls.build_variants.keys()))))
         parser.values.config_files.append(valid_variant_cfg_path)
         setattr(parser.values, option.dest, value)  # the pool
 
@@ -481,7 +483,7 @@ BUILD_BASE_CONFIG_OPTIONS = [
         "help": "Sets the build type and will determine appropriate"
                 " additional config to use. Either pass a config path"
                 " or use a valid shortname from: "
-                "%s" % (BuildOptionParser.build_variants.keys(),)}],
+                "%s" % (list(BuildOptionParser.build_variants.keys()),)}],
     [['--build-pool'], {
         "action": "callback",
         "callback": BuildOptionParser.set_build_pool,
@@ -497,11 +499,6 @@ BUILD_BASE_CONFIG_OPTIONS = [
         "type": "string",
         "dest": "branch",
         "help": "This sets the branch we will be building this for."}],
-    [['--enable-pgo'], {
-        "action": "store_true",
-        "dest": "pgo_build",
-        "default": False,
-        "help": "Sets the build to run in PGO mode"}],
     [['--enable-nightly'], {
         "action": "store_true",
         "dest": "nightly_build",
@@ -603,33 +600,6 @@ items from that key's value."
         self.info("Both --dump-config and --dump-config-hierarchy don't "
                   "actually run any actions.")
 
-    def _assert_cfg_valid_for_action(self, dependencies, action):
-        """ assert dependency keys are in config for given action.
-
-        Takes a list of dependencies and ensures that each have an
-        assoctiated key in the config. Displays error messages as
-        appropriate.
-
-        """
-        # TODO add type and value checking, not just keys
-        # TODO solution should adhere to: bug 699343
-        # TODO add this to BaseScript when the above is done
-        # for now, let's just use this as a way to save typing...
-        c = self.config
-        undetermined_keys = []
-        err_template = "The key '%s' could not be determined \
-and is needed for the action '%s'. Please add this to your config \
-or run without that action (ie: --no-{action})"
-        for dep in dependencies:
-            if dep not in c:
-                undetermined_keys.append(dep)
-        if undetermined_keys:
-            fatal_msgs = [err_template % (key, action)
-                          for key in undetermined_keys]
-            self.fatal("".join(fatal_msgs))
-        # otherwise:
-        return  # all good
-
     def _query_build_prop_from_app_ini(self, prop, app_ini_path=None):
         dirs = self.query_abs_dirs()
         print_conf_setting_path = os.path.join(dirs['abs_src_dir'],
@@ -641,10 +611,15 @@ or run without that action (ie: --no-{action})"
         if (os.path.exists(print_conf_setting_path) and
                 os.path.exists(app_ini_path)):
             cmd = [
-                sys.executable, os.path.join(dirs['abs_src_dir'], 'mach'), 'python',
-                print_conf_setting_path, app_ini_path,
-                'App', prop
-            ]
+                sys.executable,
+                os.path.join(
+                    dirs['abs_src_dir'],
+                    'mach'),
+                'python',
+                print_conf_setting_path,
+                app_ini_path,
+                'App',
+                prop]
             env = self.query_build_env()
             # dirs['abs_obj_dir'] can be different from env['MOZ_OBJDIR'] on
             # mac, and that confuses mach.
@@ -681,7 +656,8 @@ or run without that action (ie: --no-{action})"
 
     def query_is_nightly_promotion(self):
         platform_enabled = self.config.get('enable_nightly_promotion')
-        branch_enabled = self.branch in self.config.get('nightly_promotion_branches')
+        branch_enabled = self.branch in self.config.get(
+            'nightly_promotion_branches')
         return platform_enabled and branch_enabled
 
     def query_build_env(self, **kwargs):
@@ -701,15 +677,14 @@ or run without that action (ie: --no-{action})"
             # explicitly
             if c.get('update_channel'):
                 update_channel = c['update_channel']
-                if isinstance(update_channel, unicode):
+                if isinstance(update_channel, six.text_type):
                     update_channel = update_channel.encode("utf-8")
                 env["MOZ_UPDATE_CHANNEL"] = update_channel
             else:  # let's just give the generic channel based on branch
                 env["MOZ_UPDATE_CHANNEL"] = "nightly-%s" % (self.branch,)
-            self.info("Update channel set to: {}".format(env["MOZ_UPDATE_CHANNEL"]))
-
-        if self.config.get('pgo_build') or self._compile_against_pgo():
-            env['MOZ_PGO'] = '1'
+            self.info(
+                "Update channel set to: {}".format(
+                    env["MOZ_UPDATE_CHANNEL"]))
 
         return env
 
@@ -729,20 +704,6 @@ or run without that action (ie: --no-{action})"
                 mach_env['UPLOAD_PATH'] = os.path.join(mach_env['UPLOAD_PATH'],
                                                        'en-US')
         return mach_env
-
-    def _compile_against_pgo(self):
-        """determines whether a build should be run with pgo even if it is
-        not a classified as a 'pgo build'.
-
-        requirements:
-        1) must be a platform that can run against pgo
-        2) must be a nightly build
-        """
-        c = self.config
-        if self.stage_platform in c['pgo_platforms']:
-            if self.query_is_nightly():
-                return True
-        return False
 
     def _rm_old_package(self):
         """rm the old package."""
@@ -771,7 +732,10 @@ or run without that action (ie: --no-{action})"
             abs_mozconfig_path = get_mozconfig_path(
                 script=self, config=self.config, dirs=dirs)
         except MozconfigPathError as e:
-            self.fatal(e.message)
+            if six.PY2:
+                self.fatal(e.message)
+            else:
+                self.fatal(e.msg)
 
         self.info("Use mozconfig: {}".format(abs_mozconfig_path))
 
@@ -780,8 +744,13 @@ or run without that action (ie: --no-{action})"
         self.info("mozconfig content:")
         self.info(content)
 
-        # finally, copy the mozconfig to a path that 'mach build' expects it to be
-        self.copyfile(abs_mozconfig_path, os.path.join(dirs['abs_src_dir'], '.mozconfig'))
+        # finally, copy the mozconfig to a path that 'mach build' expects it to
+        # be
+        self.copyfile(
+            abs_mozconfig_path,
+            os.path.join(
+                dirs['abs_src_dir'],
+                '.mozconfig'))
 
     # TODO: replace with ToolToolMixin
     def _get_tooltool_auth_file(self):
@@ -805,10 +774,6 @@ or run without that action (ie: --no-{action})"
         env = self.query_build_env()
         env.update(self.query_mach_build_env())
 
-        self._assert_cfg_valid_for_action(
-            ['tooltool_url'],
-            'build'
-        )
         c = self.config
         dirs = self.query_abs_dirs()
         toolchains = os.environ.get('MOZ_TOOLCHAINS')
@@ -831,8 +796,6 @@ or run without that action (ie: --no-{action})"
             cmd.extend([
                 '--tooltool-manifest',
                 os.path.join(dirs['abs_src_dir'], manifest_src),
-                '--tooltool-url',
-                c['tooltool_url'],
             ])
             auth_file = self._get_tooltool_auth_file()
             if auth_file:
@@ -923,8 +886,9 @@ or run without that action (ie: --no-{action})"
         self._create_mozbuild_dir()
         self._ensure_upload_path()
         mach_props = os.path.join(
-            self.query_abs_dirs()['abs_obj_dir'], 'dist', 'mach_build_properties.json'
-        )
+            self.query_abs_dirs()['abs_obj_dir'],
+            'dist',
+            'mach_build_properties.json')
         if os.path.exists(mach_props):
             self.info("Removing previous mach property file: %s" % mach_props)
             self.rmtree(mach_props)
@@ -942,7 +906,8 @@ or run without that action (ie: --no-{action})"
         self._run_mach_command_in_build_env(args)
 
         if not custom_build_targets:
-            self.generate_build_props(console_output=True, halt_on_failure=True)
+            self.generate_build_props(
+                console_output=True, halt_on_failure=True)
 
         self._generate_build_stats()
 
@@ -962,9 +927,14 @@ or run without that action (ie: --no-{action})"
             # invoking mach via bash.
             # See bug 1364651 before considering changing.
             mach = [
-                os.path.join(os.environ['MOZILLABUILD'], 'msys', 'bin', 'bash.exe'),
-                os.path.join(dirs['abs_src_dir'], 'mach')
-            ]
+                os.path.join(
+                    os.environ['MOZILLABUILD'],
+                    'msys',
+                    'bin',
+                    'bash.exe'),
+                os.path.join(
+                    dirs['abs_src_dir'],
+                    'mach')]
         else:
             mach = [sys.executable, 'mach']
         return mach
@@ -1052,7 +1022,8 @@ or run without that action (ie: --no-{action})"
         if not package_filename:
             self.fatal(
                 "Unable to determine the package filename for the multi-l10n build. "
-                "Was trying to run: %s" % package_cmd)
+                "Was trying to run: %s" %
+                package_cmd)
 
         self.info('Multi-l10n package filename is: %s' % package_filename)
 
@@ -1091,7 +1062,10 @@ or run without that action (ie: --no-{action})"
         self.run_command(
             command=command,
             cwd=self.query_abs_dirs()['abs_src_dir'],
-            env=env, output_timeout=self.config.get('max_build_output_timeout', 60 * 20),
+            env=env,
+            output_timeout=self.config.get(
+                'max_build_output_timeout',
+                60 * 20),
             halt_on_failure=True,
         )
 
@@ -1107,14 +1081,14 @@ or run without that action (ie: --no-{action})"
         self.run_command(
             command=[sys.executable, 'mach', '--log-no-times', 'configure'],
             cwd=dirs['abs_src_dir'],
-            env=env, output_timeout=60*3, halt_on_failure=True,
+            env=env, output_timeout=60 * 3, halt_on_failure=True,
         )
         self.run_command(
             command=[
                 'make', 'source-package', 'source-upload',
             ],
             cwd=dirs['abs_obj_dir'],
-            env=env, output_timeout=60*45, halt_on_failure=True,
+            env=env, output_timeout=60 * 45, halt_on_failure=True,
         )
 
     def _is_configuration_shipped(self):
@@ -1128,10 +1102,6 @@ or run without that action (ie: --no-{action})"
         # one-off configs for variants isn't conducive to this since derived
         # configs we need to be reset and we don't like requiring boilerplate
         # in derived configs.
-
-        # All PGO builds are shipped. This takes care of Linux and Windows.
-        if self.config.get('pgo_build'):
-            return True
 
         # Debug builds are never shipped.
         if self.config.get('debug_build'):
@@ -1184,7 +1154,9 @@ or run without that action (ie: --no-{action})"
             self.query_abs_dirs()['abs_obj_dir'], 'sccache-stats.json'
         )
         if not os.path.exists(stats_file):
-            self.info('%s does not exist; not loading sccache stats' % stats_file)
+            self.info(
+                '%s does not exist; not loading sccache stats' %
+                stats_file)
             return
 
         with open(stats_file, 'rb') as fh:
@@ -1266,7 +1238,8 @@ or run without that action (ie: --no-{action})"
                         # contain two omni.ja files: one for the general runtime,
                         # and one for the browser proper.
                         if name == 'omni.ja':
-                            containing_dir = os.path.basename(os.path.dirname(path))
+                            containing_dir = os.path.basename(
+                                os.path.dirname(path))
                             if containing_dir == 'browser':
                                 name = 'browser-omni.ja'
                         if name in subtests:
@@ -1279,7 +1252,9 @@ or run without that action (ie: --no-{action})"
                     size_measurements.append(
                         {'name': name, 'value': subtests[name]})
             except Exception:
-                self.info('Unable to search %s for component sizes.' % installer)
+                self.info(
+                    'Unable to search %s for component sizes.' %
+                    installer)
                 size_measurements = []
 
         if not installer_size and not size_measurements:
@@ -1345,8 +1320,8 @@ or run without that action (ie: --no-{action})"
             return {}
 
         sections = {}
-        for sec_type in parsed.itervalues():
-            for name, size in sec_type.iteritems():
+        for sec_type in list(parsed.values()):
+            for name, size in list(sec_type.items()):
                 if not filter or name in filter:
                     sections[name] = size
 
@@ -1372,12 +1347,13 @@ or run without that action (ie: --no-{action})"
         dist_dir = os.path.join(dirs['abs_obj_dir'], 'dist')
         bin_dir = os.path.join(dist_dir, 'bin')
 
-        for lib_type, lib_names in lib_interests.iteritems():
+        for lib_type, lib_names in list(lib_interests.items()):
             for lib_name in lib_names:
                 lib = os.path.join(bin_dir, lib_name)
                 if os.path.exists(lib):
                     lib_size = 0
-                    section_details = self._get_sections(lib, section_interests)
+                    section_details = self._get_sections(
+                        lib, section_interests)
                     section_measurements = []
                     # Build up the subtests
 
@@ -1392,7 +1368,7 @@ or run without that action (ie: --no-{action})"
                                 section_details['.rodata'] = section_details[ro_alias]
                             del section_details[ro_alias]
 
-                    for k, v in section_details.iteritems():
+                    for k, v in list(section_details.items()):
                         section_measurements.append({'name': k, 'value': v})
                         lib_size += v
                     lib_details.append({
@@ -1479,17 +1455,23 @@ or run without that action (ie: --no-{action})"
         env.update(self.query_mach_build_env())
 
         return_code = self.run_command(
-            command=[sys.executable, 'mach', 'valgrind-test'],
+            command=[
+                sys.executable,
+                'mach',
+                'valgrind-test'],
             cwd=self.query_abs_dirs()['abs_src_dir'],
-            env=env, output_timeout=self.config.get('max_build_output_timeout', 60 * 40)
-        )
+            env=env,
+            output_timeout=self.config.get(
+                'max_build_output_timeout',
+                60 * 40))
         if return_code:
             self.return_code = self.worst_level(
-                EXIT_STATUS_DICT[TBPL_FAILURE],  self.return_code,
+                EXIT_STATUS_DICT[TBPL_FAILURE], self.return_code,
                 AUTOMATION_EXIT_CODES[::-1]
             )
-            self.fatal("'mach valgrind-test' did not run successfully. Please check "
-                       "log for errors.")
+            self.fatal(
+                "'mach valgrind-test' did not run successfully. Please check "
+                "log for errors.")
 
     def _ensure_upload_path(self):
         env = self.query_mach_build_env()
@@ -1531,7 +1513,7 @@ or run without that action (ie: --no-{action})"
                            "Valid return codes %s" % (self.return_code,
                                                       AUTOMATION_EXIT_CODES))
                 self.return_code = 2
-            for status, return_code in EXIT_STATUS_DICT.iteritems():
+            for status, return_code in list(EXIT_STATUS_DICT.items()):
                 if return_code == self.return_code:
                     self.record_status(status, TBPL_STATUS_DICT[status])
         self.summary()
@@ -1558,4 +1540,8 @@ or run without that action (ie: --no-{action})"
             'python',
             os.path.join('testing', 'parse_build_tests_ccov.py'),
         ]
-        self.run_command(command=cmd, cwd=topsrcdir, env=env, halt_on_failure=True)
+        self.run_command(
+            command=cmd,
+            cwd=topsrcdir,
+            env=env,
+            halt_on_failure=True)

@@ -11,10 +11,8 @@ const {
 } = require("devtools/shared/platform/stack");
 const EventEmitter = require("devtools/shared/event-emitter");
 const {
-  ThreadStateTypes,
   UnsolicitedNotifications,
-  UnsolicitedPauses,
-} = require("./constants");
+} = require("devtools/shared/client/constants");
 
 loader.lazyRequireGetter(
   this,
@@ -37,8 +35,9 @@ loader.lazyRequireGetter(
 );
 loader.lazyRequireGetter(
   this,
-  "ObjectClient",
-  "devtools/shared/client/object-client"
+  "ObjectFront",
+  "devtools/shared/fronts/object",
+  true
 );
 loader.lazyRequireGetter(this, "Front", "devtools/shared/protocol", true);
 
@@ -65,6 +64,11 @@ function DebuggerClient(transport) {
    */
   this.mainRoot = null;
   this.expectReply("root", packet => {
+    if (packet.error) {
+      console.error("Error when waiting for root actor", packet);
+      return;
+    }
+
     this.mainRoot = new RootFront(this, packet);
 
     // Root Front is a special case, managing itself as it doesn't have any parent.
@@ -74,85 +78,6 @@ function DebuggerClient(transport) {
     this.emit("connected", packet.applicationType, packet.traits);
   });
 }
-
-/**
- * A declarative helper for defining methods that send requests to the server.
- *
- * @param packetSkeleton
- *        The form of the packet to send. Can specify fields to be filled from
- *        the parameters by using the |arg| function.
- * @param before
- *        The function to call before sending the packet. Is passed the packet,
- *        and the return value is used as the new packet. The |this| context is
- *        the instance of the client object we are defining a method for.
- * @param after
- *        The function to call after the response is received. It is passed the
- *        response, and the return value is considered the new response that
- *        will be passed to the callback. The |this| context is the instance of
- *        the client object we are defining a method for.
- * @return Request
- *         The `Request` object that is a Promise object and resolves once
- *         we receive the response. (See request method for more details)
- */
-DebuggerClient.requester = function(packetSkeleton, config = {}) {
-  const { before, after } = config;
-  return DevToolsUtils.makeInfallible(function(...args) {
-    let outgoingPacket = {
-      to: packetSkeleton.to || this.actor,
-    };
-
-    let maxPosition = -1;
-    for (const k of Object.keys(packetSkeleton)) {
-      if (packetSkeleton[k] instanceof DebuggerClient.Argument) {
-        const { position } = packetSkeleton[k];
-        outgoingPacket[k] = packetSkeleton[k].getArgument(args);
-        maxPosition = Math.max(position, maxPosition);
-      } else {
-        outgoingPacket[k] = packetSkeleton[k];
-      }
-    }
-
-    if (before) {
-      outgoingPacket = before.call(this, outgoingPacket);
-    }
-
-    return this.request(
-      outgoingPacket,
-      DevToolsUtils.makeInfallible(response => {
-        if (after) {
-          const { from } = response;
-          response = after.call(this, response);
-          if (!response.from) {
-            response.from = from;
-          }
-        }
-
-        // The callback is always the last parameter.
-        const thisCallback = args[maxPosition + 1];
-        if (thisCallback) {
-          thisCallback(response);
-        }
-        return response;
-      }, "DebuggerClient.requester request callback")
-    );
-  }, "DebuggerClient.requester");
-};
-
-function arg(pos) {
-  return new DebuggerClient.Argument(pos);
-}
-exports.arg = arg;
-
-DebuggerClient.Argument = function(position) {
-  this.position = position;
-};
-
-DebuggerClient.Argument.prototype.getArgument = function(params) {
-  if (!(this.position in params)) {
-    throw new Error("Bad index into params: " + this.position);
-  }
-  return params[this.position];
-};
 
 // Expose these to save callers the trouble of importing DebuggerSocket
 DebuggerClient.socketConnect = function(options) {
@@ -170,23 +95,16 @@ DebuggerClient.prototype = {
   /**
    * Connect to the server and start exchanging protocol messages.
    *
-   * @param onConnected function
-   *        If specified, will be called when the greeting packet is
-   *        received from the debugging server.
-   *
    * @return Promise
    *         Resolves once connected with an array whose first element
    *         is the application type, by default "browser", and the second
    *         element is the traits object (help figure out the features
    *         and behaviors of the server we connect to. See RootActor).
    */
-  connect: function(onConnected) {
+  connect() {
     return new Promise(resolve => {
       this.once("connected", (applicationType, traits) => {
         this.traits = traits;
-        if (onConnected) {
-          onConnected(applicationType, traits);
-        }
         resolve([applicationType, traits]);
       });
 
@@ -197,14 +115,10 @@ DebuggerClient.prototype = {
   /**
    * Shut down communication with the debugging server.
    *
-   * @param onClosed function
-   *        If specified, will be called when the debugging connection
-   *        has been closed. This parameter is deprecated - please use
-   *        the returned Promise.
    * @return Promise
    *         Resolves after the underlying transport is closed.
    */
-  close: function(onClosed) {
+  close() {
     const promise = new Promise(resolve => {
       // Disable detach event notifications, because event handlers will be in a
       // cleared scope by the time they run.
@@ -231,10 +145,6 @@ DebuggerClient.prototype = {
       cleanup();
     });
 
-    if (onClosed) {
-      promise.then(onClosed);
-    }
-
     return promise;
   },
 
@@ -244,10 +154,12 @@ DebuggerClient.prototype = {
    * @param string actor
    *        The actor ID to send the request to.
    */
-  release: DebuggerClient.requester({
-    to: arg(0),
-    type: "release",
-  }),
+  release(to) {
+    return this.request({
+      to,
+      type: "release",
+    });
+  },
 
   /**
    * Send a request to the debugging server.
@@ -296,7 +208,7 @@ DebuggerClient.prototype = {
    *                     This object also emits "progress" events for each chunk
    *                     that is copied.  See stream-utils.js.
    */
-  request: function(packet, onResponse) {
+  request(packet, onResponse) {
     if (!this.mainRoot) {
       throw Error("Have not yet received a hello packet from the server.");
     }
@@ -437,7 +349,7 @@ DebuggerClient.prototype = {
    *                     This object also emits "progress" events for each chunk
    *                     that is copied.  See stream-utils.js.
    */
-  startBulkRequest: function(request) {
+  startBulkRequest(request) {
     if (!this.traits.bulk) {
       throw Error("Server doesn't support bulk transfers");
     }
@@ -531,7 +443,7 @@ DebuggerClient.prototype = {
    * greetings from new root actors, is the only case at the moment) we must be
    * prepared for a "reply" that doesn't correspond to any request we sent.
    */
-  expectReply: function(actor, request) {
+  expectReply(actor, request) {
     if (this._activeRequests.has(actor)) {
       throw Error("clashing handlers for next reply from " + actor);
     }
@@ -555,7 +467,7 @@ DebuggerClient.prototype = {
    * @param packet object
    *        The incoming packet.
    */
-  onPacket: function(packet) {
+  onPacket(packet) {
     if (!packet.from) {
       DevToolsUtils.reportException(
         "onPacket",
@@ -576,12 +488,6 @@ DebuggerClient.prototype = {
       packet.type == "forwardingCancelled"
     ) {
       this.purgeRequests(packet.prefix);
-      return;
-    }
-
-    // support older browsers for Fx69+ for using the old thread front
-    if (!this.traits.hasThreadFront && packet.from.includes("context")) {
-      this.sendToDeprecatedThreadClient(packet);
       return;
     }
 
@@ -630,60 +536,6 @@ DebuggerClient.prototype = {
     }
   },
 
-  // support older browsers for Fx69+
-  // The code duplication here is intentional until we drop support for
-  // these versions. Once that happens this code can be deleted.
-  sendToDeprecatedThreadClient(packet) {
-    const deprecatedThreadClient = this.getFrontByID(packet.from);
-    if (deprecatedThreadClient && packet.type) {
-      const type = packet.type;
-      if (deprecatedThreadClient.events.includes(type)) {
-        deprecatedThreadClient.emit(type, packet);
-        // we ignore the rest, as the client is expected to handle this packet.
-        return;
-      }
-    }
-
-    let activeRequest;
-    // See if we have a handler function waiting for a reply from this
-    // actor. (Don't count unsolicited notifications or pauses as
-    // replies.)
-    if (
-      this._activeRequests.has(packet.from) &&
-      !(
-        packet.type == ThreadStateTypes.paused &&
-        packet.why.type in UnsolicitedPauses
-      )
-    ) {
-      activeRequest = this._activeRequests.get(packet.from);
-      this._activeRequests.delete(packet.from);
-    }
-
-    // If there is a subsequent request for the same actor, hand it off to the
-    // transport.  Delivery of packets on the other end is always async, even
-    // in the local transport case.
-    this._attemptNextRequest(packet.from);
-
-    // Packets that indicate thread state changes get special treatment.
-    if (
-      packet.type in ThreadStateTypes &&
-      deprecatedThreadClient &&
-      typeof deprecatedThreadClient._onThreadState == "function"
-    ) {
-      deprecatedThreadClient._onThreadState(packet);
-    }
-
-    // Only try to notify listeners on events, not responses to requests
-    // that lack a packet type.
-    if (packet.type) {
-      this.emit(packet.type, packet);
-    }
-
-    if (activeRequest) {
-      activeRequest.emit("json-reply", packet);
-    }
-  },
-
   /**
    * Called by the DebuggerTransport to dispatch incoming bulk packets as
    * appropriate.
@@ -714,7 +566,7 @@ DebuggerClient.prototype = {
    *                  This object also emits "progress" events for each chunk
    *                  that is copied.  See stream-utils.js.
    */
-  onBulkPacket: function(packet) {
+  onBulkPacket(packet) {
     const { actor } = packet;
 
     if (!actor) {
@@ -752,7 +604,7 @@ DebuggerClient.prototype = {
    *        The status code that corresponds to the reason for closing
    *        the stream.
    */
-  onClosed: function() {
+  onClosed() {
     if (this._closed) {
       return;
     }
@@ -916,10 +768,10 @@ DebuggerClient.prototype = {
     return this.__pools;
   },
 
-  addActorPool: function(pool) {
+  addActorPool(pool) {
     this._pools.add(pool);
   },
-  removeActorPool: function(pool) {
+  removeActorPool(pool) {
     this._pools.delete(pool);
   },
 
@@ -928,12 +780,12 @@ DebuggerClient.prototype = {
    *
    * @param {String} actorID: The actor ID to look for.
    */
-  getFrontByID: function(actorID) {
+  getFrontByID(actorID) {
     const pool = this.poolFor(actorID);
     return pool ? pool.get(actorID) : null;
   },
 
-  poolFor: function(actorID) {
+  poolFor(actorID) {
     for (const pool of this._pools) {
       if (pool.has(actorID)) {
         return pool;
@@ -943,17 +795,12 @@ DebuggerClient.prototype = {
   },
 
   /**
-   * Currently attached addon.
+   * Creates an object front for this DebuggerClient and the grip in parameter,
+   * @param {Object} grip: The grip to create the ObjectFront for.
+   * @returns {ObjectFront}
    */
-  activeAddon: null,
-
-  /**
-   * Creates an object client for this DebuggerClient and the grip in parameter,
-   * @param {Object} grip: The grip to create the ObjectClient for.
-   * @returns {ObjectClient}
-   */
-  createObjectClient: function(grip) {
-    return new ObjectClient(this, grip);
+  createObjectFront(grip, threadFront) {
+    return new ObjectFront(this, threadFront.targetFront, threadFront, grip);
   },
 
   get transport() {
@@ -975,6 +822,5 @@ class Request extends EventEmitter {
 }
 
 module.exports = {
-  arg,
   DebuggerClient,
 };

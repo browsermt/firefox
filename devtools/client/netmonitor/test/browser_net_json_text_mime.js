@@ -32,7 +32,7 @@ add_task(async function() {
   verifyRequestItemTarget(
     document,
     getDisplayedRequests(store.getState()),
-    getSortedRequests(store.getState()).get(0),
+    getSortedRequests(store.getState())[0],
     "GET",
     CONTENT_TYPE_SJS + "?fmt=json-text-mime",
     {
@@ -45,7 +45,7 @@ add_task(async function() {
     }
   );
 
-  wait = waitForDOM(document, "#response-panel .CodeMirror-code");
+  const wait = waitForDOM(document, "#response-panel .CodeMirror-code");
   store.dispatch(Actions.toggleNetworkDetails());
   EventUtils.sendMouseEvent(
     { type: "click" },

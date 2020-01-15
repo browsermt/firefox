@@ -263,10 +263,6 @@ mozilla::ipc::IPCResult LayerTransactionParent::RecvUpdate(
             edit.get_OpSetDiagnosticTypes().diagnostics());
         break;
       }
-      case Edit::TOpWindowOverlayChanged: {
-        mLayerManager->SetWindowOverlayChanged();
-        break;
-      }
       // Tree ops
       case Edit::TOpSetRoot: {
         MOZ_LAYERS_LOG(("[ParentSide] SetRoot"));
@@ -632,7 +628,9 @@ bool LayerTransactionParent::SetLayerAttributes(
       refLayer->SetReferentId(specific.get_RefLayerAttributes().id());
       refLayer->SetEventRegionsOverride(
           specific.get_RefLayerAttributes().eventRegionsOverride());
-      UpdateHitTestingTree(layer, "event regions override changed");
+      refLayer->SetRemoteDocumentRect(
+          specific.get_RefLayerAttributes().remoteDocumentRect());
+      UpdateHitTestingTree(layer, "ref layer attributes changed");
       break;
     }
     case Specific::TImageLayerAttributes: {
@@ -731,18 +729,15 @@ mozilla::ipc::IPCResult LayerTransactionParent::RecvGetTransform(
   float scale = 1;
   Point3D scaledOrigin;
   Point3D transformOrigin;
-  for (const PropertyAnimationGroup& group :
-       layer->GetPropertyAnimationGroups()) {
-    if (group.mAnimationData.isNothing()) {
-      continue;
-    }
-    const TransformData& data = group.mAnimationData.ref();
+  const auto* meta = layer->GetTransformLikeMetaData();
+  MOZ_ASSERT(!meta || meta->mTransform);
+  if (meta && meta->mTransform) {
+    const TransformData& data = *meta->mTransform;
     scale = data.appUnitsPerDevPixel();
     scaledOrigin = Point3D(
         NS_round(NSAppUnitsToFloatPixels(data.origin().x, scale)),
         NS_round(NSAppUnitsToFloatPixels(data.origin().y, scale)), 0.0f);
     transformOrigin = data.transformOrigin();
-    break;
   }
 
   // If our parent isn't a perspective layer, then the offset into reference
@@ -750,16 +745,6 @@ mozilla::ipc::IPCResult LayerTransactionParent::RecvGetTransform(
   // to cancel it out.
   if (!layer->GetParent() || !layer->GetParent()->GetTransformIsPerspective()) {
     transform.PostTranslate(-scaledOrigin.x, -scaledOrigin.y, -scaledOrigin.z);
-  }
-
-  // This function is supposed to include the APZ transform, but if root scroll
-  // containers are enabled, then the APZ transform might not be on |layer| but
-  // instead would be on the parent of |layer|, if that is the root scrollable
-  // metrics. So we special-case that behaviour.
-  if (StaticPrefs::layout_scroll_root_frame_containers() &&
-      !layer->HasScrollableFrameMetrics() && layer->GetParent() &&
-      layer->GetParent()->HasRootScrollableFrameMetrics()) {
-    transform *= layer->GetParent()->AsHostLayer()->GetShadowBaseTransform();
   }
 
   *aTransform = Some(transform);
@@ -897,11 +882,11 @@ bool LayerTransactionParent::AllocUnsafeShmem(
   return PLayerTransactionParent::AllocUnsafeShmem(aSize, aType, aShmem);
 }
 
-void LayerTransactionParent::DeallocShmem(ipc::Shmem& aShmem) {
+bool LayerTransactionParent::DeallocShmem(ipc::Shmem& aShmem) {
   if (!mIPCOpen || mDestroyed) {
-    return;
+    return false;
   }
-  PLayerTransactionParent::DeallocShmem(aShmem);
+  return PLayerTransactionParent::DeallocShmem(aShmem);
 }
 
 bool LayerTransactionParent::IsSameProcess() const {

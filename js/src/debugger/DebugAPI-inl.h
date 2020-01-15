@@ -9,6 +9,9 @@
 
 #include "debugger/DebugAPI.h"
 
+#include "vm/GeneratorObject.h"
+#include "vm/PromiseObject.h"  // js::PromiseObject
+
 #include "vm/Stack-inl.h"
 
 namespace js {
@@ -58,9 +61,9 @@ void DebugAPI::onNewGlobalObject(JSContext* cx, Handle<GlobalObject*> global) {
 /* static */
 void DebugAPI::notifyParticipatesInGC(GlobalObject* global,
                                       uint64_t majorGCNumber) {
-  GlobalObject::DebuggerVector* dbgs = global->getDebuggers();
-  if (dbgs && !dbgs->empty()) {
-    slowPathNotifyParticipatesInGC(majorGCNumber, *dbgs);
+  Realm::DebuggerVector& dbgs = global->getDebuggers();
+  if (!dbgs.empty()) {
+    slowPathNotifyParticipatesInGC(majorGCNumber, dbgs);
   }
 }
 
@@ -68,12 +71,12 @@ void DebugAPI::notifyParticipatesInGC(GlobalObject* global,
 bool DebugAPI::onLogAllocationSite(JSContext* cx, JSObject* obj,
                                    HandleSavedFrame frame,
                                    mozilla::TimeStamp when) {
-  GlobalObject::DebuggerVector* dbgs = cx->global()->getDebuggers();
-  if (!dbgs || dbgs->empty()) {
+  Realm::DebuggerVector& dbgs = cx->global()->getDebuggers();
+  if (dbgs.empty()) {
     return true;
   }
   RootedObject hobj(cx, obj);
-  return slowPathOnLogAllocationSite(cx, hobj, frame, when, *dbgs);
+  return slowPathOnLogAllocationSite(cx, hobj, frame, when, dbgs);
 }
 
 /* static */
@@ -112,40 +115,50 @@ bool DebugAPI::checkNoExecute(JSContext* cx, HandleScript script) {
 }
 
 /* static */
-ResumeMode DebugAPI::onEnterFrame(JSContext* cx, AbstractFramePtr frame) {
+bool DebugAPI::onEnterFrame(JSContext* cx, AbstractFramePtr frame) {
   MOZ_ASSERT_IF(frame.hasScript() && frame.script()->isDebuggee(),
                 frame.isDebuggee());
-  if (!frame.isDebuggee()) {
-    return ResumeMode::Continue;
+  if (MOZ_UNLIKELY(frame.isDebuggee())) {
+    return slowPathOnEnterFrame(cx, frame);
   }
-  return slowPathOnEnterFrame(cx, frame);
+  return true;
 }
 
 /* static */
-ResumeMode DebugAPI::onResumeFrame(JSContext* cx, AbstractFramePtr frame) {
+bool DebugAPI::onResumeFrame(JSContext* cx, AbstractFramePtr frame) {
   MOZ_ASSERT_IF(frame.hasScript() && frame.script()->isDebuggee(),
                 frame.isDebuggee());
-  if (!frame.isDebuggee()) {
-    return ResumeMode::Continue;
+  if (MOZ_UNLIKELY(frame.isDebuggee())) {
+    return slowPathOnResumeFrame(cx, frame);
   }
-  return slowPathOnResumeFrame(cx, frame);
+  return true;
 }
 
 /* static */
-ResumeMode DebugAPI::onDebuggerStatement(JSContext* cx,
-                                         AbstractFramePtr frame) {
-  if (!cx->realm()->isDebuggee()) {
-    return ResumeMode::Continue;
+NativeResumeMode DebugAPI::onNativeCall(JSContext* cx, const CallArgs& args,
+                                        CallReason reason) {
+  if (MOZ_UNLIKELY(cx->realm()->isDebuggee())) {
+    return slowPathOnNativeCall(cx, args, reason);
   }
-  return slowPathOnDebuggerStatement(cx, frame);
+
+  return NativeResumeMode::Continue;
 }
 
 /* static */
-ResumeMode DebugAPI::onExceptionUnwind(JSContext* cx, AbstractFramePtr frame) {
-  if (!cx->realm()->isDebuggee()) {
-    return ResumeMode::Continue;
+bool DebugAPI::onDebuggerStatement(JSContext* cx, AbstractFramePtr frame) {
+  if (MOZ_UNLIKELY(cx->realm()->isDebuggee())) {
+    return slowPathOnDebuggerStatement(cx, frame);
   }
-  return slowPathOnExceptionUnwind(cx, frame);
+
+  return true;
+}
+
+/* static */
+bool DebugAPI::onExceptionUnwind(JSContext* cx, AbstractFramePtr frame) {
+  if (MOZ_UNLIKELY(cx->realm()->isDebuggee())) {
+    return slowPathOnExceptionUnwind(cx, frame);
+  }
+  return true;
 }
 
 /* static */
@@ -171,9 +184,10 @@ void DebugAPI::onPromiseSettled(JSContext* cx, Handle<PromiseObject*> promise) {
 }
 
 /* static */
-void DebugAPI::sweepBreakpoints(JSFreeOp* fop, JSScript* script) {
-  if (script->hasDebugScript()) {
-    sweepBreakpointsSlow(fop, script);
+void DebugAPI::traceGeneratorFrame(JSTracer* tracer,
+                                   AbstractGeneratorObject* generator) {
+  if (MOZ_UNLIKELY(generator->realm()->isDebuggee())) {
+    slowPathTraceGeneratorFrame(tracer, generator);
   }
 }
 

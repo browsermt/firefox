@@ -131,7 +131,6 @@
 #include "nsIConsoleService.h"
 
 #include "nsVariant.h"
-#include "nsIProperty.h"
 #include "nsCOMArray.h"
 #include "nsTArray.h"
 #include "nsBaseHashtable.h"
@@ -226,6 +225,7 @@ class nsXPConnect final : public nsIXPConnect {
   // non-interface implementation
  public:
   static XPCJSRuntime* GetRuntimeInstance();
+  XPCJSContext* GetContext() { return mContext; }
 
   static bool IsISupportsDescendant(const nsXPTInterfaceInfo* info);
 
@@ -246,6 +246,8 @@ class nsXPConnect final : public nsIXPConnect {
   // Called by module code on dll shutdown.
   static void ReleaseXPConnectSingleton();
 
+  static void InitJSContext();
+
   void RecordTraversal(void* p, nsISupports* s);
 
  protected:
@@ -258,7 +260,8 @@ class nsXPConnect final : public nsIXPConnect {
   static nsXPConnect* gSelf;
   static bool gOnceAliveNowDead;
 
-  XPCJSRuntime* mRuntime;
+  XPCJSContext* mContext = nullptr;
+  XPCJSRuntime* mRuntime = nullptr;
   bool mShuttingDown;
 
   friend class nsIXPConnect;
@@ -312,8 +315,7 @@ using XPCWrappedNativeScopeList = mozilla::LinkedList<XPCWrappedNativeScope>;
 class XPCJSContext final : public mozilla::CycleCollectedJSContext,
                            public mozilla::LinkedListElement<XPCJSContext> {
  public:
-  static void InitTLS();
-  static XPCJSContext* NewXPCJSContext(XPCJSContext* aPrimaryContext);
+  static XPCJSContext* NewXPCJSContext();
   static XPCJSContext* Get();
 
   XPCJSRuntime* Runtime() const;
@@ -425,7 +427,7 @@ class XPCJSContext final : public mozilla::CycleCollectedJSContext,
   XPCJSContext();
 
   MOZ_IS_CLASS_INIT
-  nsresult Initialize(XPCJSContext* aPrimaryContext);
+  nsresult Initialize();
 
   XPCCallContext* mCallContext;
   AutoMarkingPtr* mAutoRoots;
@@ -823,10 +825,6 @@ class XPCWrappedNativeScope final
 
   nsXPCComponentsBase* GetComponents() const { return mComponents; }
 
-  // Forces the creation of a privileged |Components| object, even in
-  // content scopes. This will crash if used outside of automation.
-  void ForcePrivilegedComponents();
-
   bool AttachComponentsObject(JSContext* aCx);
 
   // Returns the JS object reflection of the Components object.
@@ -879,12 +877,6 @@ class XPCWrappedNativeScope final
 
   void AddSizeOfIncludingThis(JSContext* cx, ScopeSizeInfo* scopeSizeInfo);
 
-  // Gets the appropriate scope object for XBL in this compartment. This method
-  // relies on compartment-per-global still (and release-asserts this). The
-  // context must be same-realm with this compartment's single global upon
-  // entering, and the scope object is wrapped into this compartment.
-  JSObject* EnsureContentXBLScope(JSContext* cx);
-
   // Check whether our mAllowContentXBLScope state matches the given
   // principal.  This is used to avoid sharing compartments on
   // mismatch.
@@ -905,9 +897,6 @@ class XPCWrappedNativeScope final
     return js::GetFirstGlobalInCompartment(Compartment());
   }
 
-  bool IsContentXBLScope() {
-    return xpc::IsContentXBLCompartment(Compartment());
-  }
   bool AllowContentXBLScope(JS::Realm* aRealm);
 
   // ID Object prototype caches.
@@ -1026,7 +1015,7 @@ class XPCNativeMember final {
   // our only data...
   jsid mName;
   uint16_t mIndex;
-  // mFlags needs to be wide enogh to hold the flags in the above enum.
+  // mFlags needs to be wide enough to hold the flags in the above enum.
   uint16_t mFlags : 4;
   // mIndexInInterface is the index of this in our XPCNativeInterface's
   // mMembers.  In theory our XPCNativeInterface could have as many as 2^15-1
@@ -1182,7 +1171,6 @@ class XPCNativeSet final {
 
   inline XPCNativeInterface* FindInterfaceWithIID(const nsIID& iid) const;
 
-  uint16_t GetMemberCount() const { return mMemberCount; }
   uint16_t GetInterfaceCount() const { return mInterfaceCount; }
   XPCNativeInterface** GetInterfaceArray() { return mInterfaces; }
 
@@ -1203,14 +1191,13 @@ class XPCNativeSet final {
       JSContext* cx, nsTArray<RefPtr<XPCNativeInterface>>&& array);
   static already_AddRefed<XPCNativeSet> NewInstanceMutate(XPCNativeSetKey* key);
 
-  XPCNativeSet() : mMemberCount(0), mInterfaceCount(0) {}
+  XPCNativeSet() : mInterfaceCount(0) {}
   ~XPCNativeSet();
   void* operator new(size_t, void* p) noexcept(true) { return p; }
 
   static void DestroyInstance(XPCNativeSet* inst);
 
  private:
-  uint16_t mMemberCount;
   uint16_t mInterfaceCount;
   // Always last - object sized for array.
   // These are strong references.
@@ -1553,7 +1540,7 @@ class XPCWrappedNative final : public nsIXPConnectWrappedNative {
  private:
   enum {
     // Flags bits for mFlatJSObject:
-    FLAT_JS_OBJECT_VALID = JS_BIT(0)
+    FLAT_JS_OBJECT_VALID = js::Bit(0)
   };
 
   bool Init(JSContext* cx, nsIXPCScriptable* scriptable);
@@ -2352,7 +2339,6 @@ class MOZ_STACK_CLASS SandboxOptions : public OptionsBase {
         sameZoneAs(cx),
         freshCompartment(false),
         freshZone(false),
-        isContentXBLScope(false),
         isUAWidgetScope(false),
         invisibleToDebugger(false),
         discardSource(false),
@@ -2372,7 +2358,6 @@ class MOZ_STACK_CLASS SandboxOptions : public OptionsBase {
   JS::RootedObject sameZoneAs;
   bool freshCompartment;
   bool freshZone;
-  bool isContentXBLScope;
   bool isUAWidgetScope;
   bool invisibleToDebugger;
   bool discardSource;
@@ -2513,7 +2498,8 @@ nsresult CreateSandboxObject(JSContext* cx, JS::MutableHandleValue vp,
 // principal and line number 1 as a fallback.
 nsresult EvalInSandbox(JSContext* cx, JS::HandleObject sandbox,
                        const nsAString& source, const nsACString& filename,
-                       int32_t lineNo, JS::MutableHandleValue rval);
+                       int32_t lineNo, bool enforceFilenameRestrictions,
+                       JS::MutableHandleValue rval);
 
 // Helper for retrieving metadata stored in a reserved slot. The metadata
 // is set during the sandbox creation using the "metadata" option.
@@ -2650,9 +2636,7 @@ class CompartmentPrivate {
 
     // Don't share if we have any weird state set.
     return !wantXrays && !isWebExtensionContentScript &&
-           !isContentXBLCompartment && !isUAWidgetCompartment &&
-           !universalXPConnectEnabled &&
-           mScope->XBLScopeStateMatches(principal);
+           !isUAWidgetCompartment && mScope->XBLScopeStateMatches(principal);
   }
 
   CompartmentOriginInfo originInfo;
@@ -2679,23 +2663,11 @@ class CompartmentPrivate {
   // RemoteAddonsParent.jsm.
   bool allowCPOWs;
 
-  // True if this compartment is a content XBL compartment. Every global in
-  // such a compartment is a content XBL scope.
-  bool isContentXBLCompartment;
-
   // True if this compartment is a UA widget compartment.
   bool isUAWidgetCompartment;
 
   // See CompartmentHasExclusiveExpandos.
   bool hasExclusiveExpandos;
-
-  // This is only ever set during mochitest runs when enablePrivilege is called.
-  // It's intended as a temporary stopgap measure until we can finish ripping
-  // out enablePrivilege. Once set, this value is never unset (i.e., it doesn't
-  // follow the old scoping rules of enablePrivilege).
-  //
-  // Using it in production is inherently unsafe.
-  bool universalXPConnectEnabled;
 
   // Whether SystemIsBeingShutDown has been called on this compartment.
   bool wasShutdown;
@@ -2732,10 +2704,6 @@ class CompartmentPrivate {
   // Our XPCWrappedNativeScope.
   mozilla::UniquePtr<XPCWrappedNativeScope> mScope;
 };
-
-bool IsUniversalXPConnectEnabled(JS::Compartment* compartment);
-bool IsUniversalXPConnectEnabled(JSContext* cx);
-bool EnableUniversalXPConnect(JSContext* cx);
 
 inline void CrashIfNotInAutomation() { MOZ_RELEASE_ASSERT(IsInAutomation()); }
 

@@ -39,6 +39,7 @@ PREPROCESSED_TEST_WEBIDL_FILES += [
 WEBIDL_EXAMPLE_INTERFACES += [
     'TestExampleInterface',
     'TestExampleProxyInterface',
+    'TestExampleThrowingConstructorInterface',
     'TestExampleWorkerInterface',
 ]
 
@@ -53,6 +54,8 @@ LOCAL_INCLUDES += [
     '/js/xpconnect/src',
     '/js/xpconnect/wrappers',
 ]
+
+include('/ipc/chromium/chromium-config.mozbuild')
 
 if CONFIG['CC_TYPE'] in ('clang', 'gcc'):
     CXXFLAGS += ['-Wno-error=shadow']

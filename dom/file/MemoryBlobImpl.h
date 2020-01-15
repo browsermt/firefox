@@ -14,7 +14,6 @@
 #include "nsICloneableInputStream.h"
 #include "nsIInputStream.h"
 #include "nsIIPCSerializableInputStream.h"
-#include "nsIMemoryReporter.h"
 #include "nsISeekableStream.h"
 
 namespace mozilla {
@@ -148,7 +147,6 @@ class MemoryBlobImpl final : public BaseBlobImpl {
                      aOther->mStart + aStart, aLength),
         mDataOwner(aOther->mDataOwner) {
     MOZ_ASSERT(mDataOwner && mDataOwner->mData, "must have data");
-    mImmutable = aOther->mImmutable;
   }
 
   ~MemoryBlobImpl() {}

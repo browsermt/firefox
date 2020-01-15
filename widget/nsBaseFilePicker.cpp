@@ -6,14 +6,11 @@
 
 #include "nsCOMPtr.h"
 #include "nsPIDOMWindow.h"
-#include "nsIDocShell.h"
 #include "nsIInterfaceRequestorUtils.h"
-#include "nsIBaseWindow.h"
 #include "nsIWidget.h"
 
 #include "nsIStringBundle.h"
 #include "nsString.h"
-#include "nsIServiceManager.h"
 #include "nsCOMArray.h"
 #include "nsIFile.h"
 #include "nsEnumeratorUtils.h"
@@ -37,6 +34,8 @@ namespace {
 nsresult LocalFileToDirectoryOrBlob(nsPIDOMWindowInner* aWindow,
                                     bool aIsDirectory, nsIFile* aFile,
                                     nsISupports** aResult) {
+  MOZ_ASSERT(aWindow);
+
   if (aIsDirectory) {
 #ifdef DEBUG
     bool isDir;
@@ -44,14 +43,18 @@ nsresult LocalFileToDirectoryOrBlob(nsPIDOMWindowInner* aWindow,
     MOZ_ASSERT(isDir);
 #endif
 
-    RefPtr<Directory> directory = Directory::Create(aWindow, aFile);
+    RefPtr<Directory> directory = Directory::Create(aWindow->AsGlobal(), aFile);
     MOZ_ASSERT(directory);
 
     directory.forget(aResult);
     return NS_OK;
   }
 
-  RefPtr<File> file = File::CreateFromFile(aWindow, aFile);
+  RefPtr<File> file = File::CreateFromFile(aWindow->AsGlobal(), aFile);
+  if (NS_WARN_IF(!file)) {
+    return NS_ERROR_FAILURE;
+  }
+
   file.forget(aResult);
   return NS_OK;
 }
@@ -116,6 +119,10 @@ class nsBaseFilePickerEnumerator : public nsSimpleEnumerator {
 
     nsCOMPtr<nsIFile> localFile = do_QueryInterface(tmp);
     if (!localFile) {
+      return NS_ERROR_FAILURE;
+    }
+
+    if (!mParent) {
       return NS_ERROR_FAILURE;
     }
 
@@ -377,6 +384,10 @@ nsBaseFilePicker::GetDomFileOrDirectory(nsISupports** aValue) {
   }
 
   auto* innerParent = mParent ? mParent->GetCurrentInnerWindow() : nullptr;
+
+  if (!innerParent) {
+    return NS_ERROR_FAILURE;
+  }
 
   return LocalFileToDirectoryOrBlob(
       innerParent, mMode == nsIFilePicker::modeGetFolder, localFile, aValue);

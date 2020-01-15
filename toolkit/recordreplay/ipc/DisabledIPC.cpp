@@ -13,6 +13,8 @@
 namespace mozilla {
 namespace recordreplay {
 
+void NewCheckpoint() { MOZ_CRASH(); }
+
 namespace child {
 
 void InitRecordingOrReplayingProcess(int* aArgc, char*** aArgv) {
@@ -25,8 +27,6 @@ char* PrefsShmemContents(size_t aPrefsLen) { MOZ_CRASH(); }
 base::ProcessId MiddlemanProcessId() { MOZ_CRASH(); }
 
 base::ProcessId ParentProcessId() { MOZ_CRASH(); }
-
-void CreateCheckpoint() { MOZ_CRASH(); }
 
 void SetVsyncObserver(VsyncObserver* aObserver) { MOZ_CRASH(); }
 
@@ -85,6 +85,13 @@ base::ProcessId ParentProcessId() { MOZ_CRASH(); }
 bool IsMiddlemanWithRecordingChild() { return false; }
 
 bool DebuggerRunsInMiddleman() { MOZ_CRASH(); }
+
+bool UseCloudForReplayingProcesses() { return false; }
+
+void CreateReplayingCloudProcess(base::ProcessId aProcessId,
+                                 uint32_t aChannelId) {
+  MOZ_CRASH();
+}
 
 }  // namespace parent
 

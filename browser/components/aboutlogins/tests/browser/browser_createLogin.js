@@ -14,7 +14,7 @@ add_task(async function setup() {
 
 add_task(async function test_create_login() {
   let browser = gBrowser.selectedBrowser;
-  await ContentTask.spawn(browser, null, async () => {
+  await SpecialPowers.spawn(browser, [], async () => {
     let loginList = Cu.waiveXrays(content.document.querySelector("login-list"));
     ok(!loginList._selectedGuid, "should not be a selected guid by default");
     ok(
@@ -51,9 +51,9 @@ add_task(async function test_create_login() {
       (_, data) => data == "addLogin"
     );
 
-    await ContentTask.spawn(
+    await SpecialPowers.spawn(
       browser,
-      [originTuple, i],
+      [[originTuple, i]],
       async ([aOriginTuple, index]) => {
         let loginList = Cu.waiveXrays(
           content.document.querySelector("login-list")
@@ -130,7 +130,7 @@ add_task(async function test_create_login() {
       "passwordmgr-storage-changed",
       (_, data) => data == "modifyLogin"
     );
-    await ContentTask.spawn(browser, originTuple, async aOriginTuple => {
+    await SpecialPowers.spawn(browser, [originTuple], async aOriginTuple => {
       ok(
         !content.document.documentElement.classList.contains("no-logins"),
         "Should no longer be in no logins view"
@@ -195,6 +195,11 @@ add_task(async function test_create_login() {
       let editButton = loginItem.shadowRoot.querySelector(".edit-button");
       editButton.click();
 
+      await ContentTaskUtils.waitForCondition(
+        () => loginItem.dataset.editing,
+        "waiting for 'edit' mode"
+      );
+
       let passwordInput = loginItem.shadowRoot.querySelector(
         "input[name='password']"
       );
@@ -211,7 +216,7 @@ add_task(async function test_create_login() {
     await storageChangedPromised;
     info("login modified in storage");
 
-    await ContentTask.spawn(browser, originTuple, async aOriginTuple => {
+    await SpecialPowers.spawn(browser, [originTuple], async aOriginTuple => {
       let loginList = Cu.waiveXrays(
         content.document.querySelector("login-list")
       );
@@ -236,19 +241,25 @@ add_task(async function test_create_login() {
     });
   }
 
-  await ContentTask.spawn(browser, testCases.length, async testCasesLength => {
-    let loginList = Cu.waiveXrays(content.document.querySelector("login-list"));
-    is(
-      loginList._loginGuidsSortedOrder.length,
-      5,
-      "login list should have a login per testcase"
-    );
-  });
+  await SpecialPowers.spawn(
+    browser,
+    [testCases.length],
+    async testCasesLength => {
+      let loginList = Cu.waiveXrays(
+        content.document.querySelector("login-list")
+      );
+      is(
+        loginList._loginGuidsSortedOrder.length,
+        5,
+        "login list should have a login per testcase"
+      );
+    }
+  );
 });
 
 add_task(async function test_cancel_create_login() {
   let browser = gBrowser.selectedBrowser;
-  await ContentTask.spawn(browser, null, async () => {
+  await SpecialPowers.spawn(browser, [], async () => {
     let loginList = Cu.waiveXrays(content.document.querySelector("login-list"));
     ok(
       loginList._selectedGuid,
@@ -291,7 +302,7 @@ add_task(async function test_cancel_create_login() {
 add_task(
   async function test_cancel_create_login_with_filter_showing_one_login() {
     let browser = gBrowser.selectedBrowser;
-    await ContentTask.spawn(browser, null, async () => {
+    await SpecialPowers.spawn(browser, [], async () => {
       let loginList = Cu.waiveXrays(
         content.document.querySelector("login-list")
       );
@@ -342,7 +353,7 @@ add_task(
 
 add_task(async function test_cancel_create_login_with_logins_filtered_out() {
   let browser = gBrowser.selectedBrowser;
-  await ContentTask.spawn(browser, null, async () => {
+  await SpecialPowers.spawn(browser, [], async () => {
     let loginFilter = Cu.waiveXrays(
       content.document.querySelector("login-filter")
     );
@@ -388,4 +399,80 @@ add_task(async function test_cancel_create_login_with_logins_filtered_out() {
       "the first item in the list should be selected"
     );
   });
+});
+
+add_task(async function test_create_duplicate_login() {
+  let browser = gBrowser.selectedBrowser;
+  EXPECTED_ERROR_MESSAGE = "This login already exists.";
+  await SpecialPowers.spawn(browser, [], async () => {
+    let loginList = Cu.waiveXrays(content.document.querySelector("login-list"));
+    let createButton = loginList._createLoginButton;
+    createButton.click();
+
+    let loginItem = Cu.waiveXrays(content.document.querySelector("login-item"));
+    let originInput = loginItem.shadowRoot.querySelector(
+      "input[name='origin']"
+    );
+    let usernameInput = loginItem.shadowRoot.querySelector(
+      "input[name='username']"
+    );
+    let passwordInput = loginItem.shadowRoot.querySelector(
+      "input[name='password']"
+    );
+    const EXISTING_ORIGIN = "https://example.com";
+    const EXISTING_USERNAME = "testuser2";
+    originInput.value = EXISTING_ORIGIN;
+    usernameInput.value = EXISTING_USERNAME;
+    passwordInput.value = "different password value";
+
+    let saveChangesButton = loginItem.shadowRoot.querySelector(
+      ".save-changes-button"
+    );
+    saveChangesButton.click();
+
+    await ContentTaskUtils.waitForCondition(
+      () => !loginItem._errorMessage.hidden,
+      "waiting until the error message is visible"
+    );
+    let duplicatedGuid = Object.values(loginList._logins).find(
+      v =>
+        v.login.origin == EXISTING_ORIGIN &&
+        v.login.username == EXISTING_USERNAME
+    ).login.guid;
+    is(
+      loginItem._errorMessageLink.dataset.errorGuid,
+      duplicatedGuid,
+      "Error message has GUID of existing duplicated login set on it"
+    );
+
+    let confirmationDialog = Cu.waiveXrays(
+      content.document.querySelector("confirmation-dialog")
+    );
+    ok(
+      confirmationDialog.hidden,
+      "the discard-changes dialog should be hidden before clicking the error-message-text"
+    );
+    loginItem._errorMessageLink.querySelector("a").click();
+    ok(
+      !confirmationDialog.hidden,
+      "the discard-changes dialog should be visible"
+    );
+    let discardChangesButton = confirmationDialog.shadowRoot.querySelector(
+      ".confirm-button"
+    );
+    discardChangesButton.click();
+
+    await ContentTaskUtils.waitForCondition(
+      () =>
+        Object.keys(loginItem._login).length > 1 &&
+        loginItem._login.guid == duplicatedGuid,
+      "waiting until the existing duplicated login is selected"
+    );
+    is(
+      loginList._selectedGuid,
+      duplicatedGuid,
+      "the duplicated login should be selected in the list"
+    );
+  });
+  EXPECTED_ERROR_MESSAGE = null;
 });

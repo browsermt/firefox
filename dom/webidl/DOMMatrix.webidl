@@ -11,10 +11,12 @@
  */
 
 [Pref="layout.css.DOMMatrix.enabled",
- Constructor(optional (DOMString or sequence<unrestricted double> or DOMMatrixReadOnly) init),
  Exposed=(Window,Worker),
  Serializable]
 interface DOMMatrixReadOnly {
+    [Throws]
+    constructor(optional (UTF8String or sequence<unrestricted double> or DOMMatrixReadOnly) init);
+
     [NewObject, Throws] static DOMMatrixReadOnly fromMatrix(optional DOMMatrixInit other = {});
     [NewObject, Throws] static DOMMatrixReadOnly fromFloat32Array(Float32Array array32);
     [NewObject, Throws] static DOMMatrixReadOnly fromFloat64Array(Float64Array array64);
@@ -88,11 +90,13 @@ interface DOMMatrixReadOnly {
 };
 
 [Pref="layout.css.DOMMatrix.enabled",
- Constructor(optional (DOMString or sequence<unrestricted double> or DOMMatrixReadOnly) init),
  Exposed=(Window,Worker),
  Serializable,
  LegacyWindowAlias=WebKitCSSMatrix]
 interface DOMMatrix : DOMMatrixReadOnly {
+    [Throws]
+    constructor(optional (UTF8String or sequence<unrestricted double> or DOMMatrixReadOnly) init);
+
     [NewObject, Throws] static DOMMatrix fromMatrix(optional DOMMatrixInit other = {});
     [NewObject, Throws] static DOMMatrix fromFloat32Array(Float32Array array32);
     [NewObject, Throws] static DOMMatrix fromFloat64Array(Float64Array array64);
@@ -151,7 +155,7 @@ interface DOMMatrix : DOMMatrixReadOnly {
     DOMMatrix skewXSelf(optional unrestricted double sx = 0);
     DOMMatrix skewYSelf(optional unrestricted double sy = 0);
     DOMMatrix invertSelf();
-    [Exposed=Window, Throws] DOMMatrix setMatrixValue(DOMString transformList);
+    [Exposed=Window, Throws] DOMMatrix setMatrixValue(UTF8String transformList);
 };
 
 dictionary DOMMatrix2DInit {

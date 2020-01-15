@@ -26,6 +26,10 @@ const MESSAGE_DATA_LIMIT = Services.prefs.getIntPref(
 const MESSAGE_DATA_TRUNCATED = L10N.getStr("messageDataTruncated");
 const SocketIODecoder = require("devtools/client/netmonitor/src/components/websockets/parsers/socket-io/index.js");
 const {
+  JsonHubProtocol,
+  HandshakeProtocol,
+} = require("devtools/client/netmonitor/src/components/websockets/parsers/signalr/index.js");
+const {
   parseSockJS,
 } = require("devtools/client/netmonitor/src/components/websockets/parsers/sockjs/index.js");
 
@@ -33,7 +37,9 @@ const {
 const Accordion = createFactory(
   require("devtools/client/shared/components/Accordion")
 );
-const RawData = createFactory(require("./RawData"));
+const RawData = createFactory(
+  require("devtools/client/netmonitor/src/components/websockets/RawData")
+);
 loader.lazyGetter(this, "JSONPreview", function() {
   return createFactory(
     require("devtools/client/netmonitor/src/components/JSONPreview")
@@ -107,6 +113,15 @@ class FramePayload extends Component {
         formattedDataTitle: "SockJS",
       };
     }
+    // signalr payload
+    const signalRPayload = this.parseSignalR(payload);
+    if (signalRPayload) {
+      return {
+        formattedData: signalRPayload,
+        formattedDataTitle: "SignalR",
+      };
+    }
+
     // json payload
     const { json } = isJSON(payload);
     if (json) {
@@ -143,6 +158,47 @@ class FramePayload extends Component {
     return null;
   }
 
+  parseSignalR(payload) {
+    // attempt to parse as HandshakeResponseMessage
+    let decoder;
+    try {
+      decoder = new HandshakeProtocol();
+      const [remainingData, responseMessage] = decoder.parseHandshakeResponse(
+        payload
+      );
+
+      if (responseMessage) {
+        return {
+          handshakeResponse: responseMessage,
+          remainingData: this.parseSignalR(remainingData),
+        };
+      }
+    } catch (err) {
+      // ignore errors;
+    }
+
+    // attempt to parse as JsonHubProtocolMessage
+    try {
+      decoder = new JsonHubProtocol();
+      const msgs = decoder.parseMessages(payload, null);
+      if (msgs && msgs.length) {
+        return msgs;
+      }
+    } catch (err) {
+      // ignore errors;
+    }
+
+    // MVP Signalr
+    if (payload.endsWith("\u001e")) {
+      const { json } = isJSON(payload.slice(0, -1));
+      if (json) {
+        return json;
+      }
+    }
+
+    return null;
+  }
+
   render() {
     let payload = this.state.payload;
     let isTruncated = false;
@@ -154,21 +210,26 @@ class FramePayload extends Component {
     const items = [
       {
         className: "rawData",
-        component: RawData({
-          payload,
-        }),
+        component: RawData,
+        componentProps: { payload },
         header: L10N.getFormatStrWithNumbers(
           "netmonitor.ws.rawData.header",
           getFormattedSize(this.state.payload.length)
         ),
-        labelledby: "ws-frame-rawData-header",
+        id: "ws-frame-rawData",
         opened: true,
       },
     ];
     if (!isTruncated && this.state.isFormattedData) {
-      items.push({
+      /**
+       * Push the JSON section (formatted data) at the begging of the array
+       * before the raw data section. Note that the JSON section will be
+       * auto-expanded while the raw data auto-collapsed.
+       */
+      items.unshift({
         className: "formattedData",
-        component: JSONPreview({
+        component: JSONPreview,
+        componentProps: {
           object: this.state.formattedData,
           columns: [
             {
@@ -176,11 +237,9 @@ class FramePayload extends Component {
               width: "100%",
             },
           ],
-        }),
-        header: `${this.state.formattedDataTitle} (${getFormattedSize(
-          this.state.payload.length
-        )})`,
-        labelledby: "ws-frame-formattedData-header",
+        },
+        header: `${this.state.formattedDataTitle}`,
+        id: "ws-frame-formattedData",
         opened: true,
       });
     }

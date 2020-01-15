@@ -85,9 +85,6 @@ class DocGroup final {
 
   AbstractThread* AbstractMainThreadFor(TaskCategory aCategory);
 
-  // Ensure that it's valid to access the DocGroup at this time.
-  void ValidateAccess() const { mTabGroup->ValidateAccess(); }
-
   // Return a pointer that can be continually checked to see if access to this
   // DocGroup is valid. This pointer should live at least as long as the
   // DocGroup.
@@ -112,8 +109,11 @@ class DocGroup final {
 
   static bool TryToLoadIframesInBackground();
 
+  const nsID& AgentClusterId() const { return mAgentClusterId; }
+
  private:
-  DocGroup(TabGroup* aTabGroup, const nsACString& aKey);
+  DocGroup(TabGroup* aTabGroup, const nsACString& aKey,
+           const nsID& aAgentClusterId);
   ~DocGroup();
 
   void FlushIframePostMessageQueue();
@@ -126,6 +126,9 @@ class DocGroup final {
 
   RefPtr<mozilla::ThrottledEventQueue> mIframePostMessageQueue;
   nsTHashtable<nsUint64HashKey> mIframesUsedPostMessageQueue;
+
+  // Each DocGroup has a persisted agent cluster ID.
+  const nsID mAgentClusterId;
 };
 
 }  // namespace dom

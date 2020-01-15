@@ -795,8 +795,11 @@ RefPtr<CompositorSession> GPUProcessManager::CreateRemoteSession(
       new CompositorWidgetVsyncObserver(mVsyncBridge, aRootLayerTreeId);
 
   CompositorWidgetChild* widget =
-      new CompositorWidgetChild(dispatcher, observer);
+      new CompositorWidgetChild(dispatcher, observer, initData);
   if (!child->SendPCompositorWidgetConstructor(widget, initData)) {
+    return nullptr;
+  }
+  if (!widget->Initialize()) {
     return nullptr;
   }
   if (!child->SendInitialize(aRootLayerTreeId)) {
@@ -966,6 +969,13 @@ void GPUProcessManager::CreateContentRemoteDecoderManager(
   mGPUChild->SendNewContentRemoteDecoderManager(std::move(parentPipe));
 
   *aOutEndpoint = std::move(childPipe);
+}
+
+void GPUProcessManager::InitVideoBridge(
+    ipc::Endpoint<PVideoBridgeParent>&& aVideoBridge) {
+  if (EnsureGPUReady()) {
+    mGPUChild->SendInitVideoBridge(std::move(aVideoBridge));
+  }
 }
 
 void GPUProcessManager::MapLayerTreeId(LayersId aLayersId,

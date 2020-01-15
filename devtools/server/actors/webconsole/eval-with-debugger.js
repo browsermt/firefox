@@ -1,6 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+/* global BigInt */
 
 "use strict";
 
@@ -28,6 +29,13 @@ loader.lazyRequireGetter(
   this,
   "WebConsoleCommands",
   "devtools/server/actors/webconsole/utils",
+  true
+);
+
+loader.lazyRequireGetter(
+  this,
+  "LongStringActor",
+  "devtools/server/actors/string",
   true
 );
 
@@ -98,10 +106,15 @@ function isObject(value) {
 exports.evalWithDebugger = function(string, options = {}, webConsole) {
   const evalString = getEvalInput(string);
   const { frame, dbg } = getFrameDbg(options, webConsole);
+
   // early return for replay
   if (dbg.replaying) {
+    if (options.eager) {
+      throw new Error("Eager evaluations are not supported while replaying");
+    }
     return evalReplay(frame, dbg, evalString);
   }
+
   const { dbgWindow, bindSelf } = getDbgWindow(options, dbg, webConsole);
   const helpers = getHelpers(dbgWindow, options, webConsole);
   const { bindings, helperCache } = bindCommands(
@@ -119,6 +132,11 @@ exports.evalWithDebugger = function(string, options = {}, webConsole) {
 
   updateConsoleInputEvaluation(dbg, dbgWindow, webConsole);
 
+  let sideEffectData = null;
+  if (options.eager) {
+    sideEffectData = preventSideEffects(dbg);
+  }
+
   const result = getEvalResult(
     evalString,
     evalOptions,
@@ -126,6 +144,17 @@ exports.evalWithDebugger = function(string, options = {}, webConsole) {
     frame,
     dbgWindow
   );
+
+  if (options.eager) {
+    allowSideEffects(dbg, sideEffectData);
+  }
+
+  // Attempt to initialize any declarations found in the evaluated string
+  // since they may now be stuck in an "initializing" state due to the
+  // error. Already-initialized bindings will be ignored.
+  if (!frame && result && "throw" in result) {
+    parseErrorOutput(dbgWindow, string);
+  }
 
   const { helperResult } = helpers;
 
@@ -148,21 +177,16 @@ function getEvalResult(string, evalOptions, bindings, frame, dbgWindow) {
   if (frame) {
     return frame.evalWithBindings(string, bindings, evalOptions);
   }
-  const result = dbgWindow.executeInGlobalWithBindings(
-    string,
-    bindings,
-    evalOptions
-  );
-  // Attempt to initialize any declarations found in the evaluated string
-  // since they may now be stuck in an "initializing" state due to the
-  // error. Already-initialized bindings will be ignored.
-  if ("throw" in result) {
-    parseErrorOutput(dbgWindow, string);
-  }
-  return result;
+  return dbgWindow.executeInGlobalWithBindings(string, bindings, evalOptions);
 }
 
 function parseErrorOutput(dbgWindow, string) {
+  // Reflect is not usable in workers, so return early to avoid logging an error
+  // to the console when loading it.
+  if (isWorker) {
+    return;
+  }
+
   let ast;
   // Parse errors will raise an exception. We can/should ignore the error
   // since it's already being handled elsewhere and we are only interested
@@ -221,6 +245,241 @@ function parseErrorOutput(dbgWindow, string) {
       dbgWindow.forceLexicalInitializationByName(name);
     }
   }
+}
+
+function preventSideEffects(dbg) {
+  if (dbg.onEnterFrame || dbg.onNativeCall) {
+    throw new Error("Debugger has hook installed");
+  }
+
+  const data = {
+    executedScripts: new Set(),
+    debuggees: dbg.getDebuggees(),
+
+    handler: {
+      hit: () => null,
+    },
+  };
+
+  dbg.addAllGlobalsAsDebuggees();
+
+  dbg.onEnterFrame = frame => {
+    const script = frame.script;
+
+    if (data.executedScripts.has(script)) {
+      return;
+    }
+    data.executedScripts.add(script);
+
+    const offsets = script.getEffectfulOffsets();
+    for (const offset of offsets) {
+      script.setBreakpoint(offset, data.handler);
+    }
+  };
+
+  dbg.onNativeCall = (callee, reason) => {
+    // Getters are never considered effectful, and setters are always effectful.
+    // Natives called normally are handled with a whitelist.
+    if (
+      reason == "get" ||
+      (reason == "call" && nativeHasNoSideEffects(callee))
+    ) {
+      // Returning undefined causes execution to continue normally.
+      return undefined;
+    }
+    // Returning null terminates the current evaluation.
+    return null;
+  };
+
+  return data;
+}
+
+function allowSideEffects(dbg, data) {
+  for (const script of data.executedScripts) {
+    script.clearBreakpoint(data.handler);
+  }
+
+  for (const global of dbg.getDebuggees()) {
+    if (!data.debuggees.includes(global)) {
+      dbg.removeDebuggee(global);
+    }
+  }
+
+  dbg.onEnterFrame = undefined;
+  dbg.onNativeCall = undefined;
+}
+
+// Native functions which are considered to be side effect free.
+let gSideEffectFreeNatives; // string => Array(Function)
+
+function ensureSideEffectFreeNatives() {
+  if (gSideEffectFreeNatives) {
+    return;
+  }
+
+  const natives = [
+    Array,
+    Array.from,
+    Array.isArray,
+    Array.of,
+    Array.prototype.concat,
+    Array.prototype.entries,
+    Array.prototype.every,
+    Array.prototype.fill,
+    Array.prototype.filter,
+    Array.prototype.find,
+    Array.prototype.findIndex,
+    Array.prototype.flat,
+    Array.prototype.flatMap,
+    Array.prototype.forEach,
+    Array.prototype.includes,
+    Array.prototype.indexOf,
+    Array.prototype.join,
+    Array.prototype.keys,
+    Array.prototype.lastIndexOf,
+    Array.prototype.map,
+    Array.prototype.reduce,
+    Array.prototype.reduceRight,
+    Array.prototype.slice,
+    Array.prototype.some,
+    Array.prototype.values,
+    ArrayBuffer,
+    ArrayBuffer.isView,
+    ArrayBuffer.prototype.slice,
+    BigInt,
+    ...allProperties(BigInt),
+    Boolean,
+    DataView,
+    Date,
+    Date.now,
+    Date.parse,
+    Date.UTC,
+    ...matchingProperties(Date.prototype, /^get/),
+    ...matchingProperties(Date.prototype, /^to.*?String$/),
+    Error,
+    Function,
+    Function.prototype.apply,
+    Function.prototype.bind,
+    Function.prototype.call,
+    Int8Array,
+    Uint8Array,
+    Uint8ClampedArray,
+    Int16Array,
+    Uint16Array,
+    Int32Array,
+    Uint32Array,
+    Float32Array,
+    Float64Array,
+    // These will apply to other typed array prototypes.
+    Int8Array.prototype.entries,
+    Int8Array.prototype.every,
+    Int8Array.prototype.filter,
+    Int8Array.prototype.find,
+    Int8Array.prototype.findIndex,
+    Int8Array.prototype.forEach,
+    Int8Array.prototype.indexOf,
+    Int8Array.prototype.includes,
+    Int8Array.prototype.join,
+    Int8Array.prototype.keys,
+    Int8Array.prototype.lastIndexOf,
+    Int8Array.prototype.map,
+    Int8Array.prototype.reduce,
+    Int8Array.prototype.reduceRight,
+    Int8Array.prototype.slice,
+    Int8Array.prototype.some,
+    Int8Array.prototype.subarray,
+    Int8Array.prototype.values,
+    ...allProperties(JSON),
+    Map,
+    Map.prototype.forEach,
+    Map.prototype.get,
+    Map.prototype.has,
+    Map.prototype.entries,
+    Map.prototype.keys,
+    Map.prototype.values,
+    ...allProperties(Math),
+    Number,
+    ...allProperties(Number),
+    ...allProperties(Number.prototype),
+    Object,
+    Object.create,
+    Object.keys,
+    Object.entries,
+    Object.getOwnPropertyDescriptor,
+    Object.getOwnPropertyDescriptors,
+    Object.getOwnPropertyNames,
+    Object.getOwnPropertySymbols,
+    Object.getPrototypeOf,
+    Object.is,
+    Object.isExtensible,
+    Object.isFrozen,
+    Object.isSealed,
+    Object.values,
+    Object.prototype.hasOwnProperty,
+    Object.prototype.isPrototypeOf,
+    RegExp,
+    RegExp.prototype.exec,
+    RegExp.prototype.test,
+    Set,
+    Set.prototype.entries,
+    Set.prototype.forEach,
+    Set.prototype.has,
+    Set.prototype.values,
+    String,
+    ...allProperties(String),
+    ...allProperties(String.prototype),
+    Symbol,
+    Symbol.keyFor,
+    WeakMap,
+    WeakMap.prototype.get,
+    WeakMap.prototype.has,
+    WeakSet,
+    WeakSet.prototype.has,
+    decodeURI,
+    decodeURIComponent,
+    encodeURI,
+    encodeURIComponent,
+    escape,
+    isFinite,
+    isNaN,
+    unescape,
+  ];
+
+  const map = new Map();
+  for (const n of natives) {
+    if (!map.has(n.name)) {
+      map.set(n.name, []);
+    }
+    map.get(n.name).push(n);
+  }
+
+  gSideEffectFreeNatives = map;
+
+  function matchingProperties(obj, regexp) {
+    return Object.getOwnPropertyNames(obj)
+      .filter(n => regexp.test(n))
+      .map(n => obj[n])
+      .filter(v => typeof v == "function");
+  }
+
+  function allProperties(obj) {
+    return matchingProperties(obj, /./);
+  }
+}
+
+function nativeHasNoSideEffects(fn) {
+  // Natives with certain names are always considered side effect free.
+  switch (fn.name) {
+    case "toString":
+    case "toLocaleString":
+    case "valueOf":
+      return true;
+  }
+
+  ensureSideEffectFreeNatives();
+
+  const natives = gSideEffectFreeNatives.get(fn.name);
+  return natives && natives.some(n => fn.isSameNative(n));
 }
 
 function updateConsoleInputEvaluation(dbg, dbgWindow, webConsole) {
@@ -313,14 +572,13 @@ function getDbgWindow(options, dbg, webConsole) {
     return { bindSelf: null, dbgWindow };
   }
 
-  const objActor = webConsole.getActorByID(options.selectedObjectActor);
+  const actor = webConsole.getActorByID(options.selectedObjectActor);
 
-  if (!objActor) {
+  if (!actor) {
     return { bindSelf: null, dbgWindow };
   }
 
-  const jsVal = objActor.rawValue();
-
+  const jsVal = actor instanceof LongStringActor ? actor.str : actor.rawValue();
   if (!isObject(jsVal)) {
     return { bindSelf: jsVal, dbgWindow };
   }

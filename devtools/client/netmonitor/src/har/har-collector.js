@@ -16,7 +16,7 @@ const trace = {
  * HTTP requests executed by the page (including inner iframes).
  */
 function HarCollector(options) {
-  this.webConsoleClient = options.webConsoleClient;
+  this.webConsoleFront = options.webConsoleFront;
   this.debuggerClient = options.debuggerClient;
 
   this.onNetworkEvent = this.onNetworkEvent.bind(this);
@@ -36,12 +36,12 @@ HarCollector.prototype = {
   // Connection
 
   start: function() {
-    this.debuggerClient.on("serverNetworkEvent", this.onNetworkEvent);
+    this.webConsoleFront.on("networkEvent", this.onNetworkEvent);
     this.debuggerClient.on("networkEventUpdate", this.onNetworkEventUpdate);
   },
 
   stop: function() {
-    this.debuggerClient.off("serverNetworkEvent", this.onNetworkEvent);
+    this.webConsoleFront.off("networkEvent", this.onNetworkEvent);
     this.debuggerClient.off("networkEventUpdate", this.onNetworkEventUpdate);
   },
 
@@ -157,14 +157,14 @@ HarCollector.prototype = {
   // Event Handlers
 
   onNetworkEvent: function(packet) {
-    // Skip events from different console actors.
-    if (packet.from != this.webConsoleClient.actor) {
-      return;
-    }
+    trace.log("HarCollector.onNetworkEvent; ", packet);
 
-    trace.log("HarCollector.onNetworkEvent; " + packet.type, packet);
-
-    const { actor, startedDateTime, method, url, isXHR } = packet.eventActor;
+    const {
+      actor,
+      startedDateTime,
+      request: { method, url },
+      isXHR,
+    } = packet;
     const startTime = Date.parse(startedDateTime);
 
     if (this.firstRequestStart == -1) {
@@ -184,6 +184,7 @@ HarCollector.prototype = {
     }
 
     file = {
+      id: actor,
       startedDeltaMs: startTime - this.firstRequestStart,
       startedMs: startTime,
       method: method,
@@ -287,7 +288,7 @@ HarCollector.prototype = {
 
   getData: function(actor, method, callback) {
     return new Promise(resolve => {
-      if (!this.webConsoleClient[method]) {
+      if (!this.webConsoleFront[method]) {
         console.error("HarCollector.getData: ERROR Unknown method!");
         resolve();
       }
@@ -299,7 +300,7 @@ HarCollector.prototype = {
         file
       );
 
-      this.webConsoleClient[method](actor, response => {
+      this.webConsoleFront[method](actor, response => {
         trace.log(
           "HarCollector.getData; RESPONSE " + method + ", " + file.url,
           response
@@ -442,7 +443,7 @@ HarCollector.prototype = {
    *         are available, or rejected if something goes wrong.
    */
   getString: function(stringGrip) {
-    const promise = this.webConsoleClient.getString(stringGrip);
+    const promise = this.webConsoleFront.getString(stringGrip);
     this.requests.push(promise);
     return promise;
   },

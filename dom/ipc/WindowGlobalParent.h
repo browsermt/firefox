@@ -7,6 +7,7 @@
 #ifndef mozilla_dom_WindowGlobalParent_h
 #define mozilla_dom_WindowGlobalParent_h
 
+#include "mozilla/AntiTrackingCommon.h"
 #include "mozilla/RefPtr.h"
 #include "mozilla/dom/DOMRect.h"
 #include "mozilla/dom/PWindowGlobalParent.h"
@@ -16,6 +17,7 @@
 #include "nsISupports.h"
 #include "mozilla/dom/WindowGlobalActor.h"
 #include "mozilla/dom/CanonicalBrowsingContext.h"
+#include "mozilla/dom/ContentBlockingLog.h"
 
 class nsIPrincipal;
 class nsIURI;
@@ -74,7 +76,8 @@ class WindowGlobalParent final : public WindowGlobalActor,
   already_AddRefed<BrowserParent> GetBrowserParent();
 
   void ReceiveRawMessage(const JSWindowActorMessageMeta& aMeta,
-                         ipc::StructuredCloneData&& aData);
+                         ipc::StructuredCloneData&& aData,
+                         ipc::StructuredCloneData&& aStack);
 
   // The principal of this WindowGlobal. This value will not change over the
   // lifetime of the WindowGlobal object, even to reflect changes in
@@ -111,13 +114,8 @@ class WindowGlobalParent final : public WindowGlobalActor,
 
   bool HasBeforeUnload() { return mHasBeforeUnload; }
 
-  already_AddRefed<Promise> ChangeFrameRemoteness(dom::BrowsingContext* aBc,
-                                                  const nsAString& aRemoteType,
-                                                  uint64_t aPendingSwitchId,
-                                                  ErrorResult& aRv);
-
   already_AddRefed<mozilla::dom::Promise> DrawSnapshot(
-      const DOMRect* aRect, double aScale, const nsAString& aBackgroundColor,
+      const DOMRect* aRect, double aScale, const nsACString& aBackgroundColor,
       mozilla::ErrorResult& aRv);
 
   already_AddRefed<Promise> GetSecurityInfo(ErrorResult& aRv);
@@ -134,13 +132,24 @@ class WindowGlobalParent final : public WindowGlobalActor,
   JSObject* WrapObject(JSContext* aCx,
                        JS::Handle<JSObject*> aGivenProto) override;
 
+  void NotifyContentBlockingEvent(
+      uint32_t aEvent, nsIRequest* aRequest, bool aBlocked, nsIURI* aURIHint,
+      const nsTArray<nsCString>& aTrackingFullHashes,
+      const Maybe<AntiTrackingCommon::StorageAccessGrantedReason>& aReason =
+          Nothing());
+
+  ContentBlockingLog* GetContentBlockingLog() { return &mContentBlockingLog; }
+
  protected:
   const nsAString& GetRemoteType() override;
   JSWindowActor::Type GetSide() override { return JSWindowActor::Type::Parent; }
 
   // IPC messages
   mozilla::ipc::IPCResult RecvLoadURI(dom::BrowsingContext* aTargetBC,
-                                      nsDocShellLoadState* aLoadState);
+                                      nsDocShellLoadState* aLoadState,
+                                      bool aSetNavigating);
+  mozilla::ipc::IPCResult RecvInternalLoad(dom::BrowsingContext* aTargetBC,
+                                           nsDocShellLoadState* aLoadState);
   mozilla::ipc::IPCResult RecvUpdateDocumentURI(nsIURI* aURI);
   mozilla::ipc::IPCResult RecvSetIsInitialDocument(bool aIsInitialDocument) {
     mIsInitialDocument = aIsInitialDocument;
@@ -150,15 +159,18 @@ class WindowGlobalParent final : public WindowGlobalActor,
   mozilla::ipc::IPCResult RecvBecomeCurrentWindowGlobal();
   mozilla::ipc::IPCResult RecvDestroy();
   mozilla::ipc::IPCResult RecvRawMessage(const JSWindowActorMessageMeta& aMeta,
-                                         const ClonedMessageData& aData);
-  mozilla::ipc::IPCResult RecvDidEmbedBrowsingContext(
-      dom::BrowsingContext* aContext);
+                                         const ClonedMessageData& aData,
+                                         const ClonedMessageData& aStack);
 
   void ActorDestroy(ActorDestroyReason aWhy) override;
 
   void DrawSnapshotInternal(gfx::CrossProcessPaint* aPaint,
                             const Maybe<IntRect>& aRect, float aScale,
                             nscolor aBackgroundColor, uint32_t aFlags);
+
+  // WebShare API - try to share
+  mozilla::ipc::IPCResult RecvShare(IPCWebShareData&& aData,
+                                    ShareResolver&& aResolver);
 
  private:
   ~WindowGlobalParent();
@@ -176,6 +188,11 @@ class WindowGlobalParent final : public WindowGlobalActor,
 
   // True if this window has a "beforeunload" event listener.
   bool mHasBeforeUnload;
+
+  // The log of all content blocking actions taken on the document related to
+  // this WindowGlobalParent. This is only stored on top-level documents and
+  // includes the activity log for all of the nested subdocuments as well.
+  ContentBlockingLog mContentBlockingLog;
 };
 
 }  // namespace dom

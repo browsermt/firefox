@@ -810,7 +810,7 @@ typedef struct {
     /* |seqNum| eventually contains the reconstructed sequence number. */
     sslSequenceNumber seqNum;
     /* The header of the cipherText. */
-    const PRUint8 *hdr;
+    PRUint8 *hdr;
     unsigned int hdrLen;
 
     /* |buf| is the payload of the ciphertext. */
@@ -1678,10 +1678,12 @@ SECStatus ssl3_SendEmptyCertificate(sslSocket *ss);
 void ssl3_CleanupPeerCerts(sslSocket *ss);
 SECStatus ssl3_SendCertificateStatus(sslSocket *ss);
 SECStatus ssl_SetAuthKeyBits(sslSocket *ss, const SECKEYPublicKey *pubKey);
+SECStatus ssl3_HandleServerSpki(sslSocket *ss);
 SECStatus ssl3_AuthCertificate(sslSocket *ss);
 SECStatus ssl_ReadCertificateStatus(sslSocket *ss, PRUint8 *b,
                                     PRUint32 length);
-SECStatus ssl3_EncodeSigAlgs(const sslSocket *ss, sslBuffer *buf);
+SECStatus ssl3_EncodeSigAlgs(const sslSocket *ss, PRUint16 minVersion,
+                             sslBuffer *buf);
 SECStatus ssl_GetCertificateRequestCAs(const sslSocket *ss,
                                        unsigned int *calenp,
                                        const SECItem **namesp,
@@ -1736,6 +1738,8 @@ SECStatus ssl3_SetupCipherSuite(sslSocket *ss, PRBool initHashes);
 SECStatus ssl_InsertRecordHeader(const sslSocket *ss, ssl3CipherSpec *cwSpec,
                                  SSLContentType contentType, sslBuffer *wrBuf,
                                  PRBool *needsLength);
+PRBool ssl_SignatureSchemeValid(SSLSignatureScheme scheme, SECOidTag spkiOid,
+                                PRBool isTls13);
 
 /* Pull in DTLS functions */
 #include "dtlscon.h"
@@ -1844,6 +1848,30 @@ SSLExp_HkdfExpandLabelWithMech(PRUint16 version, PRUint16 cipherSuite, PK11SymKe
                                PK11SymKey **keyp);
 
 SECStatus SSLExp_SetTimeFunc(PRFileDesc *fd, SSLTimeFunc f, void *arg);
+
+extern SECStatus ssl_CreateMaskingContextInner(PRUint16 version, PRUint16 cipherSuite,
+                                               PK11SymKey *secret,
+                                               const char *label,
+                                               unsigned int labelLen,
+                                               SSLMaskingContext **ctx);
+
+extern SECStatus ssl_CreateMaskInner(SSLMaskingContext *ctx, const PRUint8 *sample,
+                                     unsigned int sampleLen, PRUint8 *outMask,
+                                     unsigned int maskLen);
+
+extern SECStatus ssl_DestroyMaskingContextInner(SSLMaskingContext *ctx);
+
+SECStatus SSLExp_CreateMaskingContext(PRUint16 version, PRUint16 cipherSuite,
+                                      PK11SymKey *secret,
+                                      const char *label,
+                                      unsigned int labelLen,
+                                      SSLMaskingContext **ctx);
+
+SECStatus SSLExp_CreateMask(SSLMaskingContext *ctx, const PRUint8 *sample,
+                            unsigned int sampleLen, PRUint8 *mask,
+                            unsigned int len);
+
+SECStatus SSLExp_DestroyMaskingContext(SSLMaskingContext *ctx);
 
 SEC_END_PROTOS
 

@@ -62,7 +62,7 @@ class MediaStreamAudioSourceNode
   JSObject* WrapObject(JSContext* aCx,
                        JS::Handle<JSObject*> aGivenProto) override;
 
-  void DestroyMediaStream() override;
+  void DestroyMediaTrack() override;
 
   uint16_t NumberOfInputs() const override { return 0; }
 
@@ -91,7 +91,7 @@ class MediaStreamAudioSourceNode
   // From DOMMediaStream::TrackListener.
   void NotifyTrackAdded(const RefPtr<MediaStreamTrack>& aTrack) override;
   void NotifyTrackRemoved(const RefPtr<MediaStreamTrack>& aTrack) override;
-  void NotifyActive() override;
+  void NotifyAudible() override;
 
   // From PrincipalChangeObserver<MediaStreamTrack>.
   void PrincipalChanged(MediaStreamTrack* aMediaStreamTrack) override;

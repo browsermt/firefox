@@ -7,9 +7,6 @@
 #include "mozilla/BasePrincipal.h"
 
 #include "nsDocShell.h"
-#include "nsIObjectInputStream.h"
-#include "nsIObjectOutputStream.h"
-#include "nsIStandardURL.h"
 
 #include "ExpandedPrincipal.h"
 #include "nsNetUtil.h"
@@ -17,12 +14,14 @@
 #include "nsIURIWithSpecialOrigin.h"
 #include "nsScriptSecurityManager.h"
 #include "nsServiceManagerUtils.h"
-
+#include "nsAboutProtocolUtils.h"
+#include "ThirdPartyUtil.h"
 #include "mozilla/ContentPrincipal.h"
 #include "mozilla/NullPrincipal.h"
 #include "mozilla/dom/BlobURLProtocolHandler.h"
 #include "mozilla/dom/ChromeUtils.h"
 #include "mozilla/dom/ToJSValue.h"
+#include "mozilla/dom/nsMixedContentBlocker.h"
 
 #include "json/json.h"
 #include "nsSerializationHelper.h"
@@ -46,6 +45,17 @@ BasePrincipal::GetOrigin(nsACString& aOrigin) {
   NS_ENSURE_SUCCESS(rv, rv);
   aOrigin.Append(suffix);
   return NS_OK;
+}
+
+NS_IMETHODIMP
+BasePrincipal::GetAsciiOrigin(nsACString& aOrigin) {
+  aOrigin.Truncate();
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  return nsContentUtils::GetASCIIOrigin(prinURI, aOrigin);
 }
 
 NS_IMETHODIMP
@@ -150,18 +160,20 @@ static nsTArray<typename T::KeyVal> GetJSONKeys(const Json::Value* aInput) {
   int size = T::eMax + 1;
   nsTArray<typename T::KeyVal> fields;
   for (int i = 0; i != size; i++) {
-    typename T::KeyVal field;
-    // field.valueWasSerialized returns if the field was found in the
+    typename T::KeyVal* field = fields.AppendElement();
+    // field->valueWasSerialized returns if the field was found in the
     // deserialized code. This simplifies the consumers from having to check
     // length.
-    field.valueWasSerialized = false;
-    field.key = static_cast<typename T::SerializableKeys>(i);
-    const std::string key = std::to_string(field.key);
-    if (aInput->isMember(key) && (*aInput)[key].isString()) {
-      field.value.Append(nsDependentCString((*aInput)[key].asCString()));
-      field.valueWasSerialized = true;
+    field->valueWasSerialized = false;
+    field->key = static_cast<typename T::SerializableKeys>(i);
+    const std::string key = std::to_string(field->key);
+    if (aInput->isMember(key)) {
+      const Json::Value& val = (*aInput)[key];
+      if (val.isString()) {
+        field->value.Append(nsDependentCString(val.asCString()));
+        field->valueWasSerialized = true;
+      }
     }
-    fields.AppendElement(field);
   }
   return fields;
 }
@@ -337,9 +349,26 @@ BasePrincipal::SubsumesConsideringDomainIgnoringFPD(nsIPrincipal* aOther,
 }
 
 NS_IMETHODIMP
-BasePrincipal::CheckMayLoad(nsIURI* aURI, bool aReport,
-                            bool aAllowIfInheritsPrincipal) {
+BasePrincipal::CheckMayLoad(nsIURI* aURI, bool aAllowIfInheritsPrincipal) {
+  return CheckMayLoadHelper(aURI, aAllowIfInheritsPrincipal, false, 0);
+}
+
+NS_IMETHODIMP
+BasePrincipal::CheckMayLoadWithReporting(nsIURI* aURI,
+                                         bool aAllowIfInheritsPrincipal,
+                                         uint64_t aInnerWindowID) {
+  return CheckMayLoadHelper(aURI, aAllowIfInheritsPrincipal, true,
+                            aInnerWindowID);
+}
+
+nsresult BasePrincipal::CheckMayLoadHelper(nsIURI* aURI,
+                                           bool aAllowIfInheritsPrincipal,
+                                           bool aReport,
+                                           uint64_t aInnerWindowID) {
   NS_ENSURE_ARG_POINTER(aURI);
+  MOZ_ASSERT(
+      aReport || aInnerWindowID == 0,
+      "Why do we have an inner window id if we're not supposed to report?");
 
   // Check the internal method first, which allows us to quickly approve loads
   // for the System Principal.
@@ -373,11 +402,53 @@ BasePrincipal::CheckMayLoad(nsIURI* aURI, bool aReport,
     if (NS_SUCCEEDED(rv) && prinURI) {
       nsScriptSecurityManager::ReportError(
           "CheckSameOriginError", prinURI, aURI,
-          mOriginAttributes.mPrivateBrowsingId > 0);
+          mOriginAttributes.mPrivateBrowsingId > 0, aInnerWindowID);
     }
   }
 
   return NS_ERROR_DOM_BAD_URI;
+}
+
+NS_IMETHODIMP
+BasePrincipal::IsThirdPartyURI(nsIURI* aURI, bool* aRes) {
+  *aRes = true;
+  // If we do not have a URI its always 3rd party.
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  ThirdPartyUtil* thirdPartyUtil = ThirdPartyUtil::GetInstance();
+  return thirdPartyUtil->IsThirdPartyURI(prinURI, aURI, aRes);
+}
+
+NS_IMETHODIMP
+BasePrincipal::IsThirdPartyPrincipal(nsIPrincipal* aPrin, bool* aRes) {
+  *aRes = true;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  return aPrin->IsThirdPartyURI(prinURI, aRes);
+}
+
+NS_IMETHODIMP
+BasePrincipal::IsSameOrigin(nsIURI* aURI, bool aIsPrivateWin, bool* aRes) {
+  *aRes = false;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  nsIScriptSecurityManager* ssm = nsContentUtils::GetSecurityManager();
+  if (!ssm) {
+    return NS_ERROR_UNEXPECTED;
+    ;
+  }
+  *aRes = NS_SUCCEEDED(
+      ssm->CheckSameOriginURI(prinURI, aURI, false, aIsPrivateWin));
+  return NS_OK;
 }
 
 NS_IMETHODIMP
@@ -399,6 +470,17 @@ BasePrincipal::GetIsExpandedPrincipal(bool* aResult) {
 }
 
 NS_IMETHODIMP
+BasePrincipal::GetAsciiSpec(nsACString& aSpec) {
+  aSpec.Truncate();
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  return prinURI->GetAsciiSpec(aSpec);
+}
+
+NS_IMETHODIMP
 BasePrincipal::GetIsSystemPrincipal(bool* aResult) {
   *aResult = IsSystemPrincipal();
   return NS_OK;
@@ -408,6 +490,82 @@ NS_IMETHODIMP
 BasePrincipal::GetIsAddonOrExpandedAddonPrincipal(bool* aResult) {
   *aResult = AddonPolicy() || ContentScriptAddonPolicy();
   return NS_OK;
+}
+
+NS_IMETHODIMP BasePrincipal::GetIsOnion(bool* aIsOnion) {
+  *aIsOnion = false;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+
+  nsAutoCString host;
+  rv = prinURI->GetHost(host);
+  if (NS_FAILED(rv)) {
+    return NS_OK;
+  }
+  *aIsOnion = StringEndsWith(host, NS_LITERAL_CSTRING(".onion"));
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+BasePrincipal::SchemeIs(const char* aScheme, bool* aResult) {
+  *aResult = false;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  *aResult = prinURI->SchemeIs(aScheme);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+BasePrincipal::IsURIInPrefList(const char* aPref, bool* aResult) {
+  *aResult = false;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_OK;
+  }
+  *aResult = nsContentUtils::IsURIInPrefList(prinURI, aPref);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+BasePrincipal::GetIsOriginPotentiallyTrustworthy(bool* aResult) {
+  MOZ_ASSERT(NS_IsMainThread());
+  *aResult = false;
+
+  nsCOMPtr<nsIURI> uri;
+  nsresult rv = GetURI(getter_AddRefs(uri));
+  if (NS_FAILED(rv) || !uri) {
+    return NS_OK;
+  }
+
+  *aResult = nsMixedContentBlocker::IsPotentiallyTrustworthyOrigin(uri);
+  return NS_OK;
+}
+
+NS_IMETHODIMP
+BasePrincipal::GetAboutModuleFlags(uint32_t* flags) {
+  *flags = 0;
+  nsCOMPtr<nsIURI> prinURI;
+  nsresult rv = GetURI(getter_AddRefs(prinURI));
+  if (NS_FAILED(rv) || !prinURI) {
+    return NS_ERROR_NOT_AVAILABLE;
+  }
+  if (!prinURI->SchemeIs("about")) {
+    return NS_OK;
+  }
+
+  nsCOMPtr<nsIAboutModule> aboutModule;
+  rv = NS_GetAboutModule(prinURI, getter_AddRefs(aboutModule));
+  if (NS_FAILED(rv) || !aboutModule) {
+    return rv;
+  }
+  return aboutModule->GetURIFlags(prinURI, flags);
 }
 
 NS_IMETHODIMP

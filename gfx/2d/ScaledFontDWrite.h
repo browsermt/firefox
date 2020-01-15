@@ -29,14 +29,16 @@ class ScaledFontDWrite final : public ScaledFontBase {
         mUseEmbeddedBitmap(false),
         mRenderingMode(DWRITE_RENDERING_MODE_DEFAULT),
         mGamma(2.2f),
-        mContrast(1.0f) {}
+        mContrast(1.0f),
+        mClearTypeLevel(1.0f) {}
 
   ScaledFontDWrite(IDWriteFontFace* aFontFace,
                    const RefPtr<UnscaledFont>& aUnscaledFont, Float aSize,
                    bool aUseEmbeddedBitmap,
                    DWRITE_RENDERING_MODE aRenderingMode,
                    IDWriteRenderingParams* aParams, Float aGamma,
-                   Float aContrast, const gfxFontStyle* aStyle = nullptr);
+                   Float aContrast, Float aClearTypeLevel,
+                   const gfxFontStyle* aStyle = nullptr);
 
   FontType GetType() const override { return FontType::DWRITE; }
 
@@ -47,9 +49,6 @@ class ScaledFontDWrite final : public ScaledFontBase {
 
   void CopyGlyphsToSink(const GlyphBuffer& aBuffer,
                         ID2D1SimplifiedGeometrySink* aSink);
-
-  void GetGlyphDesignMetrics(const uint16_t* aGlyphIndices, uint32_t aNumGlyphs,
-                             GlyphMetrics* aGlyphMetrics) override;
 
   bool CanSerialize() override { return true; }
 
@@ -68,8 +67,13 @@ class ScaledFontDWrite final : public ScaledFontBase {
   }
   DWRITE_RENDERING_MODE GetRenderingMode() const { return mRenderingMode; }
 
+  bool HasSyntheticBold() const {
+    return (mFontFace->GetSimulations() & DWRITE_FONT_SIMULATIONS_BOLD) != 0;
+  }
+
 #ifdef USE_SKIA
   SkTypeface* CreateSkTypeface() override;
+  void SetupSkFontDrawOptions(SkFont& aFont) override;
   SkFontStyle mStyle;
 #endif
 
@@ -85,10 +89,12 @@ class ScaledFontDWrite final : public ScaledFontBase {
   RefPtr<IDWriteRenderingParams> mParams;
   Float mGamma;
   Float mContrast;
+  Float mClearTypeLevel;
 
- protected:
 #ifdef USE_CAIRO_SCALED_FONT
-  cairo_font_face_t* GetCairoFontFace() override;
+  cairo_font_face_t* CreateCairoFontFace(
+      cairo_font_options_t* aFontOptions) override;
+  void PrepareCairoScaledFont(cairo_scaled_font_t* aFont) override;
 #endif
 
  private:
@@ -98,17 +104,21 @@ class ScaledFontDWrite final : public ScaledFontBase {
   struct InstanceData {
     explicit InstanceData(ScaledFontDWrite* aScaledFont)
         : mUseEmbeddedBitmap(aScaledFont->mUseEmbeddedBitmap),
+          mApplySyntheticBold(aScaledFont->HasSyntheticBold()),
           mRenderingMode(aScaledFont->mRenderingMode),
           mGamma(aScaledFont->mGamma),
-          mContrast(aScaledFont->mContrast) {}
+          mContrast(aScaledFont->mContrast),
+          mClearTypeLevel(aScaledFont->mClearTypeLevel) {}
 
     InstanceData(const wr::FontInstanceOptions* aOptions,
                  const wr::FontInstancePlatformOptions* aPlatformOptions);
 
     bool mUseEmbeddedBitmap;
+    bool mApplySyntheticBold;
     DWRITE_RENDERING_MODE mRenderingMode;
     Float mGamma;
     Float mContrast;
+    Float mClearTypeLevel;
   };
 };
 

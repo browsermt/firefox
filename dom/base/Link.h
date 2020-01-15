@@ -13,7 +13,6 @@
 
 #include "mozilla/MemoryReporting.h"
 #include "nsIContent.h"  // for nsLinkState
-#include "nsIContentPolicy.h"
 
 namespace mozilla {
 
@@ -45,7 +44,7 @@ class Link : public nsISupports {
    */
   explicit Link();
 
-  virtual void SetLinkState(nsLinkState aState);
+  virtual void VisitedQueryFinished(bool aVisited);
 
   /**
    * @return NS_EVENT_STATE_VISITED if this link is visited,

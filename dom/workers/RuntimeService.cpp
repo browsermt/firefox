@@ -6,18 +6,11 @@
 
 #include "RuntimeService.h"
 
-#include "nsAutoPtr.h"
-#include "nsIChannel.h"
+#include "nsContentSecurityUtils.h"
 #include "nsIContentSecurityPolicy.h"
-#include "nsICookieService.h"
 #include "mozilla/dom/Document.h"
-#include "nsIDOMChromeWindow.h"
-#include "nsIEffectiveTLDService.h"
 #include "nsIObserverService.h"
-#include "nsIPrincipal.h"
 #include "nsIScriptContext.h"
-#include "nsIScriptError.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsIStreamTransportService.h"
 #include "nsISupportsPriority.h"
 #include "nsITimer.h"
@@ -98,9 +91,6 @@ namespace workerinternals {
 
 // The size of the worker runtime heaps in bytes. May be changed via pref.
 #define WORKER_DEFAULT_RUNTIME_HEAPSIZE 32 * 1024 * 1024
-
-// The size of the generational GC nursery for workers, in bytes.
-#define WORKER_DEFAULT_NURSERY_SIZE 1 * 1024 * 1024
 
 // The size of the worker JS allocation threshold in MB. May be changed via
 // pref.
@@ -286,6 +276,8 @@ void LoadContextOptions(const char* aPrefName, void* /* aClosure */) {
   JS::ContextOptions contextOptions;
   contextOptions.setAsmJS(GetWorkerPref<bool>(NS_LITERAL_CSTRING("asmjs")))
       .setWasm(GetWorkerPref<bool>(NS_LITERAL_CSTRING("wasm")))
+      .setWasmForTrustedPrinciples(
+          GetWorkerPref<bool>(NS_LITERAL_CSTRING("wasm_trustedprincipals")))
       .setWasmBaseline(
           GetWorkerPref<bool>(NS_LITERAL_CSTRING("wasm_baselinejit")))
       .setWasmIon(GetWorkerPref<bool>(NS_LITERAL_CSTRING("wasm_ionjit")))
@@ -593,19 +585,24 @@ bool ContentSecurityPolicyAllows(JSContext* aCx, JS::HandleValue aValue) {
   WorkerPrivate* worker = GetWorkerPrivateFromContext(aCx);
   worker->AssertIsOnWorkerThread();
 
+  JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, aValue));
+  if (NS_WARN_IF(!jsString)) {
+    JS_ClearPendingException(aCx);
+    return false;
+  }
+
+  nsAutoJSString scriptSample;
+  if (NS_WARN_IF(!scriptSample.init(aCx, jsString))) {
+    JS_ClearPendingException(aCx);
+    return false;
+  }
+
+  if (!nsContentSecurityUtils::IsEvalAllowed(aCx, worker->UsesSystemPrincipal(),
+                                             scriptSample)) {
+    return false;
+  }
+
   if (worker->GetReportCSPViolations()) {
-    JS::Rooted<JSString*> jsString(aCx, JS::ToString(aCx, aValue));
-    if (NS_WARN_IF(!jsString)) {
-      JS_ClearPendingException(aCx);
-      return false;
-    }
-
-    nsAutoJSString scriptSample;
-    if (NS_WARN_IF(!scriptSample.init(aCx, jsString))) {
-      JS_ClearPendingException(aCx);
-      return false;
-    }
-
     nsString fileName;
     uint32_t lineNum = 0;
     uint32_t columnNum = 0;
@@ -814,15 +811,15 @@ static bool PreserveWrapper(JSContext* cx, JS::HandleObject obj) {
   return mozilla::dom::TryPreserveWrapper(obj);
 }
 
-static bool IsWorkerDebuggerGlobalOrSandbox(JSObject* aGlobal) {
+static bool IsWorkerDebuggerGlobalOrSandbox(JS::HandleObject aGlobal) {
   return IsWorkerDebuggerGlobal(aGlobal) || IsWorkerDebuggerSandbox(aGlobal);
 }
 
 JSObject* Wrap(JSContext* cx, JS::HandleObject existing, JS::HandleObject obj) {
-  JSObject* targetGlobal = JS::CurrentGlobalOrNull(cx);
+  JS::RootedObject targetGlobal(cx, JS::CurrentGlobalOrNull(cx));
 
   // Note: the JS engine unwraps CCWs before calling this callback.
-  JSObject* originGlobal = JS::GetNonCCWObjectGlobal(obj);
+  JS::RootedObject originGlobal(cx, JS::GetNonCCWObjectGlobal(obj));
 
   const js::Wrapper* wrapper = nullptr;
   if (IsWorkerDebuggerGlobalOrSandbox(targetGlobal) &&
@@ -954,8 +951,7 @@ class WorkerJSContext final : public mozilla::CycleCollectedJSContext {
 
   nsresult Initialize(JSRuntime* aParentRuntime) {
     nsresult rv = CycleCollectedJSContext::Initialize(
-        aParentRuntime, WORKER_DEFAULT_RUNTIME_HEAPSIZE,
-        WORKER_DEFAULT_NURSERY_SIZE);
+        aParentRuntime, WORKER_DEFAULT_RUNTIME_HEAPSIZE);
     if (NS_WARN_IF(NS_FAILED(rv))) {
       return rv;
     }
@@ -963,7 +959,7 @@ class WorkerJSContext final : public mozilla::CycleCollectedJSContext {
     JSContext* cx = Context();
 
     js::SetPreserveWrapperCallback(cx, PreserveWrapper);
-    JS_InitDestroyPrincipalsCallback(cx, DestroyWorkerPrincipals);
+    JS_InitDestroyPrincipalsCallback(cx, WorkerPrincipal::Destroy);
     JS_SetWrapObjectCallbacks(cx, &WrapObjectCallbacks);
     if (mWorkerPrivate->IsDedicatedWorker()) {
       JS_SetFutexCanWait(cx);
@@ -1210,12 +1206,11 @@ bool RuntimeService::RegisterWorker(WorkerPrivate* aWorkerPrivate) {
 
   const nsCString& domain = aWorkerPrivate->Domain();
 
-  WorkerDomainInfo* domainInfo;
   bool queued = false;
   {
     MutexAutoLock lock(mMutex);
 
-    domainInfo = mDomainMap.LookupForAdd(domain).OrInsert([&domain, parent]() {
+    const auto& domainInfo = mDomainMap.LookupForAdd(domain).OrInsert([&domain, parent]() {
       NS_ASSERTION(!parent, "Shouldn't have a parent here!");
       Unused << parent;  // silence clang -Wunused-lambda-capture in opt builds
       WorkerDomainInfo* wdi = new WorkerDomainInfo();
@@ -1282,7 +1277,7 @@ bool RuntimeService::RegisterWorker(WorkerPrivate* aWorkerPrivate) {
     if (!isServiceWorker) {
       // Service workers are excluded since their lifetime is separate from
       // that of dom windows.
-      nsTArray<WorkerPrivate*>* windowArray =
+      const auto& windowArray =
           mWindowMap.LookupForAdd(window).OrInsert(
               []() { return new nsTArray<WorkerPrivate*>(1); });
       if (!windowArray->Contains(aWorkerPrivate)) {
@@ -1379,8 +1374,8 @@ void RuntimeService::UnregisterWorker(WorkerPrivate* aWorkerPrivate) {
     AssertIsOnMainThread();
 
     for (auto iter = mWindowMap.Iter(); !iter.Done(); iter.Next()) {
-      nsAutoPtr<nsTArray<WorkerPrivate*>>& workers = iter.Data();
-      MOZ_ASSERT(workers.get());
+      const auto& workers = iter.Data();
+      MOZ_ASSERT(workers);
 
       if (workers->RemoveElement(aWorkerPrivate)) {
         MOZ_ASSERT(!workers->Contains(aWorkerPrivate),
@@ -2461,7 +2456,9 @@ WorkerPrivate* GetWorkerPrivateFromContext(JSContext* aCx) {
 }
 
 WorkerPrivate* GetCurrentThreadWorkerPrivate() {
-  MOZ_ASSERT(!NS_IsMainThread());
+  if (NS_IsMainThread()) {
+    return nullptr;
+  }
 
   CycleCollectedJSContext* ccjscx = CycleCollectedJSContext::Get();
   if (!ccjscx) {
@@ -2469,7 +2466,7 @@ WorkerPrivate* GetCurrentThreadWorkerPrivate() {
   }
 
   WorkerJSContext* workerjscx = ccjscx->GetAsWorkerJSContext();
-  // Although GetCurrentThreadWorkerPrivate() is called only for worker
+  // Even when GetCurrentThreadWorkerPrivate() is called on worker
   // threads, the ccjscx will no longer be a WorkerJSContext if called from
   // stable state events during ~CycleCollectedJSContext().
   if (!workerjscx) {
@@ -2484,7 +2481,8 @@ bool IsCurrentThreadRunningWorker() {
 }
 
 bool IsCurrentThreadRunningChromeWorker() {
-  return GetCurrentThreadWorkerPrivate()->UsesSystemPrincipal();
+  WorkerPrivate* wp = GetCurrentThreadWorkerPrivate();
+  return wp && wp->UsesSystemPrincipal();
 }
 
 JSContext* GetCurrentWorkerThreadJSContext() {

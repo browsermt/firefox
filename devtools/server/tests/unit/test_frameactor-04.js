@@ -7,30 +7,29 @@
  * Verify the "frames" request on the thread.
  */
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-function run_test() {
-  Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-  registerCleanupFunction(() => {
-    Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-  });
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-stack");
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-stack", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_pause_frame();
-    });
-  });
-  do_test_pending();
-}
+    );
+
+    const response = await threadFront.getFrames(0, 1000);
+    for (let i = 0; i < response.frames.length; i++) {
+      const expected = frameFixtures[i];
+      const actual = response.frames[i];
+
+      Assert.equal(
+        expected.displayname,
+        actual.displayname,
+        "Frame displayname"
+      );
+      Assert.equal(expected.type, actual.type, "Frame displayname");
+    }
+
+    await threadFront.resume();
+  })
+);
 
 var frameFixtures = [
   // Function calls...
@@ -45,26 +44,8 @@ var frameFixtures = [
   { type: "eval", displayName: "(eval)" },
 ];
 
-async function test_frame_packet() {
-  const response = await gThreadFront.getFrames(0, 1000);
-  for (let i = 0; i < response.frames.length; i++) {
-    const expected = frameFixtures[i];
-    const actual = response.frames[i];
-
-    Assert.equal(expected.displayname, actual.displayname, "Frame displayname");
-    Assert.equal(expected.type, actual.type, "Frame displayname");
-  }
-
-  await gThreadFront.resume();
-  await finishClient(gClient);
-}
-
-function test_pause_frame() {
-  gThreadFront.once("paused", function(packet) {
-    test_frame_packet();
-  });
-
-  gDebuggee.eval(
+function evalCode(debuggee) {
+  debuggee.eval(
     "(" +
       function() {
         function depth3() {

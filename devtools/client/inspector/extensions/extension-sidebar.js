@@ -10,9 +10,8 @@ const {
 } = require("devtools/client/shared/vendor/react");
 const EventEmitter = require("devtools/shared/event-emitter");
 const { Provider } = require("devtools/client/shared/vendor/react-redux");
-const ObjectClient = require("devtools/shared/client/object-client");
 const ExtensionSidebarComponent = createFactory(
-  require("./components/ExtensionSidebar")
+  require("devtools/client/inspector/extensions/components/ExtensionSidebar")
 );
 
 const {
@@ -20,7 +19,7 @@ const {
   updateObjectTreeView,
   updateObjectValueGripView,
   removeExtensionSidebar,
-} = require("./actions/sidebar");
+} = require("devtools/client/inspector/extensions/actions/sidebar");
 
 /**
  * ExtensionSidebar instances represents Inspector sidebars installed by add-ons
@@ -71,40 +70,27 @@ class ExtensionSidebar {
             this.emit("extension-page-unmount", containerEl);
           },
           serviceContainer: {
-            createObjectClient: object => {
-              return new ObjectClient(
-                this.inspector.toolbox.target.client,
-                object
-              );
-            },
-            releaseActor: actor => {
-              if (!actor) {
-                return;
-              }
-              this.inspector.toolbox.target.client.release(actor);
-            },
             highlightDomElement: async (grip, options = {}) => {
-              // TODO: Bug1574506 - Use the contextual WalkerFront for gripToNodeFront.
-              const nodeFront = await this.inspector.walker.gripToNodeFront(
+              const nodeFront = await this.inspector.inspectorFront.getNodeFrontFromNodeGrip(
                 grip
               );
               return nodeFront.highlighterFront.highlight(nodeFront, options);
             },
             unHighlightDomElement: async grip => {
-              // TODO: Bug1574506 - Use the contextual WalkerFront for gripToNodeFront.
-              const nodeFront = await this.inspector.walker.gripToNodeFront(
+              const nodeFront = await this.inspector.inspectorFront.getNodeFrontFromNodeGrip(
                 grip
               );
               return nodeFront.highlighterFront.unhighlight();
             },
             openNodeInInspector: async grip => {
-              const { walker } = this.inspector;
-              const front = await walker.gripToNodeFront(grip);
+              const nodeFront = await this.inspector.inspectorFront.getNodeFrontFromNodeGrip(
+                grip
+              );
               const onInspectorUpdated = this.inspector.once(
                 "inspector-updated"
               );
               const onNodeFrontSet = this.inspector.toolbox.selection.setNodeFront(
-                front,
+                nodeFront,
                 {
                   reason: "inspector-extension-sidebar",
                 }

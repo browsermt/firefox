@@ -1196,6 +1196,11 @@ class Matrix4x4Typed {
 
   bool operator!=(const Matrix4x4Typed& o) const { return !((*this) == o); }
 
+  Matrix4x4Typed& operator=(const Matrix4x4Typed& aOther) {
+    memcpy(components, aOther.components, sizeof(components));
+    return *this;
+  }
+
   template <typename NewTargetUnits>
   Matrix4x4Typed<SourceUnits, NewTargetUnits, T> operator*(
       const Matrix4x4Typed<TargetUnits, NewTargetUnits, T>& aMatrix) const {
@@ -2150,7 +2155,7 @@ class Matrix4x4TypedFlagged
       matrix._14 = _11 * aMatrix._14 + _12 * aMatrix._24;
       matrix._24 = _21 * aMatrix._14 + _22 * aMatrix._24;
       matrix._34 = aMatrix._34;
-      matrix._44 = _41 * aMatrix._14 + _42 * aMatrix._24;
+      matrix._44 = _41 * aMatrix._14 + _42 * aMatrix._24 + aMatrix._44;
       matrix.Analyze();
       return matrix;
     }

@@ -8,6 +8,7 @@ import { CollapsibleSection } from "content-src/components/CollapsibleSection/Co
 import { connect } from "react-redux";
 import { DSDismiss } from "content-src/components/DiscoveryStreamComponents/DSDismiss/DSDismiss";
 import { DSMessage } from "content-src/components/DiscoveryStreamComponents/DSMessage/DSMessage";
+import { DSPrivacyModal } from "content-src/components/DiscoveryStreamComponents/DSPrivacyModal/DSPrivacyModal";
 import { DSTextPromo } from "content-src/components/DiscoveryStreamComponents/DSTextPromo/DSTextPromo";
 import { Hero } from "content-src/components/DiscoveryStreamComponents/Hero/Hero";
 import { Highlights } from "content-src/components/DiscoveryStreamComponents/Highlights/Highlights";
@@ -25,7 +26,7 @@ const ALLOWED_CSS_URL_PREFIXES = [
   "https://img-getpocket.cdn.mozilla.net/",
 ];
 const DUMMY_CSS_SELECTOR = "DUMMY#CSS.SELECTOR";
-let rickRollCache = []; // Cache of random probability values for a spoc position
+let rollCache = []; // Cache of random probability values for a spoc position
 
 /**
  * Validate a CSS declaration. The values are assumed to be normalized by CSSOM.
@@ -111,6 +112,10 @@ export class _DiscoveryStreamBase extends React.PureComponent {
   }
 
   renderComponent(component, embedWidth) {
+    const ENGAGEMENT_LABEL_ENABLED = this.props.Prefs.values[
+      `discoverystream.engagementLabelEnabled`
+    ];
+
     switch (component.type) {
       case "Highlights":
         return <Highlights />;
@@ -149,7 +154,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
           url,
           context,
           cta,
-          campaign_id,
+          flight_id,
           id,
           shim,
         } = spoc;
@@ -163,6 +168,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
             }}
             dispatch={this.props.dispatch}
             shouldSendImpressionStats={true}
+            extraClasses={`ds-dismiss-ds-text-promo`}
           >
             <DSTextPromo
               dispatch={this.props.dispatch}
@@ -173,7 +179,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
               cta_text={cta}
               cta_url={url}
               subtitle={context}
-              campaignId={campaign_id}
+              flightId={flight_id}
               id={id}
               pos={0}
               shim={shim}
@@ -212,6 +218,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
             dispatch={this.props.dispatch}
             items={component.properties.items}
             cta_variant={component.cta_variant}
+            display_engagement_labels={ENGAGEMENT_LABEL_ENABLED}
           />
         );
       case "Hero":
@@ -257,17 +264,18 @@ export class _DiscoveryStreamBase extends React.PureComponent {
 
   componentWillReceiveProps(oldProps) {
     if (this.props.DiscoveryStream.layout !== oldProps.DiscoveryStream.layout) {
-      rickRollCache = [];
+      rollCache = [];
     }
   }
 
   render() {
     // Select layout render data by adding spocs and position to recommendations
-    const { layoutRender, spocsFill } = selectLayoutRender(
-      this.props.DiscoveryStream,
-      this.props.Prefs.values,
-      rickRollCache
-    );
+    const { layoutRender, spocsFill } = selectLayoutRender({
+      state: this.props.DiscoveryStream,
+      prefs: this.props.Prefs.values,
+      rollCache,
+      lang: this.props.document.documentElement.lang,
+    });
     const { config, spocs, feeds } = this.props.DiscoveryStream;
 
     // Send SPOCS Fill if any. Note that it should not send it again if the same
@@ -327,6 +335,9 @@ export class _DiscoveryStreamBase extends React.PureComponent {
     // Render a DS-style TopSites then the rest if any in a collapsible section
     return (
       <React.Fragment>
+        {this.props.DiscoveryStream.isPrivacyInfoModalVisible && (
+          <DSPrivacyModal dispatch={this.props.dispatch} />
+        )}
         {topSites &&
           this.renderLayout([
             {
@@ -334,7 +345,7 @@ export class _DiscoveryStreamBase extends React.PureComponent {
               components: [topSites],
             },
           ])}
-        {layoutRender.length > 0 && (
+        {!!layoutRender.length && (
           <CollapsibleSection
             className="ds-layout"
             collapsed={topStories.pref.collapsed}
@@ -402,4 +413,5 @@ export const DiscoveryStreamBase = connect(state => ({
   DiscoveryStream: state.DiscoveryStream,
   Prefs: state.Prefs,
   Sections: state.Sections,
+  document: global.document,
 }))(_DiscoveryStreamBase);

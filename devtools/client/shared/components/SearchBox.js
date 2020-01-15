@@ -20,7 +20,7 @@ loader.lazyGetter(this, "AutocompletePopup", function() {
   );
 });
 loader.lazyGetter(this, "MDNLink", function() {
-  return createFactory(require("./MdnLink"));
+  return createFactory(require("devtools/client/shared/components/MdnLink"));
 });
 
 loader.lazyRequireGetter(
@@ -46,6 +46,7 @@ class SearchBox extends PureComponent {
       summary: PropTypes.string,
       summaryTooltip: PropTypes.string,
       type: PropTypes.string,
+      value: PropTypes.string,
     };
   }
 
@@ -53,7 +54,7 @@ class SearchBox extends PureComponent {
     super(props);
 
     this.state = {
-      value: "",
+      value: props.value || "",
       focused: false,
     };
 

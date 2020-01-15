@@ -14,10 +14,9 @@ const OTHER_SCOPE_URL = URL_ROOT + "resources/service-workers/scope-page.html";
 add_task(async function() {
   await enableApplicationPanel();
 
-  const { panel, target } = await openNewTabAndApplicationPanel(SIMPLE_URL);
+  const { panel, toolbox } = await openNewTabAndApplicationPanel(SIMPLE_URL);
   const doc = panel.panelWin.document;
 
-  // select service worker view
   selectPage(panel, "service-workers");
 
   info("Wait until the service worker appears in the application panel");
@@ -33,7 +32,7 @@ add_task(async function() {
   info(
     "Navigate to another page for the same domain with another service worker"
   );
-  await navigate(target, OTHER_SCOPE_URL);
+  await navigate(toolbox, OTHER_SCOPE_URL);
 
   info("Wait until the service worker appears in the application panel");
   await waitUntil(() => getWorkerContainers(doc).length === 2);
@@ -45,5 +44,5 @@ add_task(async function() {
 
   ok(true, "Second service worker registration is displayed");
 
-  await unregisterAllWorkers(target.client);
+  await unregisterAllWorkers(toolbox.target.client);
 });

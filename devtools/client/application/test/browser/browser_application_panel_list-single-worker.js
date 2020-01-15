@@ -12,14 +12,14 @@ add_task(async function() {
   const { panel, tab } = await openNewTabAndApplicationPanel(TAB_URL);
   const doc = panel.panelWin.document;
 
-  // select service worker view
   selectPage(panel, "service-workers");
 
+  info("Check for non-existing service worker");
   const isWorkerListEmpty = !!doc.querySelector(".worker-list-empty");
   ok(isWorkerListEmpty, "No Service Worker displayed");
 
   info("Register a service worker in the page.");
-  await ContentTask.spawn(tab.linkedBrowser, {}, async function() {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async function() {
     content.wrappedJSObject.registerServiceWorker();
   });
 
@@ -50,7 +50,7 @@ add_task(async function() {
   );
 
   info("Unregister the service worker");
-  await ContentTask.spawn(tab.linkedBrowser, {}, async function() {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], async function() {
     const registration = await content.wrappedJSObject.sw;
     registration.unregister();
   });

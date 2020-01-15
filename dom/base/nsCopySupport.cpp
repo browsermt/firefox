@@ -8,8 +8,6 @@
 #include "nsIDocumentEncoder.h"
 #include "nsISupports.h"
 #include "nsIContent.h"
-#include "nsIComponentManager.h"
-#include "nsIServiceManager.h"
 #include "nsIClipboard.h"
 #include "nsIFormControl.h"
 #include "nsWidgetsCID.h"
@@ -23,7 +21,6 @@
 
 #include "nsIDocShell.h"
 #include "nsIContentViewerEdit.h"
-#include "nsIClipboardHelper.h"
 #include "nsISelectionController.h"
 
 #include "nsPIDOMWindow.h"
@@ -32,8 +29,6 @@
 #include "nsGkAtoms.h"
 #include "nsIFrame.h"
 #include "nsIURI.h"
-#include "nsIURIMutator.h"
-#include "nsISimpleEnumerator.h"
 #include "nsGenericHTMLElement.h"
 
 // image copy stuff
@@ -594,14 +589,6 @@ static nsresult AppendImagePromise(nsITransferable* aTransferable,
 
   NS_ENSURE_TRUE(aImgRequest, NS_OK);
 
-  uint32_t imageStatus;
-  rv = aImgRequest->GetImageStatus(&imageStatus);
-  NS_ENSURE_SUCCESS(rv, rv);
-  if (!(imageStatus & imgIRequest::STATUS_FRAME_COMPLETE) ||
-      (imageStatus & imgIRequest::STATUS_ERROR)) {
-    return NS_OK;
-  }
-
   bool isMultipart;
   rv = aImgRequest->GetMultipart(&isMultipart);
   NS_ENSURE_SUCCESS(rv, rv);
@@ -732,7 +719,7 @@ static bool IsSelectionInsideRuby(Selection* aSelection) {
   ;
   for (auto i : IntegerRange(rangeCount)) {
     nsRange* range = aSelection->GetRangeAt(i);
-    if (!IsInsideRuby(range->GetCommonAncestor())) {
+    if (!IsInsideRuby(range->GetClosestCommonInclusiveAncestor())) {
       return false;
     }
   }
@@ -814,9 +801,8 @@ bool nsCopySupport::FireClipboardEvent(EventMessage aEventMessage,
     return false;
   }
 
-  nsCOMPtr<nsIDocShell> docShell = piWindow->GetDocShell();
-  const bool chromeShell =
-      docShell && docShell->ItemType() == nsIDocShellTreeItem::typeChrome;
+  BrowsingContext* bc = piWindow->GetBrowsingContext();
+  const bool chromeShell = bc && bc->IsChrome();
 
   // next, fire the cut, copy or paste event
   bool doDefault = true;
@@ -884,7 +870,7 @@ bool nsCopySupport::FireClipboardEvent(EventMessage aEventMessage,
     // there is unmasked range but it's collapsed or it'll be masked
     // automatically, the selected password shouldn't be copied into the
     // clipboard.
-    if (HTMLInputElement* inputElement =
+    if (RefPtr<HTMLInputElement> inputElement =
             HTMLInputElement::FromNodeOrNull(sourceContent)) {
       if (TextEditor* textEditor = inputElement->GetTextEditor()) {
         if (textEditor->IsPasswordEditor() &&

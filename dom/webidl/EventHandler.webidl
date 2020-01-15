@@ -136,14 +136,17 @@ interface mixin GlobalEventHandlers {
 
            // CSS-Animation and CSS-Transition legacy handlers.
            // This handler isn't standard.
+           [BinaryName="onwebkitAnimationEnd"]
            attribute EventHandler onwebkitanimationend;
+           [BinaryName="onwebkitAnimationIteration"]
            attribute EventHandler onwebkitanimationiteration;
+           [BinaryName="onwebkitAnimationStart"]
            attribute EventHandler onwebkitanimationstart;
+           [BinaryName="onwebkitTransitionEnd"]
            attribute EventHandler onwebkittransitionend;
 };
 
-[NoInterfaceObject]
-interface WindowEventHandlers {
+interface mixin WindowEventHandlers {
            attribute EventHandler onafterprint;
            attribute EventHandler onbeforeprint;
            attribute OnBeforeUnloadEventHandler onbeforeunload;
@@ -156,10 +159,8 @@ interface WindowEventHandlers {
            attribute EventHandler onpagehide;
            attribute EventHandler onpageshow;
            attribute EventHandler onpopstate;
-           [Pref="dom.promise_rejection_events.enabled"]
            attribute EventHandler onrejectionhandled;
            attribute EventHandler onstorage;
-           [Pref="dom.promise_rejection_events.enabled"]
            attribute EventHandler onunhandledrejection;
            attribute EventHandler onunload;
 };
@@ -175,12 +176,10 @@ interface mixin DocumentAndElementEventHandlers {
 // whether an ErrorEvent was fired. We don't do that, and until we do we'll
 // need to distinguish between onerror on Window or on nodes.
 
-[NoInterfaceObject]
-interface OnErrorEventHandlerForNodes {
+interface mixin OnErrorEventHandlerForNodes {
            attribute EventHandler onerror;
 };
 
-[NoInterfaceObject]
-interface OnErrorEventHandlerForWindow {
+interface mixin OnErrorEventHandlerForWindow {
            attribute OnErrorEventHandler onerror;
 };

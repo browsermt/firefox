@@ -1,8 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-/* This code is loaded in every child process that is started by mochitest in
- * order to be used as a replacement for UniversalXPConnect
+/* This code is loaded in every child process that is started by mochitest.
  */
 
 "use strict";
@@ -55,11 +54,15 @@ ChromeUtils.defineModuleGetter(
   "AppConstants",
   "resource://gre/modules/AppConstants.jsm"
 );
-
 ChromeUtils.defineModuleGetter(
   this,
   "PerTestCoverageUtils",
   "resource://testing-common/PerTestCoverageUtils.jsm"
+);
+ChromeUtils.defineModuleGetter(
+  this,
+  "ContentTaskUtils",
+  "resource://testing-common/ContentTaskUtils.jsm"
 );
 
 // Allow stuff from this scope to be accessed from non-privileged scopes. This
@@ -168,6 +171,7 @@ class SpecialPowersChild extends JSWindowActorChild {
     this._messageListeners = new ExtensionUtils.DefaultMap(() => new Set());
 
     this._consoleListeners = [];
+    this._spawnTaskImports = {};
     this._encounteredCrashDumpFiles = [];
     this._unexpectedCrashDumpFiles = {};
     this._crashDumpDir = null;
@@ -183,9 +187,9 @@ class SpecialPowersChild extends JSWindowActorChild {
     this._extensionListeners = null;
   }
 
-  handleEvent(aEvent) {
-    // We don't actually care much about the "DOMWindowCreated" event.
-    // We only listen to it to force creation of the actor.
+  observe(aSubject, aTopic, aData) {
+    // Ignore the "{chrome/content}-document-global-created" event. It
+    // is only observed to force creation of the actor.
   }
 
   actorCreated() {
@@ -277,17 +281,23 @@ class SpecialPowersChild extends JSWindowActorChild {
         break;
 
       case "Spawn":
-        let { task, args, caller, taskId } = message.data;
-        return this._spawnTask(task, args, caller, taskId);
+        let { task, args, caller, taskId, imports } = message.data;
+        return this._spawnTask(task, args, caller, taskId, imports);
 
       case "Assert":
         {
+          if ("info" in message.data) {
+            this.SimpleTest.info(message.data.info);
+            break;
+          }
+
           // An assertion has been done in a mochitest chrome script
-          let { name, passed, stack, diag } = message.data;
+          let { name, passed, stack, diag, expectFail } = message.data;
 
           let { SimpleTest } = this;
           if (SimpleTest) {
-            SimpleTest.record(passed, name, diag, stack);
+            let expected = expectFail ? "fail" : "pass";
+            SimpleTest.record(passed, name, diag, stack, expected);
           } else {
             // Well, this is unexpected.
             dump(name + "\n");
@@ -910,13 +920,18 @@ class SpecialPowersChild extends JSWindowActorChild {
         }
       }
       this._permissionsUndoStack.push(cleanupPermissions);
-      this._pendingPermissions.push([
-        pendingPermissions,
-        this._delayCallbackTwice(callback),
-      ]);
-      this._applyPermissions();
+      await new Promise(resolve => {
+        this._pendingPermissions.push([
+          pendingPermissions,
+          this._delayCallbackTwice(resolve),
+        ]);
+        this._applyPermissions();
+      });
     } else {
-      this._setTimeout(callback);
+      await this.promiseTimeout();
+    }
+    if (callback) {
+      callback();
     }
   }
 
@@ -1247,13 +1262,13 @@ class SpecialPowersChild extends JSWindowActorChild {
     );
   }
   attachFormFillControllerTo(window) {
-    this.getFormFillController().attachPopupElementToBrowser(
-      window.docShell,
+    this.getFormFillController().attachPopupElementToDocument(
+      window.document,
       this._getAutoCompletePopup(window)
     );
   }
   detachFormFillControllerFrom(window) {
-    this.getFormFillController().detachFromBrowser(window.docShell);
+    this.getFormFillController().detachFromDocument(window.document);
   }
   isBackButtonEnabled(window) {
     return !this._getTopChromeWindow(window)
@@ -1609,6 +1624,17 @@ class SpecialPowersChild extends JSWindowActorChild {
     return BrowsingContext.getFromWindow(target);
   }
 
+  getBrowsingContextID(target) {
+    return this._browsingContextForTarget(target).id;
+  }
+
+  *getGroupTopLevelWindows(target) {
+    let { group } = this._browsingContextForTarget(target);
+    for (let bc of group.getToplevels()) {
+      yield bc.window;
+    }
+  }
+
   /**
    * Runs a task in the context of the given frame, and returns a
    * promise which resolves to the return value of that task.
@@ -1653,8 +1679,9 @@ class SpecialPowersChild extends JSWindowActorChild {
       browsingContext,
       args,
       task: String(task),
-      caller: SpecialPowersSandbox.getCallerInfo(Components.stack.caller),
+      caller: Cu.getFunctionSourceLocation(task),
       hasHarness: typeof this.SimpleTest === "object",
+      imports: this._spawnTaskImports,
     });
   }
 
@@ -1670,20 +1697,38 @@ class SpecialPowersChild extends JSWindowActorChild {
     });
   }
 
-  _spawnTask(task, args, caller, taskId) {
-    let sb = new SpecialPowersSandbox(null, data => {
-      this.sendAsyncMessage("ProxiedAssert", { taskId, data });
-    });
+  _spawnTask(task, args, caller, taskId, imports) {
+    let sb = new SpecialPowersSandbox(
+      null,
+      data => {
+        this.sendAsyncMessage("ProxiedAssert", { taskId, data });
+      },
+      { imports }
+    );
 
     sb.sandbox.SpecialPowers = this;
-    Object.defineProperty(sb.sandbox, "content", {
-      get: () => {
-        return this.contentWindow;
-      },
-      enumerable: true,
-    });
+    sb.sandbox.ContentTaskUtils = ContentTaskUtils;
+    for (let [global, prop] of Object.entries({
+      content: "contentWindow",
+      docShell: "docShell",
+    })) {
+      Object.defineProperty(sb.sandbox, global, {
+        get: () => {
+          return this[prop];
+        },
+        enumerable: true,
+      });
+    }
 
     return sb.execute(task, args, caller);
+  }
+
+  /**
+   * Automatically imports the given symbol from the given JSM for any
+   * task spawned by this SpecialPowers instance.
+   */
+  addTaskImport(symbol, url) {
+    this._spawnTaskImports[symbol] = url;
   }
 
   get SimpleTest() {
@@ -2238,6 +2283,34 @@ SpecialPowersChild.prototype._proxiedObservers = {
 
   "specialpowers-service-worker-shutdown": function(aMessage) {
     Services.obs.notifyObservers(null, "specialpowers-service-worker-shutdown");
+  },
+
+  "specialpowers-csp-on-violate-policy": function(aMessage) {
+    let subject = null;
+
+    try {
+      subject = Services.io.newURI(aMessage.data.subject);
+    } catch (ex) {
+      // if it's not a valid URI it must be an nsISupportsCString
+      subject = Cc["@mozilla.org/supports-cstring;1"].createInstance(
+        Ci.nsISupportsCString
+      );
+      subject.data = aMessage.data.subject;
+    }
+    Services.obs.notifyObservers(
+      subject,
+      "specialpowers-csp-on-violate-policy",
+      aMessage.data.data
+    );
+  },
+
+  "specialpowers-xfo-on-violate-policy": function(aMessage) {
+    let subject = Services.io.newURI(aMessage.data.subject);
+    Services.obs.notifyObservers(
+      subject,
+      "specialpowers-xfo-on-violate-policy",
+      aMessage.data.data
+    );
   },
 };
 

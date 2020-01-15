@@ -496,6 +496,13 @@ static const struct mechanismList mechanisms[] = {
     { CKM_NSS_PKCS12_PBE_SHA256_HMAC_KEY_GEN, { 32, 32, CKF_GENERATE }, PR_TRUE },
     { CKM_NSS_PKCS12_PBE_SHA384_HMAC_KEY_GEN, { 48, 48, CKF_GENERATE }, PR_TRUE },
     { CKM_NSS_PKCS12_PBE_SHA512_HMAC_KEY_GEN, { 64, 64, CKF_GENERATE }, PR_TRUE },
+    /* ------------------ NIST 800-108 Key Derivations  ------------------- */
+    { CKM_SP800_108_COUNTER_KDF, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
+    { CKM_SP800_108_FEEDBACK_KDF, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
+    { CKM_SP800_108_DOUBLE_PIPELINE_KDF, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
+    { CKM_NSS_SP800_108_COUNTER_KDF_DERIVE_DATA, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
+    { CKM_NSS_SP800_108_FEEDBACK_KDF_DERIVE_DATA, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
+    { CKM_NSS_SP800_108_DOUBLE_PIPELINE_KDF_DERIVE_DATA, { 0, CK_MAX, CKF_DERIVE }, PR_TRUE },
     /* ------------------ AES Key Wrap (also encrypt)  ------------------- */
     { CKM_NETSCAPE_AES_KEY_WRAP, { 16, 32, CKF_EN_DE_WR_UN }, PR_TRUE },
     { CKM_NETSCAPE_AES_KEY_WRAP_PAD, { 16, 32, CKF_EN_DE_WR_UN }, PR_TRUE },
@@ -626,7 +633,7 @@ sftk_hasNullPassword(SFTKSlot *slot, SFTKDBHandle *keydb)
     pwenabled = PR_FALSE;
     if (sftkdb_HasPasswordSet(keydb) == SECSuccess) {
         PRBool tokenRemoved = PR_FALSE;
-        SECStatus rv = sftkdb_CheckPassword(keydb, "", &tokenRemoved);
+        SECStatus rv = sftkdb_CheckPasswordNull(keydb, &tokenRemoved);
         if (tokenRemoved) {
             sftk_CloseAllSessions(slot, PR_FALSE);
         }
@@ -2285,14 +2292,19 @@ sftk_PutPubKey(SFTKObject *publicKey, SFTKObject *privateKey, CK_KEY_TYPE keyTyp
         default:
             return CKR_KEY_TYPE_INCONSISTENT;
     }
+    if (crv != CKR_OK) {
+        return crv;
+    }
     crv = sftk_AddAttributeType(publicKey, CKA_CLASS, &classType,
                                 sizeof(CK_OBJECT_CLASS));
-    if (crv != CKR_OK)
+    if (crv != CKR_OK) {
         return crv;
+    }
     crv = sftk_AddAttributeType(publicKey, CKA_KEY_TYPE, &keyType,
                                 sizeof(CK_KEY_TYPE));
-    if (crv != CKR_OK)
+    if (crv != CKR_OK) {
         return crv;
+    }
     /* now handle the operator attributes */
     if (sftk_isTrue(privateKey, CKA_DECRYPT)) {
         crv = sftk_forceAttribute(publicKey, CKA_ENCRYPT, &cktrue, sizeof(CK_BBOOL));
@@ -2800,8 +2812,9 @@ sftk_CloseAllSessions(SFTKSlot *slot, PRBool logout)
             } else {
                 SKIP_AFTER_FORK(PZ_Unlock(lock));
             }
-            if (session)
-                sftk_FreeSession(session);
+            if (session) {
+                sftk_DestroySession(session);
+            }
         } while (session != NULL);
     }
     return CKR_OK;
@@ -3091,6 +3104,9 @@ sftk_closePeer(PRBool isFIPS)
     return;
 }
 
+extern void sftk_PBELockInit(void);
+extern void sftk_PBELockShutdown(void);
+
 /* NSC_Initialize initializes the Cryptoki library. */
 CK_RV
 nsc_CommonInitialize(CK_VOID_PTR pReserved, PRBool isFIPS)
@@ -3106,6 +3122,8 @@ nsc_CommonInitialize(CK_VOID_PTR pReserved, PRBool isFIPS)
     }
 
     ENABLE_FORK_CHECK();
+
+    sftk_PBELockInit();
 
     rv = SECOID_Init();
     if (rv != SECSuccess) {
@@ -3286,6 +3304,8 @@ nsc_CommonFinalize(CK_VOID_PTR pReserved, PRBool isFIPS)
 
     /* clean up the default OID table */
     SECOID_Shutdown();
+
+    sftk_PBELockShutdown();
 
     /* reset fork status in util */
     UTIL_SetForkState(PR_FALSE);
@@ -3941,7 +3961,7 @@ NSC_SetPIN(CK_SESSION_HANDLE hSession, CK_CHAR_PTR pOldPin,
             PZ_Unlock(slot->slotLock);
 
             tokenRemoved = PR_FALSE;
-            rv = sftkdb_CheckPassword(handle, "", &tokenRemoved);
+            rv = sftkdb_CheckPasswordNull(handle, &tokenRemoved);
             if (tokenRemoved) {
                 sftk_CloseAllSessions(slot, PR_FALSE);
             }
@@ -4039,8 +4059,6 @@ NSC_CloseSession(CK_SESSION_HANDLE hSession)
     if (sftkqueue_is_queued(session, hSession, slot->head, slot->sessHashSize)) {
         sessionFound = PR_TRUE;
         sftkqueue_delete(session, hSession, slot->head, slot->sessHashSize);
-        session->refCount--; /* can't go to zero while we hold the reference */
-        PORT_Assert(session->refCount > 0);
     }
     PZ_Unlock(lock);
 
@@ -4061,9 +4079,10 @@ NSC_CloseSession(CK_SESSION_HANDLE hSession)
         if (session->info.flags & CKF_RW_SESSION) {
             (void)PR_ATOMIC_DECREMENT(&slot->rwSessionCount);
         }
+        sftk_DestroySession(session);
+        session = NULL;
     }
 
-    sftk_FreeSession(session);
     return CKR_OK;
 }
 

@@ -44,7 +44,7 @@ impl Example for App {
         builder.push_simple_stacking_context(
             bounds.origin,
             space_and_clip.spatial_id,
-            true,
+            PrimitiveFlags::IS_BACKFACE_VISIBLE,
         );
 
         let image_size = LayoutSize::new(100.0, 100.0);
@@ -55,8 +55,6 @@ impl Example for App {
                 space_and_clip,
             ),
             bounds,
-            image_size,
-            LayoutSize::zero(),
             ImageRendering::Auto,
             AlphaType::PremultipliedAlpha,
             self.image_key,
@@ -69,8 +67,6 @@ impl Example for App {
                 space_and_clip,
             ),
             bounds,
-            image_size,
-            LayoutSize::zero(),
             ImageRendering::Pixelated,
             AlphaType::PremultipliedAlpha,
             self.image_key,
@@ -102,7 +98,7 @@ impl Example for App {
                 let mut txn = Transaction::new();
                 txn.update_image(
                     self.image_key,
-                    ImageDescriptor::new(64, 64, ImageFormat::BGRA8, true, false),
+                    ImageDescriptor::new(64, 64, ImageFormat::BGRA8, ImageDescriptorFlags::IS_OPAQUE),
                     ImageData::new(image_data),
                     &DirtyRect::All,
                 );

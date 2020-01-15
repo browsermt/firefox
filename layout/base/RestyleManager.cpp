@@ -19,6 +19,7 @@
 #include "mozilla/PresShellInlines.h"
 #include "mozilla/ServoBindings.h"
 #include "mozilla/ServoStyleSetInlines.h"
+#include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/Unused.h"
 #include "mozilla/ViewportFrame.h"
 #include "mozilla/dom/ChildIterator.h"
@@ -540,7 +541,6 @@ nsCString RestyleManager::ChangeHintToString(nsChangeHint aHint) {
                          "ClearAncestorIntrinsics",
                          "ClearDescendantIntrinsics",
                          "NeedDirtyReflow",
-                         "SyncFrameView",
                          "UpdateCursor",
                          "UpdateEffects",
                          "UpdateOpacityLayer",
@@ -554,7 +554,6 @@ nsCString RestyleManager::ChangeHintToString(nsChangeHint aHint) {
                          "RecomputePosition",
                          "UpdateContainingBlock",
                          "BorderStyleNoneChange",
-                         "UpdateTextPath",
                          "SchedulePaint",
                          "NeutralChange",
                          "InvalidateRenderingObservers",
@@ -564,7 +563,6 @@ nsCString RestyleManager::ChangeHintToString(nsChangeHint aHint) {
                          "UpdateBackgroundPosition",
                          "AddOrRemoveTransform",
                          "ScrollbarChange",
-                         "UpdateWidgetProperties",
                          "UpdateTableCellSpans",
                          "VisibilityChange"};
   static_assert(nsChangeHint_AllHints ==
@@ -619,16 +617,11 @@ static bool gInApplyRenderingChangeToTree = false;
 #endif
 
 /**
- * Sync views on aFrame and all of aFrame's descendants (following
- * placeholders), if aChange has nsChangeHint_SyncFrameView. Calls
- * DoApplyRenderingChangeToTree on all aFrame's out-of-flow descendants
- * (following placeholders), if aChange has nsChangeHint_RepaintFrame.
- * aFrame should be some combination of nsChangeHint_SyncFrameView,
- * nsChangeHint_RepaintFrame, nsChangeHint_UpdateOpacityLayer and
- * nsChangeHint_SchedulePaint, nothing else.
+ * Sync views on the frame and all of it's descendants (following placeholders).
+ * The change hint should be some combination of nsChangeHint_RepaintFrame,
+ * nsChangeHint_UpdateOpacityLayer and nsChangeHint_SchedulePaint, nothing else.
  */
-static void SyncViewsAndInvalidateDescendants(nsIFrame* aFrame,
-                                              nsChangeHint aChange);
+static void SyncViewsAndInvalidateDescendants(nsIFrame*, nsChangeHint);
 
 static void StyleChangeReflow(nsIFrame* aFrame, nsChangeHint aHint);
 
@@ -1033,7 +1026,6 @@ static void DoApplyRenderingChangeToTree(nsIFrame* aFrame,
     // transformed frame.
     SyncViewsAndInvalidateDescendants(
         aFrame, nsChangeHint(aChange & (nsChangeHint_RepaintFrame |
-                                        nsChangeHint_SyncFrameView |
                                         nsChangeHint_UpdateOpacityLayer |
                                         nsChangeHint_SchedulePaint)));
     // This must be set to true if the rendering change needs to
@@ -1058,19 +1050,6 @@ static void DoApplyRenderingChangeToTree(nsIFrame* aFrame,
       }
 
       ActiveLayerTracker::NotifyNeedsRepaint(aFrame);
-    }
-    if (aChange & nsChangeHint_UpdateTextPath) {
-      if (nsSVGUtils::IsInSVGTextSubtree(aFrame)) {
-        // Invalidate and reflow the entire SVGTextFrame:
-        NS_ASSERTION(aFrame->GetContent()->IsSVGElement(nsGkAtoms::textPath),
-                     "expected frame for a <textPath> element");
-        nsIFrame* text = nsLayoutUtils::GetClosestFrameOfType(
-            aFrame, LayoutFrameType::SVGText);
-        NS_ASSERTION(text, "expected to find an ancestor SVGTextFrame");
-        static_cast<SVGTextFrame*>(text)->NotifyGlyphMetricsChange();
-      } else {
-        MOZ_ASSERT(false, "unexpected frame got nsChangeHint_UpdateTextPath");
-      }
     }
     if (aChange & nsChangeHint_UpdateOpacityLayer) {
       // FIXME/bug 796697: we can get away with empty transactions for
@@ -1133,16 +1112,13 @@ static void SyncViewsAndInvalidateDescendants(nsIFrame* aFrame,
   MOZ_ASSERT(gInApplyRenderingChangeToTree,
              "should only be called within ApplyRenderingChangeToTree");
 
-  NS_ASSERTION(
-      nsChangeHint_size_t(aChange) ==
-          (aChange &
-           (nsChangeHint_RepaintFrame | nsChangeHint_SyncFrameView |
-            nsChangeHint_UpdateOpacityLayer | nsChangeHint_SchedulePaint)),
-      "Invalid change flag");
+  NS_ASSERTION(nsChangeHint_size_t(aChange) ==
+                   (aChange & (nsChangeHint_RepaintFrame |
+                               nsChangeHint_UpdateOpacityLayer |
+                               nsChangeHint_SchedulePaint)),
+               "Invalid change flag");
 
-  if (aChange & nsChangeHint_SyncFrameView) {
-    aFrame->SyncFrameViewProperties();
-  }
+  aFrame->SyncFrameViewProperties();
 
   nsIFrame::ChildListIterator lists(aFrame);
   for (; !lists.IsDone(); lists.Next()) {
@@ -1228,8 +1204,7 @@ static void ApplyRenderingChangeToTree(PresShell* aPresShell, nsIFrame* aFrame,
     // viewport. This is necessary for background and scrollbar colors
     // propagation.
     if (IsPrimaryFrameOfRootOrBodyElement(aFrame)) {
-      nsIFrame* rootFrame =
-          aFrame->PresShell()->FrameConstructor()->GetRootFrame();
+      nsIFrame* rootFrame = aPresShell->GetRootFrame();
       MOZ_ASSERT(rootFrame, "No root frame?");
       DoApplyRenderingChangeToTree(rootFrame, nsChangeHint_RepaintFrame);
       aChange &= ~nsChangeHint_RepaintFrame;
@@ -1422,12 +1397,7 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
             // Under these conditions, we're OK to assume that this "overflow"
             // change only impacts the root viewport's scrollframe, which
             // already exists, so we can simply reflow instead of reframing.
-            // When requesting this reflow, we send the exact same change hints
-            // that "width" and "height" would send (since conceptually,
-            // adding/removing scrollbars is like changing the available
-            // space).
-            data.mHint |= (nsChangeHint_ReflowHintsForISizeChange |
-                           nsChangeHint_ReflowHintsForBSizeChange);
+            data.mHint |= nsChangeHint_ReflowHintsForScrollbarChange;
             doReconstruct = false;
           }
         }
@@ -1645,8 +1615,7 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
       // for the optimization for 0.99 over opacity values since we have no way
       // to call nsSVGUtils::CanOptimizeOpacity() there.
       if ((hint & nsChangeHint_UpdateOpacityLayer) &&
-          nsSVGUtils::CanOptimizeOpacity(frame) &&
-          frame->IsFrameOfType(nsIFrame::eSVGGeometry)) {
+          nsSVGUtils::CanOptimizeOpacity(frame)) {
         hint &= ~nsChangeHint_UpdateOpacityLayer;
         hint |= nsChangeHint_RepaintFrame;
       }
@@ -1688,8 +1657,8 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
       }
 
       if (hint &
-          (nsChangeHint_RepaintFrame | nsChangeHint_SyncFrameView |
-           nsChangeHint_UpdateOpacityLayer | nsChangeHint_UpdateTransformLayer |
+          (nsChangeHint_RepaintFrame | nsChangeHint_UpdateOpacityLayer |
+           nsChangeHint_UpdateTransformLayer |
            nsChangeHint_ChildrenOnlyTransform | nsChangeHint_SchedulePaint)) {
         ApplyRenderingChangeToTree(presContext->PresShell(), frame, hint);
       }
@@ -1812,9 +1781,6 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
         presContext->PresShell()->SynthesizeMouseMove(false);
         didUpdateCursor = true;
       }
-      if (hint & nsChangeHint_UpdateWidgetProperties) {
-        frame->UpdateWidgetProperties();
-      }
       if (hint & nsChangeHint_UpdateTableCellSpans) {
         frameConstructor->UpdateTableCellSpans(content);
       }
@@ -1825,6 +1791,7 @@ void RestyleManager::ProcessRestyledFrames(nsStyleChangeList& aChangeList) {
   }
 
   aChangeList.Clear();
+  FlushOverflowChangedTracker();
 }
 
 /* static */
@@ -2463,7 +2430,7 @@ struct RestyleManager::TextPostTraversalState {
 static void UpdateBackdropIfNeeded(nsIFrame* aFrame, ServoStyleSet& aStyleSet,
                                    nsStyleChangeList& aChangeList) {
   const nsStyleDisplay* display = aFrame->Style()->StyleDisplay();
-  if (display->mTopLayer != NS_STYLE_TOP_LAYER_TOP) {
+  if (display->mTopLayer != StyleTopLayer::Top) {
     return;
   }
 
@@ -2750,7 +2717,8 @@ bool RestyleManager::ProcessPostTraversal(Element* aElement,
   // XXXbholley: We should teach the frame constructor how to clear the dirty
   // descendants bit to avoid the traversal here.
   if (changeHint & nsChangeHint_ReconstructFrame) {
-    if (wasRestyled) {
+    if (wasRestyled &&
+        StaticPrefs::layout_css_scroll_anchoring_suppressions_enabled()) {
       const bool wasAbsPos =
           styleFrame &&
           styleFrame->StyleDisplay()->IsAbsolutelyPositionedStyle();
@@ -2984,7 +2952,7 @@ void RestyleManager::ClearSnapshots() {
 }
 
 ServoElementSnapshot& RestyleManager::SnapshotFor(Element& aElement) {
-  MOZ_RELEASE_ASSERT(!mInStyleRefresh);
+  MOZ_DIAGNOSTIC_ASSERT(!mInStyleRefresh);
 
   // NOTE(emilio): We can handle snapshots from a one-off restyle of those that
   // we do to restyle stuff for reconstruction, for example.
@@ -3154,8 +3122,6 @@ void RestyleManager::DoProcessPendingRestyles(ServoTraversalFlags aFlags) {
 
   doc->ClearServoRestyleRoot();
 
-  FlushOverflowChangedTracker();
-
   ClearSnapshots();
   styleSet->AssertTreeIsClean();
   mHaveNonAnimationRestyles = false;
@@ -3179,7 +3145,6 @@ static void VerifyFlatTree(const nsIContent& aContent) {
   for (auto* content = iter.GetNextChild(); content;
        content = iter.GetNextChild()) {
     MOZ_ASSERT(content->GetFlattenedTreeParentNodeForStyle() == &aContent);
-    MOZ_ASSERT(!content->IsActiveChildrenElement());
     VerifyFlatTree(*content);
   }
 }
@@ -3209,10 +3174,6 @@ void RestyleManager::ProcessAllPendingAttributeAndStateInvalidations() {
   ClearSnapshots();
 }
 
-bool RestyleManager::HasPendingRestyleAncestor(Element* aElement) const {
-  return Servo_HasPendingRestyleAncestor(aElement);
-}
-
 void RestyleManager::UpdateOnlyAnimationStyles() {
   bool doCSS = PresContext()->EffectCompositor()->HasPendingStyleUpdates();
   if (!doCSS) {
@@ -3224,7 +3185,7 @@ void RestyleManager::UpdateOnlyAnimationStyles() {
 
 void RestyleManager::ContentStateChanged(nsIContent* aContent,
                                          EventStates aChangedBits) {
-  MOZ_RELEASE_ASSERT(!mInStyleRefresh);
+  MOZ_DIAGNOSTIC_ASSERT(!mInStyleRefresh);
 
   if (!aContent->IsElement()) {
     return;
@@ -3237,13 +3198,25 @@ void RestyleManager::ContentStateChanged(nsIContent* aContent,
 
   const EventStates kVisitedAndUnvisited =
       NS_EVENT_STATE_VISITED | NS_EVENT_STATE_UNVISITED;
-  // NOTE: We want to return ASAP for visitedness changes, but we don't want to
-  // mess up the situation where the element became a link or stopped being one.
-  if (aChangedBits.HasAllStates(kVisitedAndUnvisited) &&
-      !Gecko_VisitedStylesEnabled(element.OwnerDoc())) {
-    aChangedBits &= ~kVisitedAndUnvisited;
-    if (aChangedBits.IsEmpty()) {
-      return;
+
+  // When visited links are disabled, they cannot influence style for obvious
+  // reasons.
+  //
+  // When layout.css.always-repaint-on-unvisited is true, we'll restyle when the
+  // relevant visited query finishes, regardless of the style (see
+  // Link::VisitedQueryFinished). So there's no need to do anything as a result
+  // of this state change just yet.
+  //
+  // Note that this check checks for _both_ bits: This is only true when visited
+  // changes to unvisited or vice-versa, but not when we start or stop being a
+  // link itself.
+  if (aChangedBits.HasAllStates(kVisitedAndUnvisited)) {
+    if (!Gecko_VisitedStylesEnabled(element.OwnerDoc()) ||
+        StaticPrefs::layout_css_always_repaint_on_unvisited()) {
+      aChangedBits &= ~kVisitedAndUnvisited;
+      if (aChangedBits.IsEmpty()) {
+        return;
+      }
     }
   }
 
@@ -3335,7 +3308,7 @@ void RestyleManager::ClassAttributeWillBeChangedBySMIL(Element* aElement) {
 void RestyleManager::TakeSnapshotForAttributeChange(Element& aElement,
                                                     int32_t aNameSpaceID,
                                                     nsAtom* aAttribute) {
-  MOZ_RELEASE_ASSERT(!mInStyleRefresh);
+  MOZ_DIAGNOSTIC_ASSERT(!mInStyleRefresh);
 
   if (!aElement.HasServoData()) {
     return;
@@ -3371,7 +3344,8 @@ void RestyleManager::TakeSnapshotForAttributeChange(Element& aElement,
 // * lwtheme and lwthemetextcolor on root element of XUL document
 //   affects all descendants due to :-moz-lwtheme* pseudo-classes
 // * lang="" and xml:lang="" can affect all descendants due to :lang()
-//
+// * exportparts can affect all descendant parts. We could certainly integrate
+//   it better in the invalidation machinery if it was necessary.
 static inline bool AttributeChangeRequiresSubtreeRestyle(
     const Element& aElement, nsAtom* aAttr) {
   if (aAttr == nsGkAtoms::cellpadding) {
@@ -3381,7 +3355,11 @@ static inline bool AttributeChangeRequiresSubtreeRestyle(
     Document* doc = aElement.OwnerDoc();
     return doc->IsInChromeDocShell() && &aElement == doc->GetRootElement();
   }
-
+  // TODO(emilio, bug 1598094): Maybe finer-grained invalidation for exportparts
+  // attribute changes?
+  if (aAttr == nsGkAtoms::exportparts) {
+    return !!aElement.GetShadowRoot();
+  }
   return aAttr == nsGkAtoms::lang;
 }
 
@@ -3396,16 +3374,16 @@ void RestyleManager::AttributeChanged(Element* aElement, int32_t aNameSpaceID,
   changeHint |= aElement->GetAttributeChangeHint(aAttribute, aModType);
 
   if (aAttribute == nsGkAtoms::style) {
-    restyleHint |= StyleRestyleHint_RESTYLE_STYLE_ATTRIBUTE;
+    restyleHint |= RestyleHint::RESTYLE_STYLE_ATTRIBUTE;
   } else if (AttributeChangeRequiresSubtreeRestyle(*aElement, aAttribute)) {
     restyleHint |= RestyleHint::RestyleSubtree();
   } else if (aElement->IsAttributeMapped(aAttribute)) {
     // FIXME(emilio): Does this really need to re-selector-match?
-    restyleHint |= StyleRestyleHint_RESTYLE_SELF;
+    restyleHint |= RestyleHint::RESTYLE_SELF;
   } else if (aElement->IsInShadowTree() && aAttribute == nsGkAtoms::part) {
-    // TODO(emilio): Maybe finer-grained invalidation for part attribute
-    // changes?
-    restyleHint |= StyleRestyleHint_RESTYLE_SELF;
+    // TODO(emilio, bug 1598094): Maybe finer-grained invalidation for part
+    // attribute changes?
+    restyleHint |= RestyleHint::RESTYLE_SELF;
   }
 
   if (nsIFrame* primaryFrame = aElement->GetPrimaryFrame()) {

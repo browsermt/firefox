@@ -6,6 +6,7 @@
 
 #include "AudioSink.h"
 #include "AudioConverter.h"
+#include "AudioDeviceInfo.h"
 #include "MediaQueue.h"
 #include "VideoUtils.h"
 #include "mozilla/CheckedInt.h"
@@ -34,9 +35,11 @@ using media::TimeUnit;
 
 AudioSink::AudioSink(AbstractThread* aThread,
                      MediaQueue<AudioData>& aAudioQueue,
-                     const TimeUnit& aStartTime, const AudioInfo& aInfo)
+                     const TimeUnit& aStartTime, const AudioInfo& aInfo,
+                     AudioDeviceInfo* aAudioDevice)
     : mStartTime(aStartTime),
       mInfo(aInfo),
+      mAudioDevice(aAudioDevice),
       mPlaying(true),
       mMonitor("AudioSink"),
       mWritten(0),
@@ -183,7 +186,7 @@ nsresult AudioSink::InitializeAudioStream(const PlaybackParams& aParams) {
   // StaticPrefs::accessibility_monoaudio_enable() or
   // StaticPrefs::media_forcestereo_enabled() is applied.
   nsresult rv = mAudioStream->Init(mOutputChannels, channelMap, mOutputRate,
-                                   aParams.mSink);
+                                   mAudioDevice);
   if (NS_FAILED(rv)) {
     mAudioStream->Shutdown();
     mAudioStream = nullptr;
@@ -299,6 +302,12 @@ void AudioSink::Drained() {
   SINK_LOG("Drained");
   mPlaybackComplete = true;
   mEndedPromise.ResolveIfExists(true, __func__);
+}
+
+void AudioSink::Errored() {
+  SINK_LOG("Errored");
+  mPlaybackComplete = true;
+  mEndedPromise.RejectIfExists(NS_ERROR_FAILURE, __func__);
 }
 
 void AudioSink::CheckIsAudible(const AudioData* aData) {

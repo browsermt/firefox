@@ -9,6 +9,8 @@
 
 #include "mozilla/Maybe.h"
 
+#include <algorithm>
+
 #include "jit/JitAllocPolicy.h"
 #include "jit/JitFrames.h"
 #include "jit/Registers.h"
@@ -185,14 +187,14 @@ class CompileInfo {
         mayReadFrameArgsDirectly_(script->mayReadFrameArgsDirectly()),
         trackRecordReplayProgress_(script->trackRecordReplayProgress()),
         inlineScriptTree_(inlineScriptTree) {
-    MOZ_ASSERT_IF(osrPc, JSOp(*osrPc) == JSOP_LOOPENTRY);
+    MOZ_ASSERT_IF(osrPc, JSOp(*osrPc) == JSOP_LOOPHEAD);
 
     // The function here can flow in from anywhere so look up the canonical
     // function to ensure that we do not try to embed a nursery pointer in
     // jit-code. Precisely because it can flow in from anywhere, it's not
     // guaranteed to be non-lazy. Hence, don't access its script!
     if (fun_) {
-      fun_ = fun_->nonLazyScript()->functionNonDelazifying();
+      fun_ = fun_->baseScript()->function();
       MOZ_ASSERT(fun_->isTenured());
     }
 
@@ -205,9 +207,9 @@ class CompileInfo {
     // depth 1) is compiled as a SETPROP (stack depth 2) on the global lexical
     // scope.
     uint32_t extra = script->isGlobalCode() ? 1 : 0;
-    nstack_ =
-        Max<unsigned>(script->nslots() - script->nfixed(), MinJITStackSize) +
-        extra;
+    nstack_ = std::max<unsigned>(script->nslots() - script->nfixed(),
+                                 MinJITStackSize) +
+              extra;
     nslots_ = nimplicit_ + nargs_ + nlocals_ + nstack_;
 
     // For derived class constructors, find and cache the frame slot for
@@ -263,7 +265,7 @@ class CompileInfo {
   InlineScriptTree* inlineScriptTree() const { return inlineScriptTree_; }
 
   bool hasOsrAt(jsbytecode* pc) const {
-    MOZ_ASSERT(JSOp(*pc) == JSOP_LOOPENTRY);
+    MOZ_ASSERT(JSOp(*pc) == JSOP_LOOPHEAD);
     return pc == osrPc();
   }
 
@@ -294,10 +296,6 @@ class CompileInfo {
   inline JSFunction* getFunction(jsbytecode* pc) const;
 
   BigInt* getBigInt(jsbytecode* pc) const { return script_->getBigInt(pc); }
-
-  jssrcnote* getNote(GSNCache& gsn, jsbytecode* pc) const {
-    return GetSrcNote(gsn, script(), pc);
-  }
 
   // Total number of slots: args, locals, and stack.
   unsigned nslots() const { return nslots_; }

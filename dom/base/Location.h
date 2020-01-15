@@ -34,7 +34,7 @@ class Location final : public nsISupports,
  public:
   typedef BrowsingContext::LocationProxy RemoteProxy;
 
-  Location(nsPIDOMWindowInner* aWindow, nsIDocShell* aDocShell);
+  Location(nsPIDOMWindowInner* aWindow, BrowsingContext* aBrowsingContext);
 
   NS_DECL_CYCLE_COLLECTING_ISUPPORTS
   NS_DECL_CYCLE_COLLECTION_SCRIPT_HOLDER_CLASS(Location)
@@ -108,12 +108,6 @@ class Location final : public nsISupports,
   void SetHash(const nsAString& aHash, nsIPrincipal& aSubjectPrincipal,
                ErrorResult& aError);
 
-  void Stringify(nsAString& aRetval, nsIPrincipal& aSubjectPrincipal,
-                 ErrorResult& aError) {
-    // GetHref checks CallerSubsumes.
-    GetHref(aRetval, aSubjectPrincipal, aError);
-  }
-
   nsPIDOMWindowInner* GetParentObject() const { return mInnerWindow; }
 
   virtual JSObject* WrapObject(JSContext* aCx,
@@ -144,7 +138,7 @@ class Location final : public nsISupports,
 
   nsString mCachedHash;
   nsCOMPtr<nsPIDOMWindowInner> mInnerWindow;
-  nsWeakPtr mDocShell;
+  uint64_t mBrowsingContextId = 0;
 };
 
 }  // namespace dom

@@ -214,14 +214,6 @@ class TabsUpdateFilterEventManager extends EventManager {
         // Default is to listen for all events.
         needsModified = filter.properties.some(p => allAttrs.has(p));
         filter.properties = new Set(filter.properties);
-        // TODO Bug 1465520 remove warning when ready.
-        if (filter.properties.has("isarticle")) {
-          extension.logger.warn(
-            "The isarticle filter name is deprecated, use isArticle."
-          );
-          filter.properties.delete("isarticle");
-          filter.properties.add("isArticle");
-        }
       } else {
         filter.properties = allProperties;
       }
@@ -270,7 +262,7 @@ class TabsUpdateFilterEventManager extends EventManager {
         return true;
       }
 
-      let fireForTab = (tab, changed) => {
+      let fireForTab = (tab, changed, nativeTab) => {
         // Tab may be null if private and not_allowed.
         if (!tab || !matchFilters(tab, changed)) {
           return;
@@ -278,11 +270,21 @@ class TabsUpdateFilterEventManager extends EventManager {
 
         let changeInfo = sanitize(extension, changed);
         if (changeInfo) {
-          fire.async(tab.id, changeInfo, tab.convert());
+          tabTracker.maybeWaitForTabOpen(nativeTab).then(() => {
+            if (!nativeTab.parentNode) {
+              // If the tab is already be destroyed, do nothing.
+              return;
+            }
+            fire.async(tab.id, changeInfo, tab.convert());
+          });
         }
       };
 
       let listener = event => {
+        // Ignore any events prior to TabOpen
+        if (event.originalTarget.initializingTab) {
+          return;
+        }
         if (!context.canAccessWindow(event.originalTarget.ownerGlobal)) {
           return;
         }
@@ -345,7 +347,7 @@ class TabsUpdateFilterEventManager extends EventManager {
           changeInfo[prop] = tab[prop];
         }
 
-        fireForTab(tab, changeInfo);
+        fireForTab(tab, changeInfo, event.originalTarget);
       };
 
       let statusListener = ({ browser, status, url }) => {
@@ -361,7 +363,7 @@ class TabsUpdateFilterEventManager extends EventManager {
             changed.url = url;
           }
 
-          fireForTab(tabManager.wrapTab(tabElem), changed);
+          fireForTab(tabManager.wrapTab(tabElem), changed, tabElem);
         }
       };
 
@@ -371,7 +373,7 @@ class TabsUpdateFilterEventManager extends EventManager {
 
         if (nativeTab && context.canAccessWindow(nativeTab.ownerGlobal)) {
           let tab = tabManager.getWrapper(nativeTab);
-          fireForTab(tab, { isArticle: message.data.isArticle });
+          fireForTab(tab, { isArticle: message.data.isArticle }, nativeTab);
         }
       };
 
@@ -835,12 +837,8 @@ this.tabs = class extends ExtensionAPI {
             nativeTab.linkedBrowser.loadURI(url, options);
           }
 
-          if (updateProperties.active !== null) {
-            if (updateProperties.active) {
-              tabbrowser.selectedTab = nativeTab;
-            } else {
-              // Not sure what to do here? Which tab should we select?
-            }
+          if (updateProperties.active) {
+            tabbrowser.selectedTab = nativeTab;
           }
           if (updateProperties.highlighted !== null) {
             if (!gMultiSelectEnabled) {
@@ -1108,20 +1106,10 @@ this.tabs = class extends ExtensionAPI {
 
           return new Promise(resolve => {
             // We need to use SSTabRestoring because any attributes set before
-            // are ignored. SSTabRestored is too late and results in a jump in
-            // the UI. See http://bit.ly/session-store-api for more information.
+            // are ignored.
             newTab.addEventListener(
               "SSTabRestoring",
               function() {
-                // As the tab is restoring, move it to the correct position.
-
-                // Pinned tabs that are duplicated are inserted
-                // after the existing pinned tab and pinned.
-                if (nativeTab.pinned) {
-                  gBrowser.pinTab(newTab);
-                }
-                gBrowser.moveTabTo(newTab, nativeTab._tPos + 1);
-
                 gBrowser.selectedTab = newTab;
                 resolve(tabManager.convert(newTab));
               },
@@ -1281,11 +1269,7 @@ this.tabs = class extends ExtensionAPI {
         print() {
           let activeTab = getTabOrActive(null);
           let { PrintUtils } = activeTab.ownerGlobal;
-
-          PrintUtils.printWindow(
-            activeTab.linkedBrowser.outerWindowID,
-            activeTab.linkedBrowser
-          );
+          PrintUtils.printWindow(activeTab.linkedBrowser.browsingContext);
         },
 
         printPreview() {
@@ -1592,7 +1576,7 @@ this.tabs = class extends ExtensionAPI {
               }
             }
           }
-          if (hidden.length > 0) {
+          if (hidden.length) {
             let win = Services.wm.getMostRecentWindow("navigator:browser");
             tabHidePopup.open(win, extension.id);
           }
@@ -1616,7 +1600,7 @@ this.tabs = class extends ExtensionAPI {
 
           if (!Array.isArray(tabs)) {
             tabs = [tabs];
-          } else if (tabs.length == 0) {
+          } else if (!tabs.length) {
             throw new ExtensionError("No highlighted tab.");
           }
           window.gBrowser.selectedTabs = tabs.map(tabIndex => {

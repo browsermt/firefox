@@ -60,11 +60,6 @@ loader.lazyGetter(
 );
 loader.lazyGetter(
   this,
-  "ScratchpadPanel",
-  () => require("devtools/client/scratchpad/panel").ScratchpadPanel
-);
-loader.lazyGetter(
-  this,
   "DomPanel",
   () => require("devtools/client/dom/panel").DomPanel
 );
@@ -77,6 +72,11 @@ loader.lazyGetter(
   this,
   "ApplicationPanel",
   () => require("devtools/client/application/panel").ApplicationPanel
+);
+loader.lazyGetter(
+  this,
+  "WhatsNewPanel",
+  () => require("devtools/client/whats-new/panel").WhatsNewPanel
 );
 loader.lazyGetter(
   this,
@@ -99,13 +99,19 @@ loader.lazyRequireGetter(
 loader.lazyRequireGetter(
   this,
   "ResponsiveUIManager",
-  "devtools/client/responsive/manager",
+  "devtools/client/responsive/manager"
+);
+
+loader.lazyRequireGetter(
+  this,
+  "AppConstants",
+  "resource://gre/modules/AppConstants.jsm",
   true
 );
-loader.lazyImporter(
+loader.lazyRequireGetter(
   this,
-  "ScratchpadManager",
-  "resource://devtools/client/scratchpad/scratchpad-manager.jsm"
+  "DevToolsFissionPrefs",
+  "devtools/client/devtools-fission-prefs"
 );
 
 const { MultiLocalizationHelper } = require("devtools/shared/l10n");
@@ -114,10 +120,6 @@ const L10N = new MultiLocalizationHelper(
   "devtools/startup/locales/key-shortcuts.properties"
 );
 
-// URL to direct people to the deprecated tools panel
-const DEPRECATION_URL =
-  "https://developer.mozilla.org/docs/Tools/Deprecated_tools";
-
 var Tools = {};
 exports.Tools = Tools;
 
@@ -125,7 +127,7 @@ exports.Tools = Tools;
 Tools.options = {
   id: "options",
   ordinal: 0,
-  url: "chrome://devtools/content/framework/toolbox-options.xhtml",
+  url: "chrome://devtools/content/framework/toolbox-options.html",
   icon: "chrome://devtools/skin/images/settings.svg",
   bgTheme: "theme-body",
   label: l10n("options.label"),
@@ -227,7 +229,7 @@ Tools.jsdebugger = {
     return l10n(
       "ToolboxDebugger.tooltip4",
       (osString == "Darwin" ? "Cmd+Opt+" : "Ctrl+Shift+") +
-        l10n("jsdebugger.commandkey")
+        l10n("jsdebugger.commandkey2")
     );
   },
   inMenu: true,
@@ -245,7 +247,7 @@ Tools.styleEditor = {
   visibilityswitch: "devtools.styleeditor.enabled",
   accesskey: l10n("open.accesskey"),
   icon: "chrome://devtools/skin/images/tool-styleeditor.svg",
-  url: "chrome://devtools/content/styleeditor/index.xul",
+  url: "chrome://devtools/content/styleeditor/index.xhtml",
   label: l10n("ToolboxStyleEditor.label"),
   panelLabel: l10n("ToolboxStyleEditor.panelLabel"),
   get tooltip() {
@@ -295,12 +297,12 @@ function switchPerformancePanel() {
       // the perf actor yet. Also this function is not async, so we can't initialize
       // the actor yet.
       // We don't display the new performance panel for remote context in the
-      // toolbox, because this has an overhead. Instead we should use WebIDE (or
-      // the coming about:debugging).
+      // toolbox, because this has an overhead. Instead we should use
+      // about:debugging.
       return target.isLocalTab;
     };
   } else {
-    Tools.performance.url = "chrome://devtools/content/performance/index.xul";
+    Tools.performance.url = "chrome://devtools/content/performance/index.xhtml";
     Tools.performance.build = function(frame, target) {
       return new PerformancePanel(frame, target);
     };
@@ -371,7 +373,7 @@ Tools.storage = {
   accesskey: l10n("storage.accesskey"),
   visibilityswitch: "devtools.storage.enabled",
   icon: "chrome://devtools/skin/images/tool-storage.svg",
-  url: "chrome://devtools/content/storage/index.xul",
+  url: "chrome://devtools/content/storage/index.xhtml",
   label: l10n("storage.label"),
   menuLabel: l10n("storage.menuLabel"),
   panelLabel: l10n("storage.panelLabel"),
@@ -392,26 +394,6 @@ Tools.storage = {
 
   build: function(iframeWindow, toolbox) {
     return new StoragePanel(iframeWindow, toolbox);
-  },
-};
-
-Tools.scratchpad = {
-  id: "scratchpad",
-  deprecated: true,
-  deprecationURL: `${DEPRECATION_URL}#Scratchpad`,
-  ordinal: 12,
-  visibilityswitch: "devtools.scratchpad.enabled",
-  icon: "chrome://devtools/skin/images/tool-scratchpad.svg",
-  url: "chrome://devtools/content/scratchpad/index.xul",
-  label: l10n("scratchpad.label"),
-  panelLabel: l10n("scratchpad.panelLabel"),
-  tooltip: l10n("scratchpad.tooltip"),
-  inMenu: false,
-  isTargetSupported: function(target) {
-    return target.hasActor("console");
-  },
-  build: function(iframeWindow, toolbox) {
-    return new ScratchpadPanel(iframeWindow, toolbox);
   },
 };
 
@@ -487,11 +469,49 @@ Tools.application = {
   hiddenInOptions: true,
 
   isTargetSupported: function(target) {
-    return target.isLocalTab;
+    return target.hasActor("manifest");
   },
 
   build: function(iframeWindow, toolbox) {
     return new ApplicationPanel(iframeWindow, toolbox);
+  },
+};
+
+Tools.whatsnew = {
+  id: "whatsnew",
+  ordinal: 12,
+  visibilityswitch: "devtools.whatsnew.enabled",
+  icon: "chrome://browser/skin/whatsnew.svg",
+  url: "chrome://devtools/content/whats-new/index.html",
+  // TODO: This panel is currently for english users only.
+  // This should be properly localized in Bug 1596038
+  label: "What’s New",
+  panelLabel: "What’s New",
+  tooltip: "What’s New",
+  inMenu: false,
+
+  isTargetSupported: function(target) {
+    // The panel is currently not localized and should only be displayed to
+    // english users. See Bug 1596038 for cleanup.
+    const isEnglishUser = Services.locale.negotiateLanguages(
+      ["en"],
+      [Services.locale.appLocaleAsBCP47]
+    ).length;
+
+    // In addition to the basic visibility switch preference, we also have a
+    // higher level preference to disable the whole panel regardless of other
+    // settings. Should be removed in Bug 1596037.
+    const isFeatureEnabled = Services.prefs.getBoolPref(
+      "devtools.whatsnew.feature-enabled",
+      false
+    );
+
+    // This panel should only be enabled for regular web toolboxes.
+    return target.isLocalTab && isEnglishUser && isFeatureEnabled;
+  },
+
+  build: function(iframeWindow, toolbox) {
+    return new WhatsNewPanel(iframeWindow, toolbox);
   },
 };
 
@@ -504,11 +524,11 @@ var defaultTools = [
   Tools.performance,
   Tools.netMonitor,
   Tools.storage,
-  Tools.scratchpad,
   Tools.memory,
   Tools.dom,
   Tools.accessibility,
   Tools.application,
+  Tools.whatsnew,
 ];
 
 exports.defaultTools = defaultTools;
@@ -547,32 +567,33 @@ exports.ToolboxButtons = [
     },
   },
   {
-    id: "command-button-scratchpad",
-    description: l10n("toolbox.buttons.scratchpad"),
-    isTargetSupported: target => target.isLocalTab,
-    onClick(event, toolbox) {
-      ScratchpadManager.openScratchpad();
-    },
-  },
-  {
     id: "command-button-replay",
     description: l10n("toolbox.buttons.replay"),
     isTargetSupported: target =>
-      Services.prefs.getBoolPref("devtools.recordreplay.mvp.enabled") &&
+      Services.prefs.getBoolPref("devtools.recordreplay.enabled") &&
       !target.canRewind &&
       target.isLocalTab,
     onClick: () => reloadAndRecordTab(),
     isChecked: () => false,
+    experimentalURL:
+      "https://developer.mozilla.org/en-US/docs/Mozilla/Projects/WebReplay",
   },
   {
     id: "command-button-stop-replay",
     description: l10n("toolbox.buttons.stopReplay"),
     isTargetSupported: target =>
-      Services.prefs.getBoolPref("devtools.recordreplay.mvp.enabled") &&
+      Services.prefs.getBoolPref("devtools.recordreplay.enabled") &&
       target.canRewind &&
       target.isLocalTab,
     onClick: () => reloadAndStopRecordingTab(),
     isChecked: () => true,
+  },
+  {
+    id: "command-button-fission-prefs",
+    description: "DevTools Fission preferences",
+    isTargetSupported: target => !AppConstants.MOZILLA_OFFICIAL,
+    onClick: (event, toolbox) => DevToolsFissionPrefs.showTooltip(toolbox),
+    isChecked: () => DevToolsFissionPrefs.isAnyPreferenceEnabled(),
   },
   {
     id: "command-button-responsive",
@@ -582,15 +603,15 @@ exports.ToolboxButtons = [
     ),
     isTargetSupported: target => target.isLocalTab,
     onClick(event, toolbox) {
-      const tab = toolbox.target.tab;
+      const tab = toolbox.target.localTab;
       const browserWindow = tab.ownerDocument.defaultView;
       ResponsiveUIManager.toggle(browserWindow, tab, { trigger: "toolbox" });
     },
     isChecked(toolbox) {
-      if (!toolbox.target.tab) {
+      if (!toolbox.target.localTab) {
         return false;
       }
-      return ResponsiveUIManager.isActiveForTab(toolbox.target.tab);
+      return ResponsiveUIManager.isActiveForTab(toolbox.target.localTab);
     },
     setup(toolbox, onChange) {
       ResponsiveUIManager.on("on", onChange);

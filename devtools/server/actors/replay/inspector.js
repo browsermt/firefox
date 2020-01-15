@@ -38,6 +38,8 @@ function dbgObject(id) {
 // Public Interface
 ///////////////////////////////////////////////////////////////////////////////
 
+let gInspectorUtils;
+
 const ReplayInspector = {
   // Return a proxy for the window in the replaying process.
   get window() {
@@ -49,12 +51,13 @@ const ReplayInspector = {
 
   // Create the InspectorUtils object to bind for other server users.
   createInspectorUtils(utils) {
-    return new Proxy(
+    gInspectorUtils = new Proxy(
       {},
       {
         get(_, name) {
           switch (name) {
             case "getAllStyleSheets":
+            case "getContentState":
             case "getCSSStyleRules":
             case "getRuleLine":
             case "getRuleColumn":
@@ -73,16 +76,7 @@ const ReplayInspector = {
         },
       }
     );
-  },
-
-  // Create the CSSRule object to bind for other server users.
-  createCSSRule(rule) {
-    return {
-      ...rule,
-      isInstance(node) {
-        return gFixedProxy.CSSRule.isInstance(node);
-      },
-    };
+    return gInspectorUtils;
   },
 
   wrapRequireHook(requireHook) {
@@ -108,7 +102,30 @@ const ReplayInspector = {
   getDebuggerObject(node) {
     return unwrapValue(node);
   },
+
+  // For use by ReplayDebugger.
+  wrapObject,
+  unwrapObject(obj) {
+    return proxyMap.get(obj);
+  },
 };
+
+// Objects we need to override isInstance for.
+const gOverrideIsInstance = ["CSSRule", "Event"];
+
+for (const name of gOverrideIsInstance) {
+  ReplayInspector[`create${name}`] = original => ({
+    ...original,
+    isInstance(obj) {
+      const unwrapped = proxyMap.get(obj);
+      if (!unwrapped) {
+        return original.isInstance(obj);
+      }
+      assert(unwrapped instanceof ReplayDebugger.Object);
+      return unwrapped.replayIsInstance(name);
+    },
+  });
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // Require Substitutions
@@ -268,6 +285,10 @@ function unwrapValue(value) {
     return obj;
   }
 
+  if (value == gInspectorUtils) {
+    return proxyMap.get(gFixedProxy.InspectorUtils);
+  }
+
   if (value instanceof Object) {
     const rv = dbg()._sendRequest({ type: "createObject" });
     const newobj = dbgObject(rv.id);
@@ -283,6 +304,7 @@ function unwrapValue(value) {
 }
 
 function getObjectProperty(obj, name) {
+  assert(obj._pool == dbg()._pool);
   const rv = dbg()._sendRequestAllowDiverge({
     type: "getObjectPropertyValue",
     id: obj._data.id,
@@ -291,7 +313,16 @@ function getObjectProperty(obj, name) {
   return dbg()._pool.convertCompletionValue(rv);
 }
 
+function ignoreSetProperty(obj, name) {
+  switch (obj.class) {
+    case "HTMLDocument":
+      return ["styleSheetChangeEventsEnabled"].includes(name);
+  }
+  return false;
+}
+
 function setObjectProperty(obj, name, value) {
+  assert(obj._pool == dbg()._pool);
   const rv = dbg()._sendRequestAllowDiverge({
     type: "setObjectPropertyValue",
     id: obj._data.id,
@@ -359,9 +390,11 @@ const ReplayInspectorProxyHandler = {
     }
 
     // See if this is an 'own' data property.
-    const desc = target.getOwnPropertyDescriptor(name);
-    if (desc && "value" in desc) {
-      return wrapValue(desc.value);
+    if (!target._modifiedProperties || !target._modifiedProperties.has(name)) {
+      const desc = target.getOwnPropertyDescriptor(name);
+      if (desc && "value" in desc) {
+        return wrapValue(desc.value);
+      }
     }
 
     // Get the property on the target object directly in the replaying process.
@@ -374,6 +407,15 @@ const ReplayInspectorProxyHandler = {
 
   set(target, name, value) {
     target = getTargetObject(target);
+
+    if (ignoreSetProperty(target, name)) {
+      return true;
+    }
+
+    if (!target._modifiedProperties) {
+      target._modifiedProperties = new Set();
+    }
+    target._modifiedProperties.add(name);
 
     const rv = setObjectProperty(target, name, unwrapValue(value));
     if ("return" in rv) {
@@ -474,8 +516,11 @@ function initFixedProxy(proxy, target, obj) {
 function updateFixedProxies() {
   dbg()._ensurePaused();
 
-  const data = dbg()._sendRequestAllowDiverge({ type: "getFixedObjects" });
-  for (const [key, value] of Object.entries(data)) {
+  const { objects, preview } = dbg()._sendRequestAllowDiverge({
+    type: "getFixedObjects",
+  });
+  dbg()._pool.addPauseData(preview);
+  for (const [key, value] of Object.entries(objects)) {
     if (!gFixedProxyTargets[key]) {
       gFixedProxyTargets[key] = { object: {} };
       gFixedProxy[key] = new Proxy(

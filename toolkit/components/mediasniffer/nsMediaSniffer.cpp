@@ -11,7 +11,7 @@
 #include "mp3sniff.h"
 #include "nestegg/nestegg.h"
 #include "nsIClassInfoImpl.h"
-#include "nsIHttpChannel.h"
+#include "nsIChannel.h"
 #include "nsMediaSniffer.h"
 #include "nsMimeTypes.h"
 #include "nsString.h"
@@ -140,10 +140,6 @@ nsMediaSniffer::GetMIMETypeFromContent(nsIRequest* aRequest,
                                        nsACString& aSniffedType) {
   nsCOMPtr<nsIChannel> channel = do_QueryInterface(aRequest);
   if (channel) {
-    nsCOMPtr<nsILoadInfo> loadInfo = channel->LoadInfo();
-    if (loadInfo->GetSkipContentSniffing()) {
-      return NS_ERROR_NOT_AVAILABLE;
-    }
     nsLoadFlags loadFlags = 0;
     channel->GetLoadFlags(&loadFlags);
     if (!(loadFlags & nsIChannel::LOAD_MEDIA_SNIFFER_OVERRIDES_CONTENT_TYPE)) {

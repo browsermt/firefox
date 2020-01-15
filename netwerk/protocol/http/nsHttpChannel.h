@@ -17,7 +17,6 @@
 #include "nsIApplicationCacheChannel.h"
 #include "nsIChannelWithDivertableParentListener.h"
 #include "nsIProtocolProxyCallback.h"
-#include "nsIStreamTransportService.h"
 #include "nsIHttpAuthenticableChannel.h"
 #include "nsIAsyncVerifyRedirectCallback.h"
 #include "nsIThreadRetargetableRequest.h"
@@ -27,13 +26,12 @@
 #include "ADivertableParentChannel.h"
 #include "AutoClose.h"
 #include "nsIStreamListener.h"
-#include "nsISupportsPrimitives.h"
 #include "nsICorsPreflightCallback.h"
 #include "AlternateServices.h"
 #include "nsIRaceCacheWithNetwork.h"
 #include "mozilla/extensions/PStreamFilterParent.h"
 #include "mozilla/Mutex.h"
-#include "nsIRemoteTab.h"
+#include "nsIProcessSwitchRequestor.h"
 
 class nsDNSPrefetch;
 class nsICancelable;
@@ -78,7 +76,8 @@ class nsHttpChannel final : public HttpBaseChannel,
                             public nsIChannelWithDivertableParentListener,
                             public nsIRaceCacheWithNetwork,
                             public nsIRequestTailUnblockCallback,
-                            public nsITimerCallback {
+                            public nsITimerCallback,
+                            public nsIProcessSwitchRequestor {
  public:
   NS_DECL_ISUPPORTS_INHERITED
   NS_DECL_NSIREQUESTOBSERVER
@@ -100,6 +99,7 @@ class nsHttpChannel final : public HttpBaseChannel,
   NS_DECL_NSIRACECACHEWITHNETWORK
   NS_DECL_NSITIMERCALLBACK
   NS_DECL_NSIREQUESTTAILUNBLOCKCALLBACK
+  NS_DECL_NSIPROCESSSWITCHREQUESTOR
 
   // nsIHttpAuthenticableChannel. We can't use
   // NS_DECL_NSIHTTPAUTHENTICABLECHANNEL because it duplicates cancel() and
@@ -150,9 +150,6 @@ class nsHttpChannel final : public HttpBaseChannel,
   NS_IMETHOD AsyncOpen(nsIStreamListener* aListener) override;
   // nsIHttpChannel
   NS_IMETHOD GetEncodedBodySize(uint64_t* aEncodedBodySize) override;
-  NS_IMETHOD SwitchProcessTo(mozilla::dom::Promise* aBrowserParent,
-                             uint64_t aIdentifier) override;
-  NS_IMETHOD HasCrossOriginOpenerPolicyMismatch(bool* aMismatch) override;
   // nsIHttpChannelInternal
   NS_IMETHOD SetupFallbackChannel(const char* aFallbackKey) override;
   NS_IMETHOD SetChannelIsForDownload(bool aChannelIsForDownload) override;
@@ -276,7 +273,8 @@ class nsHttpChannel final : public HttpBaseChannel,
   }
   TransactionObserver* GetTransactionObserver() { return mTransactionObserver; }
 
-  typedef MozPromise<uint64_t, nsresult, false> ContentProcessIdPromise;
+  typedef MozPromise<uint64_t, nsresult, true /* exclusive */>
+      ContentProcessIdPromise;
   already_AddRefed<ContentProcessIdPromise>
   TakeRedirectContentProcessIdPromise() {
     return mRedirectContentProcessIdPromise.forget();
@@ -331,6 +329,11 @@ class nsHttpChannel final : public HttpBaseChannel,
   void AsyncContinueProcessResponse();
   MOZ_MUST_USE nsresult ContinueProcessResponse1();
   MOZ_MUST_USE nsresult ContinueProcessResponse2(nsresult);
+
+ private:
+  void AssertNotDocumentChannel();
+
+ public:
   void UpdateCacheDisposition(bool aSuccessfulReval, bool aPartialContentUsed);
   MOZ_MUST_USE nsresult ContinueProcessResponse3(nsresult);
   MOZ_MUST_USE nsresult ContinueProcessResponse4(nsresult);
@@ -372,7 +375,6 @@ class nsHttpChannel final : public HttpBaseChannel,
   virtual MOZ_MUST_USE nsresult
   SetupReplacementChannel(nsIURI*, nsIChannel*, bool preserveMethod,
                           uint32_t redirectFlags) override;
-  nsresult StartCrossProcessRedirect();
 
   // proxy specific methods
   MOZ_MUST_USE nsresult ProxyFailover();
@@ -423,18 +425,18 @@ class nsHttpChannel final : public HttpBaseChannel,
   MOZ_MUST_USE nsresult OnDoneReadingPartialCacheEntry(bool* streamDone);
 
   MOZ_MUST_USE nsresult
-  DoAuthRetry(nsHttpTransaction* aTransWithStickyConn,
+  DoAuthRetry(HttpTransactionShell* aTransWithStickyConn,
               const std::function<nsresult(nsHttpChannel*, nsresult)>&
                   aContinueOnStopRequestFunc);
   MOZ_MUST_USE nsresult
-  ContinueDoAuthRetry(nsHttpTransaction* aTransWithStickyConn,
+  ContinueDoAuthRetry(HttpTransactionShell* aTransWithStickyConn,
                       const std::function<nsresult(nsHttpChannel*, nsresult)>&
                           aContinueOnStopRequestFunc);
   MOZ_MUST_USE nsresult
-  DoConnect(nsHttpTransaction* aTransWithStickyConn = nullptr);
+  DoConnect(HttpTransactionShell* aTransWithStickyConn = nullptr);
   MOZ_MUST_USE nsresult ContinueOnStopRequestAfterAuthRetry(
       nsresult aStatus, bool aAuthRetry, bool aIsFromNet, bool aContentComplete,
-      nsHttpTransaction* aTransWithStickyConn);
+      HttpTransactionShell* aTransWithStickyConn);
   MOZ_MUST_USE nsresult ContinueOnStopRequest(nsresult status, bool aIsFromNet,
                                               bool aContentComplete);
 
@@ -533,8 +535,6 @@ class nsHttpChannel final : public HttpBaseChannel,
 
   void MaybeWarnAboutAppCache();
 
-  void SetLoadGroupUserAgentOverride();
-
   void SetOriginHeader();
   void SetDoNotTrack();
 
@@ -598,8 +598,8 @@ class nsHttpChannel final : public HttpBaseChannel,
  private:
   nsCOMPtr<nsICancelable> mProxyRequest;
 
-  RefPtr<nsInputStreamPump> mTransactionPump;
-  RefPtr<nsHttpTransaction> mTransaction;
+  nsCOMPtr<nsIRequest> mTransactionPump;
+  RefPtr<HttpTransactionShell> mTransaction;
 
   uint64_t mLogicalOffset;
 
@@ -646,6 +646,10 @@ class nsHttpChannel final : public HttpBaseChannel,
 
   static const uint32_t WAIT_FOR_CACHE_ENTRY = 1;
   static const uint32_t WAIT_FOR_OFFLINE_CACHE_ENTRY = 2;
+
+  // Gets computed during ComputeCrossOriginOpenerPolicyMismatch so we have
+  // the channel's policy even if we don't know policy initiator.
+  nsILoadInfo::CrossOriginOpenerPolicy mComputedCrossOriginOpenerPolicy;
 
   bool mCacheOpenWithPriority;
   uint32_t mCacheQueueSizeWhenOpen;
@@ -817,6 +821,10 @@ class nsHttpChannel final : public HttpBaseChannel,
   mozilla::Mutex mRCWNLock;
 
   TimeStamp mNavigationStartTimeStamp;
+
+  // We update the value of mProxyConnectResponseCode when OnStartRequest is
+  // called and reset the value when we switch to another failover proxy.
+  int32_t mProxyConnectResponseCode;
 
  protected:
   virtual void DoNotifyListenerCleanup() override;

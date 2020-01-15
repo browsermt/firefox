@@ -16,12 +16,15 @@
 #  include "nsAutoPtr.h"
 #  include "nsCOMPtr.h"
 #  include "nsThreadUtils.h"
-#  include "soundtouch/SoundTouchFactory.h"
 #  include "WavDumper.h"
 
 #  if defined(XP_WIN)
 #    include "mozilla/audio/AudioNotificationReceiver.h"
 #  endif
+
+namespace soundtouch {
+class MOZ_EXPORT SoundTouch;
+}
 
 namespace mozilla {
 
@@ -201,6 +204,8 @@ class AudioStream final
     virtual bool Ended() const = 0;
     // Notify that all data is drained by the AudioStream.
     virtual void Drained() = 0;
+    // Notify that a fatal error has occured during playback.
+    virtual void Errored() = 0;
 
    protected:
     virtual ~DataSource() = default;

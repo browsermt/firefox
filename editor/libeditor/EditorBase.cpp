@@ -19,13 +19,11 @@
 #include "DeleteTextTransaction.h"          // for DeleteTextTransaction
 #include "EditAggregateTransaction.h"       // for EditAggregateTransaction
 #include "EditorEventListener.h"            // for EditorEventListener
-#include "HTMLEditRules.h"                  // for HTMLEditRules
 #include "InsertNodeTransaction.h"          // for InsertNodeTransaction
 #include "InsertTextTransaction.h"          // for InsertTextTransaction
 #include "JoinNodeTransaction.h"            // for JoinNodeTransaction
 #include "PlaceholderTransaction.h"         // for PlaceholderTransaction
 #include "SplitNodeTransaction.h"           // for SplitNodeTransaction
-#include "TextEditUtils.h"                  // for TextEditUtils
 #include "mozilla/CheckedInt.h"             // for CheckedInt
 #include "mozilla/ComputedStyle.h"          // for ComputedStyle
 #include "mozilla/CSSEditUtils.h"           // for CSSEditUtils
@@ -54,8 +52,9 @@
 #include "mozilla/dom/AbstractRange.h"   // for AbstractRange
 #include "mozilla/dom/CharacterData.h"   // for CharacterData
 #include "mozilla/dom/DataTransfer.h"    // for DataTransfer
-#include "mozilla/dom/Element.h"         // for Element, nsINode::AsElement
-#include "mozilla/dom/EventTarget.h"     // for EventTarget
+#include "mozilla/InternalMutationEvent.h"  // for NS_EVENT_BITS_MUTATION_CHARACTERDATAMODIFIED
+#include "mozilla/dom/Element.h"      // for Element, nsINode::AsElement
+#include "mozilla/dom/EventTarget.h"  // for EventTarget
 #include "mozilla/dom/HTMLBodyElement.h"
 #include "mozilla/dom/HTMLBRElement.h"
 #include "mozilla/dom/Selection.h"  // for Selection, etc.
@@ -80,11 +79,9 @@
 #include "nsAtom.h"                    // for nsAtom
 #include "nsIContent.h"                // for nsIContent
 #include "mozilla/dom/Document.h"      // for Document
-#include "nsIDOMEventListener.h"       // for nsIDOMEventListener
 #include "nsIDocumentStateListener.h"  // for nsIDocumentStateListener
 #include "nsIEditActionListener.h"     // for nsIEditActionListener
 #include "nsIEditorObserver.h"         // for nsIEditorObserver
-#include "nsIEditorSpellCheck.h"       // for nsIEditorSpellCheck
 #include "nsIFrame.h"                  // for nsIFrame
 #include "nsIInlineSpellChecker.h"     // for nsIInlineSpellChecker, etc.
 #include "nsNameSpaceManager.h"        // for kNameSpaceID_None, etc.
@@ -140,6 +137,7 @@ EditorBase::EditorBase()
       mPlaceholderBatch(0),
       mDocDirtyState(-1),
       mSpellcheckCheckboxState(eTriUnset),
+      mInitSucceeded(false),
       mAllowsTransactionsToChangeSelection(true),
       mDidPreDestroy(false),
       mDidPostCreate(false),
@@ -481,6 +479,8 @@ void EditorBase::PreDestroy(bool aDestroyingFrames) {
     AsTextEditor()->MaskAllCharacters();
   }
 
+  mInitSucceeded = false;
+
   Selection* selection = GetSelection();
   if (selection) {
     selection->RemoveSelectionListener(this);
@@ -619,8 +619,9 @@ bool EditorBase::IsSelectionEditable() {
     return false;
   }
 
-  nsINode* commonAncestor =
-      SelectionRefPtr()->GetAnchorFocusRange()->GetCommonAncestor();
+  nsINode* commonAncestor = SelectionRefPtr()
+                                ->GetAnchorFocusRange()
+                                ->GetClosestCommonInclusiveAncestor();
   while (commonAncestor && !commonAncestor->IsEditable()) {
     commonAncestor = commonAncestor->GetParentNode();
   }
@@ -925,7 +926,7 @@ void EditorBase::EndPlaceholderTransaction() {
 
   if (mPlaceholderBatch == 1) {
     // By making the assumption that no reflow happens during the calls
-    // to EndUpdateViewBatch and ScrollSelectionIntoView, we are able to
+    // to EndUpdateViewBatch and ScrollSelectionFocusIntoView, we are able to
     // allow the selection to cache a frame offset which is used by the
     // caret drawing code. We only enable this cache here; at other times,
     // we have no way to know whether reflow invalidates it
@@ -936,9 +937,13 @@ void EditorBase::EndPlaceholderTransaction() {
     EndUpdateViewBatch();
     // make sure selection is in view
 
-    // After ScrollSelectionIntoView(), the pending notifications might be
+    // After ScrollSelectionFocusIntoView(), the pending notifications might be
     // flushed and PresShell/PresContext/Frames may be dead. See bug 418470.
-    ScrollSelectionIntoView(false);
+    // XXX Even if we're destroyed, we need to keep handling below because
+    //     this method changes a lot of status.  We should rewrite this safer.
+    DebugOnly<nsresult> rvIgnored = ScrollSelectionFocusIntoView();
+    NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                         "ScrollSelectionFocusIntoView() failed, but Ignored");
 
     // cached for frame offset are Not available now
     SelectionRefPtr()->SetCanCacheFrameOffset(false);
@@ -1361,8 +1366,15 @@ already_AddRefed<Element> EditorBase::CreateNodeWithTransaction(
   //     we need to redesign RangeUpdaterRef() as avoiding using indices.
   Unused << aPointToInsert.Offset();
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eCreateNode, nsIEditor::eNext);
+      *this, EditSubAction::eCreateNode, nsIEditor::eNext, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return nullptr;
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
   RefPtr<Element> newElement;
 
@@ -1386,9 +1398,8 @@ already_AddRefed<Element> EditorBase::CreateNodeWithTransaction(
         aPointToInsert.GetContainer(), aPointToInsert.Offset()));
   }
 
-  if (mRules && mRules->AsHTMLEditRules() && newElement) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidCreateNode(*newElement);
+  if (AsHTMLEditor() && newElement) {
+    TopLevelEditSubActionDataRef().DidCreateElement(*this, *newElement);
   }
 
   if (!mActionListeners.IsEmpty()) {
@@ -1438,8 +1449,15 @@ nsresult EditorBase::InsertNodeWithTransaction(
   }
   MOZ_ASSERT(aPointToInsert.IsSetAndValid());
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eInsertNode, nsIEditor::eNext);
+      *this, EditSubAction::eInsertNode, nsIEditor::eNext, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return ignoredError.StealNSResult();
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
   RefPtr<InsertNodeTransaction> transaction =
       InsertNodeTransaction::Create(*this, aContentToInsert, aPointToInsert);
@@ -1447,9 +1465,8 @@ nsresult EditorBase::InsertNodeWithTransaction(
 
   RangeUpdaterRef().SelAdjInsertNode(aPointToInsert);
 
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidInsertNode(aContentToInsert);
+  if (AsHTMLEditor()) {
+    TopLevelEditSubActionDataRef().DidInsertContent(*this, aContentToInsert);
   }
 
   if (!mActionListeners.IsEmpty()) {
@@ -1574,7 +1591,14 @@ already_AddRefed<nsIContent> EditorBase::SplitNodeWithTransaction(
   MOZ_ASSERT(aStartOfRightNode.IsSetAndValid());
 
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eSplitNode, nsIEditor::eNext);
+      *this, EditSubAction::eSplitNode, nsIEditor::eNext, aError);
+  if (NS_WARN_IF(aError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return nullptr;
+  }
+  NS_WARNING_ASSERTION(
+      !aError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
+  aError.SuppressException();
 
   // XXX Unfortunately, storing offset of the split point in
   //     SplitNodeTransaction is necessary for now.  We should fix this
@@ -1585,28 +1609,28 @@ already_AddRefed<nsIContent> EditorBase::SplitNodeWithTransaction(
       SplitNodeTransaction::Create(*this, aStartOfRightNode);
   aError = DoTransactionInternal(transaction);
 
-  nsCOMPtr<nsIContent> newNode = transaction->GetNewNode();
-  NS_WARNING_ASSERTION(newNode, "Failed to create a new left node");
+  nsCOMPtr<nsIContent> newContent = transaction->GetNewNode();
+  NS_WARNING_ASSERTION(newContent, "Failed to create a new left node");
 
   // XXX Some other transactions manage range updater by themselves.
   //     Why doesn't SplitNodeTransaction do it?
   RangeUpdaterRef().SelAdjSplitNode(*aStartOfRightNode.GetContainerAsContent(),
-                                    newNode);
+                                    newContent);
 
-  if (mRules && mRules->AsHTMLEditRules() && newNode) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidSplitNode(*aStartOfRightNode.GetContainer(), *newNode);
+  if (AsHTMLEditor() && newContent) {
+    TopLevelEditSubActionDataRef().DidSplitContent(
+        *this, *aStartOfRightNode.GetContainerAsContent(), *newContent);
   }
 
   if (mInlineSpellChecker) {
     RefPtr<mozInlineSpellChecker> spellChecker = mInlineSpellChecker;
-    spellChecker->DidSplitNode(aStartOfRightNode.GetContainer(), newNode);
+    spellChecker->DidSplitNode(aStartOfRightNode.GetContainer(), newContent);
   }
 
   if (!mActionListeners.IsEmpty()) {
     AutoActionListenerArray listeners(mActionListeners);
     for (auto& listener : listeners) {
-      listener->DidSplitNode(aStartOfRightNode.GetContainer(), newNode);
+      listener->DidSplitNode(aStartOfRightNode.GetContainer(), newContent);
     }
   }
 
@@ -1614,7 +1638,7 @@ already_AddRefed<nsIContent> EditorBase::SplitNodeWithTransaction(
     return nullptr;
   }
 
-  return newNode.forget();
+  return newContent.forget();
 }
 
 NS_IMETHODIMP
@@ -1639,12 +1663,21 @@ EditorBase::JoinNodes(nsINode* aLeftNode, nsINode* aRightNode, nsINode*) {
 nsresult EditorBase::JoinNodesWithTransaction(nsINode& aLeftNode,
                                               nsINode& aRightNode) {
   MOZ_ASSERT(IsEditActionDataAvailable());
+  MOZ_ASSERT(aLeftNode.IsContent());
+  MOZ_ASSERT(aRightNode.IsContent());
 
   nsCOMPtr<nsINode> parent = aLeftNode.GetParentNode();
   MOZ_ASSERT(parent);
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eJoinNodes, nsIEditor::ePrevious);
+      *this, EditSubAction::eJoinNodes, nsIEditor::ePrevious, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return ignoredError.StealNSResult();
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
   // Remember some values; later used for saved selection updating.
   // Find the offset between the nodes to be joined.
@@ -1652,9 +1685,9 @@ nsresult EditorBase::JoinNodesWithTransaction(nsINode& aLeftNode,
   // Find the number of children of the lefthand node
   uint32_t oldLeftNodeLen = aLeftNode.Length();
 
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->WillJoinNodes(aLeftNode, aRightNode);
+  if (AsHTMLEditor()) {
+    TopLevelEditSubActionDataRef().WillJoinContents(
+        *this, *aLeftNode.AsContent(), *aRightNode.AsContent());
   }
 
   nsresult rv = NS_OK;
@@ -1669,9 +1702,9 @@ nsresult EditorBase::JoinNodesWithTransaction(nsINode& aLeftNode,
   RangeUpdaterRef().SelAdjJoinNodes(aLeftNode, aRightNode, *parent, offset,
                                     static_cast<int32_t>(oldLeftNodeLen));
 
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidJoinNodes(aLeftNode, aRightNode);
+  if (AsHTMLEditor()) {
+    TopLevelEditSubActionDataRef().DidJoinContents(
+        *this, *aLeftNode.AsContent(), *aRightNode.AsContent());
   }
 
   if (mInlineSpellChecker) {
@@ -1714,13 +1747,20 @@ EditorBase::DeleteNode(nsINode* aNode) {
 
 nsresult EditorBase::DeleteNodeWithTransaction(nsINode& aNode) {
   MOZ_ASSERT(IsEditActionDataAvailable());
+  MOZ_ASSERT(aNode.IsContent());
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eDeleteNode, nsIEditor::ePrevious);
+      *this, EditSubAction::eDeleteNode, nsIEditor::ePrevious, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return ignoredError.StealNSResult();
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->WillDeleteNode(aNode);
+  if (AsHTMLEditor()) {
+    TopLevelEditSubActionDataRef().WillDeleteContent(*this, *aNode.AsContent());
   }
 
   // FYI: DeleteNodeTransaction grabs aNode while it's alive.  So, it's safe
@@ -2122,8 +2162,23 @@ void EditorBase::NotifyEditorObservers(
       mIsInEditSubAction = false;
 
       if (mTextInputListener) {
+        // TODO: TextInputListener::OnEditActionHandled() may return
+        //       NS_ERROR_OUT_OF_MEMORY.  If so and if
+        //       TextControlState::SetValue() setting value with us, we should
+        //       return the result to TextEditor::ReplaceTextAsAction(),
+        //       TextEditor::DeleteSelectionAsAction() and
+        //       TextEditor::InsertTextAsAction().  However, it requires a lot
+        //       of changes in editor classes, but it's not so important since
+        //       editor does not use fallible allocation.  Therefore, normally,
+        //       the process must be crashed anyway.
         RefPtr<TextInputListener> listener = mTextInputListener;
-        listener->OnEditActionHandled();
+        nsresult rv =
+            listener->OnEditActionHandled(MOZ_KnownLive(*AsTextEditor()));
+        MOZ_RELEASE_ASSERT(rv != NS_ERROR_OUT_OF_MEMORY,
+                           "Setting value failed due to out of memory");
+        NS_WARNING_ASSERTION(
+            NS_SUCCEEDED(rv),
+            "TextInputListener::OnEditActionHandled() failed but ignored");
       }
 
       if (mIMEContentObserver) {
@@ -2139,11 +2194,11 @@ void EditorBase::NotifyEditorObservers(
         }
       }
 
-      if (!mDispatchInputEvent) {
+      if (!mDispatchInputEvent || IsEditActionAborted()) {
         return;
       }
 
-      FireInputEvent();
+      DispatchInputEvent();
       break;
     case eNotifyEditorObserversOfBefore:
       if (NS_WARN_IF(mIsInEditSubAction)) {
@@ -2171,13 +2226,14 @@ void EditorBase::NotifyEditorObservers(
   }
 }
 
-void EditorBase::FireInputEvent() {
+void EditorBase::DispatchInputEvent() {
   RefPtr<DataTransfer> dataTransfer = GetInputEventDataTransfer();
-  FireInputEvent(GetEditAction(), GetInputEventData(), dataTransfer);
+  DispatchInputEvent(GetEditAction(), GetInputEventData(), dataTransfer);
 }
 
-void EditorBase::FireInputEvent(EditAction aEditAction, const nsAString& aData,
-                                DataTransfer* aDataTransfer) {
+void EditorBase::DispatchInputEvent(EditAction aEditAction,
+                                    const nsAString& aData,
+                                    DataTransfer* aDataTransfer) {
   MOZ_ASSERT(IsEditActionDataAvailable());
 
   // We don't need to dispatch multiple input events if there is a pending
@@ -2340,18 +2396,20 @@ nsresult EditorBase::GetPreferredIMEState(IMEState* aState) {
   NS_ENSURE_TRUE(frame, NS_ERROR_FAILURE);
 
   switch (frame->StyleUIReset()->mIMEMode) {
-    case NS_STYLE_IME_MODE_AUTO:
+    case StyleImeMode::Auto:
       if (IsPasswordEditor()) aState->mEnabled = IMEState::PASSWORD;
       break;
-    case NS_STYLE_IME_MODE_DISABLED:
+    case StyleImeMode::Disabled:
       // we should use password state for |ime-mode: disabled;|.
       aState->mEnabled = IMEState::PASSWORD;
       break;
-    case NS_STYLE_IME_MODE_ACTIVE:
+    case StyleImeMode::Active:
       aState->mOpen = IMEState::OPEN;
       break;
-    case NS_STYLE_IME_MODE_INACTIVE:
+    case StyleImeMode::Inactive:
       aState->mOpen = IMEState::CLOSED;
+      break;
+    case StyleImeMode::Normal:
       break;
   }
 
@@ -2375,14 +2433,18 @@ EditorBase::GetRootElement(Element** aRootElement) {
 }
 
 void EditorBase::OnStartToHandleTopLevelEditSubAction(
-    EditSubAction aEditSubAction, nsIEditor::EDirection aDirection) {
+    EditSubAction aTopLevelEditSubAction,
+    nsIEditor::EDirection aDirectionOfTopLevelEditSubAction, ErrorResult& aRv) {
   MOZ_ASSERT(IsEditActionDataAvailable());
-  mEditActionData->SetTopLevelEditSubAction(aEditSubAction, aDirection);
+  MOZ_ASSERT(!aRv.Failed());
+  mEditActionData->SetTopLevelEditSubAction(aTopLevelEditSubAction,
+                                            aDirectionOfTopLevelEditSubAction);
 }
 
-void EditorBase::OnEndHandlingTopLevelEditSubAction() {
+nsresult EditorBase::OnEndHandlingTopLevelEditSubAction() {
   MOZ_ASSERT(IsEditActionDataAvailable());
   mEditActionData->SetTopLevelEditSubAction(EditSubAction::eNone, eNone);
+  return NS_OK;
 }
 
 void EditorBase::DoInsertText(Text& aText, uint32_t aOffset,
@@ -2562,20 +2624,20 @@ void EditorBase::CloneAttributesWithTransaction(Element& aDestElement,
   }
 }
 
-nsresult EditorBase::ScrollSelectionIntoView(bool aScrollToAnchor) {
+nsresult EditorBase::ScrollSelectionFocusIntoView() {
   nsISelectionController* selectionController = GetSelectionController();
   if (!selectionController) {
     return NS_OK;
   }
 
-  int16_t region = nsISelectionController::SELECTION_FOCUS_REGION;
-  if (aScrollToAnchor) {
-    region = nsISelectionController::SELECTION_ANCHOR_REGION;
-  }
-  selectionController->ScrollSelectionIntoView(
-      nsISelectionController::SELECTION_NORMAL, region,
+  DebugOnly<nsresult> rvIgnored = selectionController->ScrollSelectionIntoView(
+      nsISelectionController::SELECTION_NORMAL,
+      nsISelectionController::SELECTION_FOCUS_REGION,
       nsISelectionController::SCROLL_OVERFLOW_HIDDEN);
-  return NS_OK;
+  NS_WARNING_ASSERTION(
+      NS_SUCCEEDED(rvIgnored),
+      "nsISelectionController::ScrollSelectionIntoView() failed, but ignored");
+  return NS_WARN_IF(Destroyed()) ? NS_ERROR_EDITOR_DESTROYED : NS_OK;
 }
 
 EditorRawDOMPoint EditorBase::FindBetterInsertionPoint(
@@ -2595,7 +2657,7 @@ EditorRawDOMPoint EditorBase::FindBetterInsertionPoint(
     // We cannot find "better" insertion point in HTML editor.
     // WARNING: When you add some code to find better node in HTML editor,
     //          you need to call this before calling InsertTextWithTransaction()
-    //          in HTMLEditRules.
+    //          in HTMLEditor.
     return aPoint;
   }
 
@@ -2773,6 +2835,46 @@ nsresult EditorBase::InsertTextWithTransaction(
   return NS_OK;
 }
 
+static bool TextFragmentBeginsWithStringAtOffset(
+    const nsTextFragment& aTextFragment, const int32_t aOffset,
+    const nsAString& aString) {
+  const uint32_t stringLength = aString.Length();
+
+  if (aOffset + stringLength > aTextFragment.GetLength()) {
+    return false;
+  }
+
+  if (aTextFragment.Is2b()) {
+    return aString.Equals(aTextFragment.Get2b() + aOffset);
+  }
+
+  return aString.EqualsLatin1(aTextFragment.Get1b() + aOffset, stringLength);
+}
+
+namespace {
+struct AdjustedInsertionRange {
+  EditorRawDOMPoint mBegin;
+  EditorRawDOMPoint mEnd;
+};
+}  // anonymous namespace
+
+static AdjustedInsertionRange AdjustTextInsertionRange(
+    Text& aTextNode, const int32_t aInsertionOffset,
+    const nsAString& aInsertedString) {
+  if (TextFragmentBeginsWithStringAtOffset(aTextNode.TextFragment(),
+                                           aInsertionOffset, aInsertedString)) {
+    EditorRawDOMPoint begin{&aTextNode, aInsertionOffset};
+    EditorRawDOMPoint end{
+        &aTextNode,
+        static_cast<int32_t>(aInsertionOffset + aInsertedString.Length())};
+    return {begin, end};
+  }
+
+  const EditorRawDOMPoint begin{&aTextNode, 0};
+  const EditorRawDOMPoint end{&aTextNode,
+                              static_cast<int32_t>(aTextNode.TextLength())};
+  return {begin, end};
+}
 nsresult EditorBase::InsertTextIntoTextNodeWithTransaction(
     const nsAString& aStringToInsert, Text& aTextNode, int32_t aOffset,
     bool aSuppressIME) {
@@ -2807,16 +2909,31 @@ nsresult EditorBase::InsertTextIntoTextNodeWithTransaction(
   nsresult rv = DoTransactionInternal(transaction);
   EndUpdateViewBatch();
 
-  if (mRules && mRules->AsHTMLEditRules() && insertedTextNode) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidInsertText(*insertedTextNode, insertedOffset,
-                                 aStringToInsert);
+  if (AsHTMLEditor() && insertedTextNode) {
+    // The DOM was potentially modified during the transaction. This is possible
+    // through mutation event listeners. That is, the node could've been removed
+    // from the doc or otherwise modified.
+    if (!MaybeHasMutationEventListeners(
+            NS_EVENT_BITS_MUTATION_CHARACTERDATAMODIFIED)) {
+      const EditorRawDOMPoint begin{insertedTextNode, insertedOffset};
+      const EditorRawDOMPoint end{
+          insertedTextNode,
+          static_cast<int32_t>(insertedOffset + aStringToInsert.Length())};
+      TopLevelEditSubActionDataRef().DidInsertText(*this, begin, end);
+    } else if (insertedTextNode->IsInComposedDoc()) {
+      AdjustedInsertionRange adjustedRange = AdjustTextInsertionRange(
+          *insertedTextNode, insertedOffset, aStringToInsert);
+      TopLevelEditSubActionDataRef().DidInsertText(*this, adjustedRange.mBegin,
+                                                   adjustedRange.mEnd);
+    }
   }
 
   // let listeners know what happened
   if (!mActionListeners.IsEmpty()) {
     AutoActionListenerArray listeners(mActionListeners);
     for (auto& listener : listeners) {
+      // TODO: might need adaptation because of mutation event listeners called
+      // during `DoTransactionInternal`.
       listener->DidInsertText(insertedTextNode, insertedOffset, aStringToInsert,
                               rv);
     }
@@ -2910,19 +3027,23 @@ nsresult EditorBase::NotifyDocumentListeners(
   return rv;
 }
 
-nsresult EditorBase::SetTextImpl(const nsAString& aString, Text& aTextNode) {
+nsresult EditorBase::SetTextNodeWithoutTransaction(const nsAString& aString,
+                                                   Text& aTextNode) {
   MOZ_ASSERT(IsEditActionDataAvailable());
+  MOZ_ASSERT(!AsHTMLEditor());
+  MOZ_ASSERT(IsPlaintextEditor());
+  MOZ_ASSERT(!IsUndoRedoEnabled());
 
   const uint32_t length = aTextNode.Length();
-
-  AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eSetText, nsIEditor::eNext);
 
   // Let listeners know what's up
   if (!mActionListeners.IsEmpty() && length) {
     AutoActionListenerArray listeners(mActionListeners);
     for (auto& listener : listeners) {
       listener->WillDeleteText(&aTextNode, 0, length);
+      if (NS_WARN_IF(Destroyed())) {
+        return NS_ERROR_EDITOR_DESTROYED;
+      }
     }
   }
 
@@ -2936,26 +3057,16 @@ nsresult EditorBase::SetTextImpl(const nsAString& aString, Text& aTextNode) {
     return rv;
   }
 
-  {
-    // Create a nested scope to not overwrite rv from the outer scope.
-    DebugOnly<nsresult> rv =
-        SelectionRefPtr()->Collapse(&aTextNode, aString.Length());
-    NS_ASSERTION(NS_SUCCEEDED(rv),
-                 "Selection could not be collapsed after insert");
+  DebugOnly<nsresult> rvIgnored =
+      SelectionRefPtr()->Collapse(&aTextNode, aString.Length());
+  if (NS_WARN_IF(Destroyed())) {
+    return NS_ERROR_EDITOR_DESTROYED;
   }
+  NS_ASSERTION(NS_SUCCEEDED(rvIgnored),
+               "Selection::Collapse() failed, but ignored");
 
   RangeUpdaterRef().SelAdjDeleteText(&aTextNode, 0, length);
   RangeUpdaterRef().SelAdjInsertText(aTextNode, 0, aString);
-
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    if (length) {
-      htmlEditRules->DidDeleteText(aTextNode, 0, length);
-    }
-    if (!aString.IsEmpty()) {
-      htmlEditRules->DidInsertText(aTextNode, 0, aString);
-    }
-  }
 
   // Let listeners know what happened
   if (!mActionListeners.IsEmpty()) {
@@ -2963,14 +3074,20 @@ nsresult EditorBase::SetTextImpl(const nsAString& aString, Text& aTextNode) {
     for (auto& listener : listeners) {
       if (length) {
         listener->DidDeleteText(&aTextNode, 0, length, rv);
+        if (NS_WARN_IF(Destroyed())) {
+          return NS_ERROR_EDITOR_DESTROYED;
+        }
       }
       if (!aString.IsEmpty()) {
         listener->DidInsertText(&aTextNode, 0, aString, rv);
+        if (NS_WARN_IF(Destroyed())) {
+          return NS_ERROR_EDITOR_DESTROYED;
+        }
       }
     }
   }
 
-  return rv;
+  return NS_OK;
 }
 
 nsresult EditorBase::DeleteTextWithTransaction(Text& aTextNode,
@@ -2984,8 +3101,15 @@ nsresult EditorBase::DeleteTextWithTransaction(Text& aTextNode,
     return NS_ERROR_FAILURE;
   }
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
-      *this, EditSubAction::eDeleteText, nsIEditor::ePrevious);
+      *this, EditSubAction::eDeleteText, nsIEditor::ePrevious, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return ignoredError.StealNSResult();
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
   // Let listeners know what's up
   if (!mActionListeners.IsEmpty()) {
@@ -2997,9 +3121,9 @@ nsresult EditorBase::DeleteTextWithTransaction(Text& aTextNode,
 
   nsresult rv = DoTransactionInternal(transaction);
 
-  if (mRules && mRules->AsHTMLEditRules()) {
-    RefPtr<HTMLEditRules> htmlEditRules = mRules->AsHTMLEditRules();
-    htmlEditRules->DidDeleteText(aTextNode, aOffset, aLength);
+  if (AsHTMLEditor()) {
+    TopLevelEditSubActionDataRef().DidDeleteText(
+        *this, EditorRawDOMPoint(&aTextNode, aOffset));
   }
 
   // Let listeners know what happened
@@ -4067,9 +4191,16 @@ nsresult EditorBase::MaybeCreatePaddingBRElementForEmptyEditor() {
     return NS_OK;
   }
 
+  IgnoredErrorResult ignoredError;
   AutoEditSubActionNotifier startToHandleEditSubAction(
       *this, EditSubAction::eCreatePaddingBRElementForEmptyEditor,
-      nsIEditor::eNone);
+      nsIEditor::eNone, ignoredError);
+  if (NS_WARN_IF(ignoredError.ErrorCodeIs(NS_ERROR_EDITOR_DESTROYED))) {
+    return ignoredError.StealNSResult();
+  }
+  NS_WARNING_ASSERTION(
+      !ignoredError.Failed(),
+      "OnStartToHandleTopLevelEditSubAction() failed, but ignored");
 
   RefPtr<Element> rootElement = GetRoot();
   if (!rootElement) {
@@ -4916,7 +5047,7 @@ nsresult EditorBase::ToggleTextDirectionAsAction(nsIPrincipal* aPrincipal) {
 
   // XXX When we don't change the text direction, do we really need to
   //     dispatch input event?
-  FireInputEvent();
+  DispatchInputEvent();
 
   return NS_OK;
 }
@@ -4957,7 +5088,7 @@ void EditorBase::SwitchTextDirectionTo(TextDirection aTextDirection) {
 
   // XXX When we don't change the text direction, do we really need to
   //     dispatch input event?
-  FireInputEvent();
+  DispatchInputEvent();
 }
 
 nsresult EditorBase::SetTextDirectionTo(TextDirection aTextDirection) {
@@ -5331,7 +5462,8 @@ EditorBase::AutoEditActionDataSetter::AutoEditActionDataSetter(
     : mEditorBase(const_cast<EditorBase&>(aEditorBase)),
       mParentData(aEditorBase.mEditActionData),
       mData(VoidString()),
-      mTopLevelEditSubAction(EditSubAction::eNone) {
+      mTopLevelEditSubAction(EditSubAction::eNone),
+      mAborted(false) {
   // If we're nested edit action, copies necessary data from the parent.
   if (mParentData) {
     mSelection = mParentData->mSelection;
@@ -5362,6 +5494,7 @@ EditorBase::AutoEditActionDataSetter::AutoEditActionDataSetter(
               ->GetSelectedRangeItemForTopLevelEditSubAction();
       mTopLevelEditSubActionData.mChangedRange =
           mEditorBase.AsHTMLEditor()->GetChangedRangeForTopLevelEditSubAction();
+      mTopLevelEditSubActionData.mCachedInlineStyles.emplace();
     }
   }
   mEditorBase.mEditActionData = this;
@@ -5391,7 +5524,8 @@ void EditorBase::AutoEditActionDataSetter::SetColorData(
 
   bool wasCurrentColor = false;
   nscolor color = NS_RGB(0, 0, 0);
-  if (!ServoCSSParser::ComputeColor(nullptr, NS_RGB(0, 0, 0), aData, &color,
+  if (!ServoCSSParser::ComputeColor(nullptr, NS_RGB(0, 0, 0),
+                                    NS_ConvertUTF16toUTF8(aData), &color,
                                     &wasCurrentColor)) {
     // If we cannot parse aData, let's set original value as-is.  It could be
     // new format defined by newer spec.
@@ -5496,18 +5630,17 @@ nsresult EditorBase::TopLevelEditSubActionData::AddRangeToChangedRange(
     return rv;
   }
 
-  bool disconnected = false;
-  int16_t relation = mChangedRange->StartRef().IsSet()
-                         ? nsContentUtils::ComparePoints(
-                               mChangedRange->StartRef(),
-                               aStart.ToRawRangeBoundary(), &disconnected)
-                         : 1;
-  if (NS_WARN_IF(disconnected)) {
+  Maybe<int32_t> relation =
+      mChangedRange->StartRef().IsSet()
+          ? nsContentUtils::ComparePoints(mChangedRange->StartRef(),
+                                          aStart.ToRawRangeBoundary())
+          : Some(1);
+  if (NS_WARN_IF(!relation)) {
     return NS_ERROR_FAILURE;
   }
 
   // If aStart is before start of mChangedRange, reset the start.
-  if (relation > 0) {
+  if (*relation > 0) {
     ErrorResult error;
     mChangedRange->SetStart(aStart.ToRawRangeBoundary(), error);
     if (NS_WARN_IF(error.Failed())) {
@@ -5517,15 +5650,14 @@ nsresult EditorBase::TopLevelEditSubActionData::AddRangeToChangedRange(
 
   relation = mChangedRange->EndRef().IsSet()
                  ? nsContentUtils::ComparePoints(mChangedRange->EndRef(),
-                                                 aEnd.ToRawRangeBoundary(),
-                                                 &disconnected)
-                 : 1;
-  if (NS_WARN_IF(disconnected)) {
+                                                 aEnd.ToRawRangeBoundary())
+                 : Some(1);
+  if (NS_WARN_IF(!relation)) {
     return NS_ERROR_FAILURE;
   }
 
   // If aEnd is after end of mChangedRange, reset the end.
-  if (relation < 0) {
+  if (*relation < 0) {
     ErrorResult error;
     mChangedRange->SetEnd(aEnd.ToRawRangeBoundary(), error);
     if (NS_WARN_IF(error.Failed())) {
@@ -5534,6 +5666,189 @@ nsresult EditorBase::TopLevelEditSubActionData::AddRangeToChangedRange(
   }
 
   return NS_OK;
+}
+
+void EditorBase::TopLevelEditSubActionData::DidCreateElement(
+    EditorBase& aEditorBase, Element& aNewElement) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored =
+      AddNodeToChangedRange(*aEditorBase.AsHTMLEditor(), aNewElement);
+  NS_WARNING_ASSERTION(
+      NS_SUCCEEDED(rvIgnored),
+      "TopLevelEditSubActionData::AddNodeToChangedRange() failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::DidInsertContent(
+    EditorBase& aEditorBase, nsIContent& aNewContent) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored =
+      AddNodeToChangedRange(*aEditorBase.AsHTMLEditor(), aNewContent);
+  NS_WARNING_ASSERTION(
+      NS_SUCCEEDED(rvIgnored),
+      "TopLevelEditSubActionData::AddNodeToChangedRange() failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::WillDeleteContent(
+    EditorBase& aEditorBase, nsIContent& aRemovingContent) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored =
+      AddNodeToChangedRange(*aEditorBase.AsHTMLEditor(), aRemovingContent);
+  NS_WARNING_ASSERTION(
+      NS_SUCCEEDED(rvIgnored),
+      "TopLevelEditSubActionData::AddNodeToChangedRange() failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::DidSplitContent(
+    EditorBase& aEditorBase, nsIContent& aExistingRightContent,
+    nsIContent& aNewLeftContent) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored = AddRangeToChangedRange(
+      *aEditorBase.AsHTMLEditor(), EditorRawDOMPoint(&aNewLeftContent, 0),
+      EditorRawDOMPoint(&aExistingRightContent, 0));
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                       "TopLevelEditSubActionData::AddRangeToChangedRange() "
+                       "failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::WillJoinContents(
+    EditorBase& aEditorBase, nsIContent& aLeftContent,
+    nsIContent& aRightContent) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  // remember split point
+  aEditorBase.EditSubActionDataRef().mJoinedLeftNodeLength =
+      aLeftContent.Length();
+}
+
+void EditorBase::TopLevelEditSubActionData::DidJoinContents(
+    EditorBase& aEditorBase, nsIContent& aLeftContent,
+    nsIContent& aRightContent) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored = AddPointToChangedRange(
+      *aEditorBase.AsHTMLEditor(),
+      EditorRawDOMPoint(
+          &aRightContent,
+          aEditorBase.EditSubActionDataRef().mJoinedLeftNodeLength));
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                       "TopLevelEditSubActionData::AddPointToChangedRange() "
+                       "failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::DidInsertText(
+    EditorBase& aEditorBase, const EditorRawDOMPoint& aInsertionBegin,
+    const EditorRawDOMPoint& aInsertionEnd) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored = AddRangeToChangedRange(
+      *aEditorBase.AsHTMLEditor(), aInsertionBegin, aInsertionEnd);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                       "TopLevelEditSubActionData::AddRangeToChangedRange() "
+                       "failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::DidDeleteText(
+    EditorBase& aEditorBase, const EditorRawDOMPoint& aStartInTextNode) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  DebugOnly<nsresult> rvIgnored =
+      AddPointToChangedRange(*aEditorBase.AsHTMLEditor(), aStartInTextNode);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                       "TopLevelEditSubActionData::AddPointToChangedRange() "
+                       "failed, but ignored");
+}
+
+void EditorBase::TopLevelEditSubActionData::WillDeleteRange(
+    EditorBase& aEditorBase, const EditorRawDOMPoint& aStart,
+    const EditorRawDOMPoint& aEnd) {
+  MOZ_ASSERT(aEditorBase.AsHTMLEditor());
+  MOZ_ASSERT(aStart.IsSet());
+  MOZ_ASSERT(aEnd.IsSet());
+
+  if (!aEditorBase.mInitSucceeded || aEditorBase.Destroyed()) {
+    return;  // We have not been initialized yet or already been destroyed.
+  }
+
+  if (!aEditorBase.EditSubActionDataRef().mAdjustChangedRangeFromListener) {
+    return;  // Temporarily disabled by edit sub-action handler.
+  }
+
+  // XXX Looks like that this is wrong.  We delete multiple selection ranges
+  //     once, but this adds only first range into the changed range.
+  //     Anyway, we should take the range as an argument.
+  DebugOnly<nsresult> rvIgnored =
+      AddRangeToChangedRange(*aEditorBase.AsHTMLEditor(), aStart, aEnd);
+  NS_WARNING_ASSERTION(NS_SUCCEEDED(rvIgnored),
+                       "TopLevelEditSubActionData::AddRangeToChangedRange() "
+                       "failed, but ignored");
 }
 
 }  // namespace mozilla

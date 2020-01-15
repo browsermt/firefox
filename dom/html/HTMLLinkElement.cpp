@@ -13,6 +13,7 @@
 #include "mozilla/EventStates.h"
 #include "mozilla/MemoryReporting.h"
 #include "mozilla/Preferences.h"
+#include "mozilla/StaticPrefs_network.h"
 #include "mozilla/dom/BindContext.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "mozilla/dom/HTMLLinkElementBinding.h"
@@ -26,7 +27,6 @@
 #include "nsINode.h"
 #include "nsIPrefetchService.h"
 #include "nsIStyleSheetLinkingElement.h"
-#include "nsIURL.h"
 #include "nsPIDOMWindow.h"
 #include "nsReadableUtils.h"
 #include "nsStyleConsts.h"
@@ -75,12 +75,14 @@ NS_IMPL_CYCLE_COLLECTION_TRAVERSE_BEGIN_INHERITED(HTMLLinkElement,
                                                   nsGenericHTMLElement)
   tmp->nsStyleLinkElement::Traverse(cb);
   NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mRelList)
+  NS_IMPL_CYCLE_COLLECTION_TRAVERSE(mSizes)
 NS_IMPL_CYCLE_COLLECTION_TRAVERSE_END
 
 NS_IMPL_CYCLE_COLLECTION_UNLINK_BEGIN_INHERITED(HTMLLinkElement,
                                                 nsGenericHTMLElement)
   tmp->nsStyleLinkElement::Unlink();
   NS_IMPL_CYCLE_COLLECTION_UNLINK(mRelList)
+  NS_IMPL_CYCLE_COLLECTION_UNLINK(mSizes)
 NS_IMPL_CYCLE_COLLECTION_UNLINK_END
 
 NS_IMPL_ISUPPORTS_CYCLE_COLLECTION_INHERITED(HTMLLinkElement,
@@ -135,8 +137,6 @@ nsresult HTMLLinkElement::BindToTree(BindContext& aContext, nsINode& aParent) {
   nsContentUtils::AddScriptRunner(
       NewRunnableMethod("dom::HTMLLinkElement::BindToTree", this, update));
 
-  // FIXME(emilio, bug 1555947): Why does this use the uncomposed doc but the
-  // attribute change code the composed doc?
   if (IsInUncomposedDoc() &&
       AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
                   eIgnoreCase)) {
@@ -173,13 +173,12 @@ void HTMLLinkElement::UnbindFromTree(bool aNullParent) {
   Document* oldDoc = GetUncomposedDoc();
   ShadowRoot* oldShadowRoot = GetContainingShadow();
 
-  // We want to update the localization but only if the
-  // link is removed from a DOM change, and not
-  // because the document is going away.
+  // We want to update the localization but only if the link is removed from a
+  // DOM change, and not because the document is going away.
   bool ignore;
   if (oldDoc && oldDoc->GetScriptHandlingObject(ignore) &&
-      this->AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel,
-                        nsGkAtoms::localization, eIgnoreCase)) {
+      AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
+                  eIgnoreCase)) {
     oldDoc->LocalizationLinkRemoved(this);
   }
 
@@ -286,8 +285,7 @@ nsresult HTMLLinkElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
   // If a link's `rel` attribute was changed from or to `localization`,
   // update the list of localization links.
   if (aNameSpaceID == kNameSpaceID_None && aName == nsGkAtoms::rel) {
-    Document* doc = GetComposedDoc();
-    if (doc) {
+    if (Document* doc = GetUncomposedDoc()) {
       if ((aValue && aValue->Equals(nsGkAtoms::localization, eIgnoreCase)) &&
           (!aOldValue ||
            !aOldValue->Equals(nsGkAtoms::localization, eIgnoreCase))) {
@@ -306,8 +304,7 @@ nsresult HTMLLinkElement::AfterSetAttr(int32_t aNameSpaceID, nsAtom* aName,
   if (aNameSpaceID == kNameSpaceID_None && aName == nsGkAtoms::href &&
       AttrValueIs(kNameSpaceID_None, nsGkAtoms::rel, nsGkAtoms::localization,
                   eIgnoreCase)) {
-    Document* doc = GetComposedDoc();
-    if (doc) {
+    if (Document* doc = GetUncomposedDoc()) {
       if (aOldValue) {
         doc->LocalizationLinkRemoved(this);
       }
@@ -398,16 +395,32 @@ void HTMLLinkElement::GetLinkTarget(nsAString& aTarget) {
 }
 
 static const DOMTokenListSupportedToken sSupportedRelValues[] = {
-    // Keep this in sync with ToLinkMask in nsStyleLinkElement.cpp.
+    // Keep this and the one below in sync with ToLinkMask in
+    // nsStyleLinkElement.cpp.
     // "preload" must come first because it can be disabled.
     "preload",   "prefetch",   "dns-prefetch", "stylesheet", "next",
     "alternate", "preconnect", "icon",         "search",     nullptr};
 
+static const DOMTokenListSupportedToken sSupportedRelValuesWithManifest[] = {
+    // Keep this in sync with ToLinkMask in nsStyleLinkElement.cpp.
+    // "preload" and "manifest" must come first because they can be disabled.
+    "preload",   "manifest",   "prefetch", "dns-prefetch", "stylesheet", "next",
+    "alternate", "preconnect", "icon",     "search",       nullptr};
+
 nsDOMTokenList* HTMLLinkElement::RelList() {
   if (!mRelList) {
-    if (Preferences::GetBool("network.preload")) {
+    auto preload = Preferences::GetBool("network.preload") ||
+                   StaticPrefs::network_preload_experimental();
+    auto manifest = StaticPrefs::dom_manifest_enabled();
+    if (manifest && preload) {
+      mRelList = new nsDOMTokenList(this, nsGkAtoms::rel,
+                                    sSupportedRelValuesWithManifest);
+    } else if (manifest && !preload) {
+      mRelList = new nsDOMTokenList(this, nsGkAtoms::rel,
+                                    &sSupportedRelValuesWithManifest[1]);
+    } else if (!manifest && preload) {
       mRelList = new nsDOMTokenList(this, nsGkAtoms::rel, sSupportedRelValues);
-    } else {
+    } else {  // both false...drop preload
       mRelList =
           new nsDOMTokenList(this, nsGkAtoms::rel, &sSupportedRelValues[1]);
     }
@@ -451,10 +464,17 @@ Maybe<nsStyleLinkElement::SheetInfo> HTMLLinkElement::GetStyleSheetInfo() {
     return Nothing();
   }
 
+  nsAutoString integrity;
+  GetAttr(kNameSpaceID_None, nsGkAtoms::integrity, integrity);
+
   nsCOMPtr<nsIURI> uri = Link::GetURI();
   nsCOMPtr<nsIPrincipal> prin = mTriggeringPrincipal;
   nsCOMPtr<nsIReferrerInfo> referrerInfo = new ReferrerInfo();
   referrerInfo->InitWithNode(this);
+
+  nsAutoString nonce;
+  GetAttr(kNameSpaceID_None, nsGkAtoms::nonce, nonce);
+
   return Some(SheetInfo{
       *OwnerDoc(),
       this,
@@ -464,6 +484,8 @@ Maybe<nsStyleLinkElement::SheetInfo> HTMLLinkElement::GetStyleSheetInfo() {
       GetCORSMode(),
       title,
       media,
+      integrity,
+      nonce,
       alternate ? HasAlternateRel::Yes : HasAlternateRel::No,
       IsInline::No,
       mExplicitlyEnabled ? IsExplicitlyEnabled::Yes : IsExplicitlyEnabled::No,

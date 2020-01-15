@@ -38,6 +38,7 @@ EXPORTS.mozilla += [
     'Bootstrap.h',
     'CmdLineAndEnvUtils.h',
     'SafeMode.h',
+    'UntrustedModulesData.h',
 ]
 
 if CONFIG['MOZ_INSTRUMENT_EVENT_LOOP']:
@@ -45,17 +46,20 @@ if CONFIG['MOZ_INSTRUMENT_EVENT_LOOP']:
 
 if CONFIG['MOZ_WIDGET_TOOLKIT'] == 'windows':
     EXPORTS.mozilla += [
-        'ModuleEvaluator_windows.h',
-        'ModuleVersionInfo_windows.h',
+        'AssembleCmdLine.h',
+        'ModuleVersionInfo.h',
         'PolicyChecks.h',
+        'UntrustedModulesProcessor.h',
         'WinDllServices.h',
         'WinTokenUtils.h',
     ]
     UNIFIED_SOURCES += [
         '/toolkit/mozapps/update/common/updateutils_win.cpp',
-        'ModuleEvaluator_windows.cpp',
-        'ModuleVersionInfo_windows.cpp',
+        'ModuleEvaluator.cpp',
+        'ModuleVersionInfo.cpp',
         'nsNativeAppSupportWin.cpp',
+        'UntrustedModulesData.cpp',
+        'UntrustedModulesProcessor.cpp',
         'WinDllServices.cpp',
         'WinTokenUtils.cpp',
     ]

@@ -18,6 +18,7 @@
 #endif
 
 #include "jsapi.h"
+#include "js/Array.h"  // JS::GetArrayLength, JS::IsArrayObject
 #include "js/CharacterEncoding.h"
 #include "js/CompilationAndEvaluation.h"
 #include "js/Printf.h"
@@ -31,8 +32,6 @@
 #include "nsIFile.h"
 #include "mozJSComponentLoader.h"
 #include "mozJSLoaderUtils.h"
-#include "nsIXPConnect.h"
-#include "nsIScriptSecurityManager.h"
 #include "nsIFileURL.h"
 #include "nsIJARURI.h"
 #include "nsNetUtil.h"
@@ -90,6 +89,8 @@ static LazyLogModule gJSCLLog("JSComponentLoader");
 #define ERROR_ARRAY_ELEMENT "%s - EXPORTED_SYMBOLS[%d] is not a string."
 #define ERROR_GETTING_SYMBOL "%s - Could not get symbol '%s'."
 #define ERROR_SETTING_SYMBOL "%s - Could not set symbol '%s' on target object."
+#define ERROR_UNINITIALIZED_SYMBOL \
+  "%s - Symbol '%s' accessed before initialization. Cyclic import?"
 
 static bool Dump(JSContext* cx, unsigned argc, Value* vp) {
   if (!nsJSUtils::DumpEnabled()) {
@@ -540,9 +541,9 @@ void mozJSComponentLoader::Shutdown() {
 }
 
 // This requires that the keys be strings and the values be pointers.
-template <class Key, class Data, class UserData>
+template <class Key, class Data, class UserData, class Converter>
 static size_t SizeOfTableExcludingThis(
-    const nsBaseHashtable<Key, Data, UserData>& aTable,
+    const nsBaseHashtable<Key, Data, UserData, Converter>& aTable,
     MallocSizeOf aMallocSizeOf) {
   size_t n = aTable.ShallowSizeOfExcludingThis(aMallocSizeOf);
   for (auto iter = aTable.ConstIter(); !iter.Done(); iter.Next()) {
@@ -692,27 +693,32 @@ JSObject* mozJSComponentLoader::PrepareObjectForLocation(
   // need to be extra careful checking for URIs pointing to files
   // EnsureFile may not always get called, especially on resource URIs
   // so we need to call GetFile to make sure this is a valid file
-  nsresult rv = NS_OK;
-  nsCOMPtr<nsIFileURL> fileURL = do_QueryInterface(aURI, &rv);
-  nsCOMPtr<nsIFile> testFile;
-  if (NS_SUCCEEDED(rv)) {
-    fileURL->GetFile(getter_AddRefs(testFile));
-  }
+  {
+    // Create an extra scope so that ~nsCOMPtr will run before the returned
+    // JSObject* is placed on the stack, since otherwise a GC in the destructor
+    // would invalidate the return value.
+    nsresult rv = NS_OK;
+    nsCOMPtr<nsIFileURL> fileURL = do_QueryInterface(aURI, &rv);
+    nsCOMPtr<nsIFile> testFile;
+    if (NS_SUCCEEDED(rv)) {
+      fileURL->GetFile(getter_AddRefs(testFile));
+    }
 
-  if (testFile) {
-    *aRealFile = true;
+    if (testFile) {
+      *aRealFile = true;
 
-    if (XRE_IsParentProcess()) {
-      RootedObject locationObj(aCx);
+      if (XRE_IsParentProcess()) {
+        RootedObject locationObj(aCx);
 
-      rv = nsXPConnect::XPConnect()->WrapNative(aCx, thisObj, aComponentFile,
-                                                NS_GET_IID(nsIFile),
-                                                locationObj.address());
-      NS_ENSURE_SUCCESS(rv, nullptr);
-      NS_ENSURE_TRUE(locationObj, nullptr);
+        rv = nsXPConnect::XPConnect()->WrapNative(aCx, thisObj, aComponentFile,
+                                                  NS_GET_IID(nsIFile),
+                                                  locationObj.address());
+        NS_ENSURE_SUCCESS(rv, nullptr);
+        NS_ENSURE_TRUE(locationObj, nullptr);
 
-      if (!JS_DefineProperty(aCx, thisObj, "__LOCATION__", locationObj, 0)) {
-        return nullptr;
+        if (!JS_DefineProperty(aCx, thisObj, "__LOCATION__", locationObj, 0)) {
+          return nullptr;
+        }
       }
     }
   }
@@ -845,7 +851,7 @@ nsresult mozJSComponentLoader::ObjectForLocation(
     // See bug 1303754.
     CompileOptions options(cx);
     options.setNoScriptRval(true)
-        .maybeMakeStrictMode(true)
+        .setForceStrictMode()
         .setFileAndLine(nativePath.get(), 1)
         .setSourceIsLazy(cache || ScriptPreloader::GetSingleton().Active());
 
@@ -1175,7 +1181,7 @@ nsresult mozJSComponentLoader::ExtractExports(
   }
 
   bool isArray;
-  if (!JS_IsArrayObject(cx, symbols, &isArray)) {
+  if (!JS::IsArrayObject(cx, symbols, &isArray)) {
     return NS_ERROR_FAILURE;
   }
   if (!isArray) {
@@ -1187,7 +1193,7 @@ nsresult mozJSComponentLoader::ExtractExports(
   // Iterate over symbols array, installing symbols on targetObj:
 
   uint32_t symbolCount = 0;
-  if (!JS_GetArrayLength(cx, symbolsObj, &symbolCount)) {
+  if (!JS::GetArrayLength(cx, symbolsObj, &symbolCount)) {
     return ReportOnCallerUTF8(cxhelper, ERROR_GETTING_ARRAY_LENGTH, aInfo);
   }
 
@@ -1220,6 +1226,18 @@ nsresult mozJSComponentLoader::ExtractExports(
         return NS_ERROR_FAILURE;
       }
       return ReportOnCallerUTF8(cxhelper, ERROR_GETTING_SYMBOL, aInfo,
+                                bytes.get());
+    }
+
+    // It's possible |value| is the uninitialized lexical MagicValue when
+    // there's a cyclic import: const obj = ChromeUtils.import("parent.jsm").
+    if (value.isMagic(JS_UNINITIALIZED_LEXICAL)) {
+      RootedString symbolStr(cx, JSID_TO_STRING(symbolId));
+      JS::UniqueChars bytes = JS_EncodeStringToUTF8(cx, symbolStr);
+      if (!bytes) {
+        return NS_ERROR_FAILURE;
+      }
+      return ReportOnCallerUTF8(cxhelper, ERROR_UNINITIALIZED_SYMBOL, aInfo,
                                 bytes.get());
     }
 

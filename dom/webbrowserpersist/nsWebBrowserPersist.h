@@ -16,11 +16,8 @@
 #include "nsIOutputStream.h"
 #include "nsIInputStream.h"
 #include "nsIChannel.h"
-#include "nsIDocumentEncoder.h"
-#include "nsITransport.h"
 #include "nsIProgressEventSink.h"
 #include "nsIFile.h"
-#include "nsIContentPolicy.h"
 #include "nsIWebProgressListener2.h"
 #include "nsIWebBrowserPersist.h"
 #include "nsIWebBrowserPersistDocument.h"
@@ -75,7 +72,6 @@ class nsWebBrowserPersist final : public nsIInterfaceRequestor,
   struct UploadData;
   struct URIData;
   struct WalkData;
-  struct URIFixupData;
 
   class OnWalk;
   class OnWrite;

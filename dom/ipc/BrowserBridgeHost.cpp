@@ -58,15 +58,8 @@ void BrowserBridgeHost::DestroyComplete() {
   mBridge = nullptr;
 }
 
-bool BrowserBridgeHost::Show(const ScreenIntSize& aSize, bool aParentIsActive) {
-  nsCOMPtr<nsIWidget> widget = GetWidget();
-  if (!widget) {
-    NS_WARNING("No widget found in BrowserBridgeHost::Show");
-    return false;
-  }
-  nsSizeMode sizeMode = widget ? widget->SizeMode() : nsSizeMode_Normal;
-
-  Unused << mBridge->SendShow(aSize, aParentIsActive, sizeMode);
+bool BrowserBridgeHost::Show(const OwnerShowInfo& aShowInfo) {
+  Unused << mBridge->SendShow(aShowInfo);
   return true;
 }
 

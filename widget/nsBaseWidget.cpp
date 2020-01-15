@@ -28,17 +28,14 @@
 #include "nsISimpleEnumerator.h"
 #include "nsIContent.h"
 #include "mozilla/dom/Document.h"
-#include "nsIServiceManager.h"
 #include "mozilla/Preferences.h"
 #include "BasicLayers.h"
 #include "ClientLayerManager.h"
 #include "mozilla/layers/Compositor.h"
-#include "nsIXULRuntime.h"
-#include "nsIXULWindow.h"
+#include "nsIAppWindow.h"
 #include "nsIBaseWindow.h"
 #include "nsXULPopupManager.h"
 #include "nsIWidgetListener.h"
-#include "nsIGfxInfo.h"
 #include "npapi.h"
 #include "X11UndefineNone.h"
 #include "base/thread.h"
@@ -54,6 +51,7 @@
 #include "mozilla/StaticPrefs_apz.h"
 #include "mozilla/StaticPrefs_dom.h"
 #include "mozilla/StaticPrefs_layout.h"
+#include "mozilla/StaticPrefs_layers.h"
 #include "mozilla/Unused.h"
 #include "mozilla/IMEStateManager.h"
 #include "mozilla/VsyncDispatcher.h"
@@ -72,7 +70,6 @@
 #include "mozilla/gfx/gfxVars.h"
 #include "mozilla/Move.h"
 #include "mozilla/Sprintf.h"
-#include "mozilla/StaticPrefs_layout.h"
 #include "mozilla/webrender/WebRenderTypes.h"
 #include "nsRefPtrHashtable.h"
 #include "TouchEvents.h"
@@ -168,9 +165,11 @@ nsBaseWidget::nsBaseWidget()
       mOriginalBounds(nullptr),
       mClipRectCount(0),
       mSizeMode(nsSizeMode_Normal),
+      mIsTiled(false),
       mPopupLevel(ePopupLevelTop),
       mPopupType(ePopupTypeAny),
       mHasRemoteContent(false),
+      mFissionWindow(false),
       mUpdateCursor(true),
       mUseAttachedEvents(false),
       mIMEHasFocus(false),
@@ -390,6 +389,7 @@ void nsBaseWidget::BaseCreate(nsIWidget* aParent, nsWidgetInitData* aInitData) {
     mPopupLevel = aInitData->mPopupLevel;
     mPopupType = aInitData->mPopupHint;
     mHasRemoteContent = aInitData->mHasRemoteContent;
+    mFissionWindow = aInitData->mFissionWindow;
   }
 
   if (aParent) {
@@ -906,7 +906,7 @@ void nsBaseWidget::ConfigureAPZCTreeManager() {
   // When APZ is enabled, we can actually enable raw touch events because we
   // have code that can deal with them properly. If APZ is not enabled, this
   // function doesn't get called.
-  if (Preferences::GetInt("dom.w3c_touch_events.enabled", 0) ||
+  if (StaticPrefs::dom_w3c_touch_events_enabled() ||
       StaticPrefs::dom_w3c_pointer_events_enabled()) {
     RegisterTouchWindow();
   }
@@ -957,18 +957,21 @@ void nsBaseWidget::UpdateZoomConstraints(
 bool nsBaseWidget::AsyncPanZoomEnabled() const { return !!mAPZC; }
 
 nsEventStatus nsBaseWidget::ProcessUntransformedAPZEvent(
-    WidgetInputEvent* aEvent, const ScrollableLayerGuid& aGuid,
-    uint64_t aInputBlockId, nsEventStatus aApzResponse) {
+    WidgetInputEvent* aEvent, const APZEventResult& aApzResult) {
   MOZ_ASSERT(NS_IsMainThread());
-  InputAPZContext context(aGuid, aInputBlockId, aApzResponse);
+  ScrollableLayerGuid targetGuid = aApzResult.mTargetGuid;
+  uint64_t inputBlockId = aApzResult.mInputBlockId;
+  InputAPZContext context(aApzResult.mTargetGuid, inputBlockId,
+                          aApzResult.mStatus);
 
   // If this is an event that the APZ has targeted to an APZC in the root
   // process, apply that APZC's callback-transform before dispatching the
   // event. If the event is instead targeted to an APZC in the child process,
   // the transform will be applied in the child process before dispatching
   // the event there (see e.g. BrowserChild::RecvRealTouchEvent()).
-  if (aGuid.mLayersId == mCompositorSession->RootLayerTreeId()) {
-    APZCCallbackHelper::ApplyCallbackTransform(*aEvent, aGuid,
+  if (aApzResult.mTargetGuid.mLayersId ==
+      mCompositorSession->RootLayerTreeId()) {
+    APZCCallbackHelper::ApplyCallbackTransform(*aEvent, targetGuid,
                                                GetDefaultScale());
   }
 
@@ -979,7 +982,7 @@ nsEventStatus nsBaseWidget::ProcessUntransformedAPZEvent(
   UniquePtr<WidgetEvent> original(aEvent->Duplicate());
   DispatchEvent(aEvent, status);
 
-  if (mAPZC && !InputAPZContext::WasRoutedToChildProcess() && aInputBlockId) {
+  if (mAPZC && !InputAPZContext::WasRoutedToChildProcess() && inputBlockId) {
     // EventStateManager did not route the event into the child process.
     // It's safe to communicate to APZ that the event has been processed.
     // Note that here aGuid.mLayersId might be different from
@@ -996,30 +999,30 @@ nsEventStatus nsBaseWidget::ProcessUntransformedAPZEvent(
       if (touchEvent->mMessage == eTouchStart) {
         if (StaticPrefs::layout_css_touch_action_enabled()) {
           APZCCallbackHelper::SendSetAllowedTouchBehaviorNotification(
-              this, GetDocument(), *(original->AsTouchEvent()), aInputBlockId,
+              this, GetDocument(), *(original->AsTouchEvent()), inputBlockId,
               mSetAllowedTouchBehaviorCallback);
         }
         postLayerization = APZCCallbackHelper::SendSetTargetAPZCNotification(
             this, GetDocument(), *(original->AsTouchEvent()), rootLayersId,
-            aInputBlockId);
+            inputBlockId);
       }
-      mAPZEventState->ProcessTouchEvent(*touchEvent, aGuid, aInputBlockId,
-                                        aApzResponse, status);
+      mAPZEventState->ProcessTouchEvent(*touchEvent, targetGuid, inputBlockId,
+                                        aApzResult.mStatus, status);
     } else if (WidgetWheelEvent* wheelEvent = aEvent->AsWheelEvent()) {
       MOZ_ASSERT(wheelEvent->mFlags.mHandledByAPZ);
       postLayerization = APZCCallbackHelper::SendSetTargetAPZCNotification(
           this, GetDocument(), *(original->AsWheelEvent()), rootLayersId,
-          aInputBlockId);
+          inputBlockId);
       if (wheelEvent->mCanTriggerSwipe) {
-        ReportSwipeStarted(aInputBlockId, wheelEvent->TriggersSwipe());
+        ReportSwipeStarted(inputBlockId, wheelEvent->TriggersSwipe());
       }
-      mAPZEventState->ProcessWheelEvent(*wheelEvent, aInputBlockId);
+      mAPZEventState->ProcessWheelEvent(*wheelEvent, inputBlockId);
     } else if (WidgetMouseEvent* mouseEvent = aEvent->AsMouseEvent()) {
       MOZ_ASSERT(mouseEvent->mFlags.mHandledByAPZ);
       postLayerization = APZCCallbackHelper::SendSetTargetAPZCNotification(
           this, GetDocument(), *(original->AsMouseEvent()), rootLayersId,
-          aInputBlockId);
-      mAPZEventState->ProcessMouseEvent(*mouseEvent, aInputBlockId);
+          inputBlockId);
+      mAPZEventState->ProcessMouseEvent(*mouseEvent, inputBlockId);
     }
     if (postLayerization && postLayerization->Register()) {
       Unused << postLayerization.release();
@@ -1033,29 +1036,22 @@ class DispatchWheelEventOnMainThread : public Runnable {
  public:
   DispatchWheelEventOnMainThread(const ScrollWheelInput& aWheelInput,
                                  nsBaseWidget* aWidget,
-                                 nsEventStatus aAPZResult,
-                                 uint64_t aInputBlockId,
-                                 ScrollableLayerGuid aGuid)
+                                 const APZEventResult& aAPZResult)
       : mozilla::Runnable("DispatchWheelEventOnMainThread"),
         mWheelInput(aWheelInput),
         mWidget(aWidget),
-        mAPZResult(aAPZResult),
-        mInputBlockId(aInputBlockId),
-        mGuid(aGuid) {}
+        mAPZResult(aAPZResult) {}
 
   NS_IMETHOD Run() override {
     WidgetWheelEvent wheelEvent = mWheelInput.ToWidgetWheelEvent(mWidget);
-    mWidget->ProcessUntransformedAPZEvent(&wheelEvent, mGuid, mInputBlockId,
-                                          mAPZResult);
+    mWidget->ProcessUntransformedAPZEvent(&wheelEvent, mAPZResult);
     return NS_OK;
   }
 
  private:
   ScrollWheelInput mWheelInput;
   nsBaseWidget* mWidget;
-  nsEventStatus mAPZResult;
-  uint64_t mInputBlockId;
-  ScrollableLayerGuid mGuid;
+  APZEventResult mAPZResult;
 };
 
 class DispatchWheelInputOnControllerThread : public Runnable {
@@ -1067,17 +1063,16 @@ class DispatchWheelInputOnControllerThread : public Runnable {
         mMainMessageLoop(MessageLoop::current()),
         mWheelInput(aWheelEvent),
         mAPZC(aAPZC),
-        mWidget(aWidget),
-        mInputBlockId(0) {}
+        mWidget(aWidget) {}
 
   NS_IMETHOD Run() override {
-    nsEventStatus result = mAPZC->InputBridge()->ReceiveInputEvent(
-        mWheelInput, &mGuid, &mInputBlockId);
-    if (result == nsEventStatus_eConsumeNoDefault) {
+    APZEventResult result =
+        mAPZC->InputBridge()->ReceiveInputEvent(mWheelInput);
+    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
       return NS_OK;
     }
-    RefPtr<Runnable> r = new DispatchWheelEventOnMainThread(
-        mWheelInput, mWidget, result, mInputBlockId, mGuid);
+    RefPtr<Runnable> r =
+        new DispatchWheelEventOnMainThread(mWheelInput, mWidget, result);
     mMainMessageLoop->PostTask(r.forget());
     return NS_OK;
   }
@@ -1087,25 +1082,20 @@ class DispatchWheelInputOnControllerThread : public Runnable {
   ScrollWheelInput mWheelInput;
   RefPtr<IAPZCTreeManager> mAPZC;
   nsBaseWidget* mWidget;
-  uint64_t mInputBlockId;
-  ScrollableLayerGuid mGuid;
 };
 
 void nsBaseWidget::DispatchTouchInput(MultiTouchInput& aInput) {
   MOZ_ASSERT(NS_IsMainThread());
   if (mAPZC) {
     MOZ_ASSERT(APZThreadUtils::IsControllerThread());
-    uint64_t inputBlockId = 0;
-    ScrollableLayerGuid guid;
 
-    nsEventStatus result =
-        mAPZC->InputBridge()->ReceiveInputEvent(aInput, &guid, &inputBlockId);
-    if (result == nsEventStatus_eConsumeNoDefault) {
+    APZEventResult result = mAPZC->InputBridge()->ReceiveInputEvent(aInput);
+    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
       return;
     }
 
     WidgetTouchEvent event = aInput.ToWidgetTouchEvent(this);
-    ProcessUntransformedAPZEvent(&event, guid, inputBlockId, result);
+    ProcessUntransformedAPZEvent(&event, result);
   } else {
     WidgetTouchEvent event = aInput.ToWidgetTouchEvent(this);
 
@@ -1118,17 +1108,14 @@ void nsBaseWidget::DispatchPanGestureInput(PanGestureInput& aInput) {
   MOZ_ASSERT(NS_IsMainThread());
   if (mAPZC) {
     MOZ_ASSERT(APZThreadUtils::IsControllerThread());
-    uint64_t inputBlockId = 0;
-    ScrollableLayerGuid guid;
 
-    nsEventStatus result =
-        mAPZC->InputBridge()->ReceiveInputEvent(aInput, &guid, &inputBlockId);
-    if (result == nsEventStatus_eConsumeNoDefault) {
+    APZEventResult result = mAPZC->InputBridge()->ReceiveInputEvent(aInput);
+    if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
       return;
     }
 
     WidgetWheelEvent event = aInput.ToWidgetWheelEvent(this);
-    ProcessUntransformedAPZEvent(&event, guid, inputBlockId, result);
+    ProcessUntransformedAPZEvent(&event, result);
   } else {
     WidgetWheelEvent event = aInput.ToWidgetWheelEvent(this);
 
@@ -1141,15 +1128,11 @@ nsEventStatus nsBaseWidget::DispatchInputEvent(WidgetInputEvent* aEvent) {
   MOZ_ASSERT(NS_IsMainThread());
   if (mAPZC) {
     if (APZThreadUtils::IsControllerThread()) {
-      uint64_t inputBlockId = 0;
-      ScrollableLayerGuid guid;
-
-      nsEventStatus result = mAPZC->InputBridge()->ReceiveInputEvent(
-          *aEvent, &guid, &inputBlockId);
-      if (result == nsEventStatus_eConsumeNoDefault) {
-        return result;
+      APZEventResult result = mAPZC->InputBridge()->ReceiveInputEvent(*aEvent);
+      if (result.mStatus == nsEventStatus_eConsumeNoDefault) {
+        return result.mStatus;
       }
-      return ProcessUntransformedAPZEvent(aEvent, guid, inputBlockId, result);
+      return ProcessUntransformedAPZEvent(aEvent, result);
     }
     WidgetWheelEvent* wheelEvent = aEvent->AsWheelEvent();
     if (wheelEvent) {
@@ -1171,9 +1154,7 @@ void nsBaseWidget::DispatchEventToAPZOnly(mozilla::WidgetInputEvent* aEvent) {
   MOZ_ASSERT(NS_IsMainThread());
   if (mAPZC) {
     MOZ_ASSERT(APZThreadUtils::IsControllerThread());
-    uint64_t inputBlockId = 0;
-    ScrollableLayerGuid guid;
-    mAPZC->InputBridge()->ReceiveInputEvent(*aEvent, &guid, &inputBlockId);
+    mAPZC->InputBridge()->ReceiveInputEvent(*aEvent);
   }
 }
 
@@ -1196,7 +1177,9 @@ void nsBaseWidget::CreateCompositorVsyncDispatcher() {
           MakeUnique<Mutex>("mCompositorVsyncDispatcherLock");
     }
     MutexAutoLock lock(*mCompositorVsyncDispatcherLock.get());
-    mCompositorVsyncDispatcher = new CompositorVsyncDispatcher();
+    if (!mCompositorVsyncDispatcher) {
+      mCompositorVsyncDispatcher = new CompositorVsyncDispatcher();
+    }
   }
 }
 
@@ -1231,7 +1214,11 @@ already_AddRefed<LayerManager> nsBaseWidget::CreateCompositorSession(
     bool enableAPZ = UseAPZ();
     CompositorOptions options(enableAPZ, enableWR);
 
-    bool enableAL = gfx::gfxConfig::IsEnabled(gfx::Feature::ADVANCED_LAYERS);
+    // Bug 1588484 - Advanced Layers is currently disabled for fission windows,
+    // since it doesn't properly support nested RefLayers.
+    bool enableAL =
+        gfx::gfxConfig::IsEnabled(gfx::Feature::ADVANCED_LAYERS) &&
+        (!mFissionWindow || StaticPrefs::layers_advanced_fission_enabled());
     options.SetUseAdvancedLayers(enableAL);
 
 #ifdef MOZ_WIDGET_ANDROID
@@ -1660,10 +1647,10 @@ nsIRollupListener* nsBaseWidget::GetActiveRollupListener() {
 void nsBaseWidget::NotifyWindowDestroyed() {
   if (!mWidgetListener) return;
 
-  nsCOMPtr<nsIXULWindow> window = mWidgetListener->GetXULWindow();
-  nsCOMPtr<nsIBaseWindow> xulWindow(do_QueryInterface(window));
-  if (xulWindow) {
-    xulWindow->Destroy();
+  nsCOMPtr<nsIAppWindow> window = mWidgetListener->GetAppWindow();
+  nsCOMPtr<nsIBaseWindow> appWindow(do_QueryInterface(window));
+  if (appWindow) {
+    appWindow->Destroy();
   }
 }
 
@@ -2046,11 +2033,11 @@ void nsBaseWidget::NotifyLiveResizeStarted() {
   if (!mWidgetListener) {
     return;
   }
-  nsCOMPtr<nsIXULWindow> xulWindow = mWidgetListener->GetXULWindow();
-  if (!xulWindow) {
+  nsCOMPtr<nsIAppWindow> appWindow = mWidgetListener->GetAppWindow();
+  if (!appWindow) {
     return;
   }
-  mLiveResizeListeners = xulWindow->GetLiveResizeListeners();
+  mLiveResizeListeners = appWindow->GetLiveResizeListeners();
   for (uint32_t i = 0; i < mLiveResizeListeners.Length(); i++) {
     mLiveResizeListeners[i]->LiveResizeStarted();
   }
@@ -2235,11 +2222,12 @@ nsresult nsIWidget::OnWindowedPluginKeyEvent(
 
 void nsIWidget::PostHandleKeyEvent(mozilla::WidgetKeyboardEvent* aEvent) {}
 
-void nsIWidget::GetEditCommands(nsIWidget::NativeKeyBindingsType aType,
+bool nsIWidget::GetEditCommands(nsIWidget::NativeKeyBindingsType aType,
                                 const WidgetKeyboardEvent& aEvent,
                                 nsTArray<CommandInt>& aCommands) {
   MOZ_ASSERT(aEvent.IsTrusted());
   MOZ_ASSERT(aCommands.IsEmpty());
+  return true;
 }
 
 already_AddRefed<nsIBidiKeyboard> nsIWidget::CreateBidiKeyboard() {

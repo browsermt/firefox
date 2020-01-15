@@ -10,7 +10,7 @@
 #include "nsStyleConsts.h"
 #include "nsNameSpaceManager.h"
 #include "nsCSSRendering.h"
-#include "nsMathMLElement.h"
+#include "mozilla/dom/MathMLElement.h"
 
 #include "nsTArray.h"
 #include "nsTableFrame.h"
@@ -25,6 +25,7 @@
 
 using namespace mozilla;
 using namespace mozilla::image;
+using mozilla::dom::Element;
 
 //
 // <mtable> -- table or matrix - implementation
@@ -454,7 +455,7 @@ static void ExtractSpacingValues(const nsAString& aString, nsAtom* aAttribute,
         newValue = aDefaultValue0;
       }
       nsMathMLFrame::ParseNumericValue(
-          valueString, &newValue, nsMathMLElement::PARSE_ALLOW_UNITLESS,
+          valueString, &newValue, dom::MathMLElement::PARSE_ALLOW_UNITLESS,
           presContext, computedStyle, aFontSizeInflation);
       aSpacingArray.AppendElement(newValue);
 

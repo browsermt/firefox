@@ -528,13 +528,18 @@ bool PuppetWidget::AsyncPanZoomEnabled() const {
   return mBrowserChild && mBrowserChild->AsyncPanZoomEnabled();
 }
 
-void PuppetWidget::GetEditCommands(NativeKeyBindingsType aType,
+bool PuppetWidget::GetEditCommands(NativeKeyBindingsType aType,
                                    const WidgetKeyboardEvent& aEvent,
                                    nsTArray<CommandInt>& aCommands) {
   // Validate the arguments.
-  nsIWidget::GetEditCommands(aType, aEvent, aCommands);
-
+  if (NS_WARN_IF(!nsIWidget::GetEditCommands(aType, aEvent, aCommands))) {
+    return false;
+  }
+  if (NS_WARN_IF(!mBrowserChild)) {
+    return false;
+  }
   mBrowserChild->RequestEditCommands(aType, aEvent, aCommands);
+  return true;
 }
 
 LayerManager* PuppetWidget::GetLayerManager(
@@ -1226,6 +1231,20 @@ PuppetScreenManager::GetPrimaryScreen(nsIScreen** outScreen) {
 }
 
 NS_IMETHODIMP
+PuppetScreenManager::GetTotalScreenPixels(int64_t* aTotalScreenPixels) {
+  MOZ_ASSERT(aTotalScreenPixels);
+  if (mOneScreen) {
+    int32_t x, y, width, height;
+    x = y = width = height = 0;
+    mOneScreen->GetRect(&x, &y, &width, &height);
+    *aTotalScreenPixels = width * height;
+  } else {
+    *aTotalScreenPixels = 0;
+  }
+  return NS_OK;
+}
+
+NS_IMETHODIMP
 PuppetScreenManager::ScreenForRect(int32_t inLeft, int32_t inTop,
                                    int32_t inWidth, int32_t inHeight,
                                    nsIScreen** outScreen) {
@@ -1426,9 +1445,6 @@ nsresult PuppetWidget::SetPrefersReducedMotionOverrideForTest(bool aValue) {
     return NS_ERROR_FAILURE;
   }
 
-  nsXPLookAndFeel::GetInstance()->SetPrefersReducedMotionOverrideForTest(
-      aValue);
-
   mBrowserChild->SendSetPrefersReducedMotionOverrideForTest(aValue);
   return NS_OK;
 }
@@ -1438,7 +1454,6 @@ nsresult PuppetWidget::ResetPrefersReducedMotionOverrideForTest() {
     return NS_ERROR_FAILURE;
   }
 
-  nsXPLookAndFeel::GetInstance()->ResetPrefersReducedMotionOverrideForTest();
   mBrowserChild->SendResetPrefersReducedMotionOverrideForTest();
   return NS_OK;
 }

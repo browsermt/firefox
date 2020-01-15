@@ -12,6 +12,8 @@
 #include "jsnum.h"
 
 #include "frontend/Parser.h"
+#include "vm/BigIntType.h"
+#include "vm/RegExpObject.h"
 
 #include "vm/JSContext-inl.h"
 
@@ -375,9 +377,10 @@ void LexicalScopeNode::dumpImpl(GenericPrinter& out, int indent) {
 }
 #endif
 
-TraceListNode::TraceListNode(js::gc::Cell* gcThing, TraceListNode* traceLink)
-    : gcThing(gcThing), traceLink(traceLink) {
-  MOZ_ASSERT(gcThing->isTenured());
+TraceListNode::TraceListNode(js::gc::Cell* gcThing, TraceListNode* traceLink,
+                             NodeType type)
+    : gcThing(gcThing), traceLink(traceLink), type_(type) {
+  MOZ_ASSERT_IF(gcThing, gcThing->isTenured());
 }
 
 BigIntBox* TraceListNode::asBigIntBox() {
@@ -390,22 +393,60 @@ ObjectBox* TraceListNode::asObjectBox() {
   return static_cast<ObjectBox*>(this);
 }
 
-BigIntBox::BigIntBox(BigInt* bi, TraceListNode* traceLink)
-    : TraceListNode(bi, traceLink) {}
+BigIntBox::BigIntBox(JS::BigInt* bi, TraceListNode* traceLink)
+    : TraceListNode(bi, traceLink, TraceListNode::NodeType::BigInt) {}
 
-ObjectBox::ObjectBox(JSObject* obj, TraceListNode* traceLink)
-    : TraceListNode(obj, traceLink), emitLink(nullptr) {
-  MOZ_ASSERT(!object()->is<JSFunction>());
+ObjectBox::ObjectBox(JSObject* obj, TraceListNode* traceLink,
+                     TraceListNode::NodeType type)
+    : TraceListNode(obj, traceLink, type), emitLink(nullptr) {}
+
+BigInt* BigIntLiteral::getOrCreate(JSContext* cx) {
+  if (data_.is<BigIntBox*>()) {
+    return value();
+  }
+  Deferred& deferred = data_.as<Deferred>();
+  return deferred.parseInfo.bigIntData[deferred.index].createBigInt(cx);
 }
 
-ObjectBox::ObjectBox(JSFunction* function, TraceListNode* traceLink)
-    : TraceListNode(function, traceLink), emitLink(nullptr) {
-  MOZ_ASSERT(object()->is<JSFunction>());
-  MOZ_ASSERT(asFunctionBox()->function() == function);
+bool BigIntLiteral::isZero() {
+  if (data_.is<BigIntBox*>()) {
+    return box()->value()->isZero();
+  }
+  Deferred& deferred = data_.as<Deferred>();
+  return deferred.parseInfo.bigIntData[deferred.index].isZero();
+}
+
+BigInt* BigIntLiteral::value() { return box()->value(); }
+
+JSAtom* BigIntLiteral::toAtom(JSContext* cx) {
+  RootedBigInt bi(cx, getOrCreate(cx));
+  if (!bi) {
+    return nullptr;
+  }
+  return BigIntToAtom<CanGC>(cx, bi);
+}
+
+JSAtom* NumericLiteral::toAtom(JSContext* cx) const {
+  return NumberToAtom(cx, value());
+}
+
+RegExpObject* RegExpCreationData::createRegExp(JSContext* cx) const {
+  MOZ_ASSERT(buf_);
+  return RegExpObject::createSyntaxChecked(cx, buf_.get(), length_, flags_,
+                                           TenuredObject);
+}
+
+RegExpObject* RegExpLiteral::getOrCreate(JSContext* cx,
+                                         ParseInfo& parseInfo) const {
+  if (data_.is<ObjectBox*>()) {
+    return &objbox()->object()->as<RegExpObject>();
+  }
+  return parseInfo.regExpData[data_.as<RegExpIndex>()].createRegExp(cx);
 }
 
 FunctionBox* ObjectBox::asFunctionBox() {
   MOZ_ASSERT(isFunctionBox());
+
   return static_cast<FunctionBox*>(this);
 }
 
@@ -425,7 +466,7 @@ void TraceListNode::trace(JSTracer* trc) {
 void FunctionBox::trace(JSTracer* trc) {
   ObjectBox::trace(trc);
   if (enclosingScope_) {
-    TraceRoot(trc, &enclosingScope_, "funbox-enclosingScope");
+    enclosingScope_.trace(trc);
   }
   if (explicitName_) {
     TraceRoot(trc, &explicitName_, "funbox-explicitName");

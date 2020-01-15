@@ -19,8 +19,6 @@
 #include <stdarg.h>
 
 struct PLDHashTableOps;
-struct JSContext;
-class JSObject;
 
 namespace mozilla {
 namespace recordreplay {
@@ -149,6 +147,28 @@ struct MOZ_RAII AutoEnsurePassThroughThreadEvents {
   bool mPassedThrough;
 };
 
+// Mark a region where thread events are passed through when locally replaying.
+// Replaying processes can run either on a local machine as a content process
+// associated with a firefox parent process, or on remote machines in the cloud.
+// We want local replaying processes to be able to interact with the system so
+// that they can connect with the parent process and e.g. report crashes.
+// We also want to avoid such interaction when replaying in the cloud, as there
+// won't be a parent process to connect to. Using these methods allows us to
+// handle both of these cases without changing the calling code's control flow.
+static inline void BeginPassThroughThreadEventsWithLocalReplay();
+static inline void EndPassThroughThreadEventsWithLocalReplay();
+
+// RAII class for regions where thread events are passed through when replaying
+// locally.
+struct MOZ_RAII AutoPassThroughThreadEventsWithLocalReplay {
+  AutoPassThroughThreadEventsWithLocalReplay() {
+    BeginPassThroughThreadEventsWithLocalReplay();
+  }
+  ~AutoPassThroughThreadEventsWithLocalReplay() {
+    EndPassThroughThreadEventsWithLocalReplay();
+  }
+};
+
 // Mark a region where thread events are not allowed to occur. The process will
 // crash immediately if an event does happen.
 static inline void BeginDisallowThreadEvents();
@@ -190,8 +210,11 @@ static inline void MovePLDHashTableContents(const PLDHashTableOps* aFirstOps,
 // Prevent a JS object from ever being collected while recording or replaying.
 // GC behavior is non-deterministic when recording/replaying, and preventing
 // an object from being collected ensures that finalizers which might interact
-// with the recording will not execute.
-static inline void HoldJSObject(JSObject* aJSObj);
+// with the recording will not execute. "aJSObj" must be a JSObject* pointer,
+// but we can't include JSObject's header here and we can't forward-declare it
+// due to some peculiarities with the compiler's visibility attributes.
+// See https://bugzilla.mozilla.org/show_bug.cgi?id=1426865
+static inline void HoldJSObject(void* aJSObj);
 
 // Some devtools operations which execute in a replaying process can cause code
 // to run which did not run while recording. For example, the JS debugger can
@@ -266,8 +289,9 @@ MFBT_API bool ShouldUpdateProgressCounter(const char* aURL);
 
 // Define a RecordReplayControl object on the specified global object, with
 // methods specialized to the current recording/replaying or middleman process
-// kind.
-MFBT_API bool DefineRecordReplayControlObject(JSContext* aCx, JSObject* aObj);
+// kind. "aCx" must be a JSContext* pointer, and "aObj" must be a JSObject*
+// pointer, as with HoldJSObject above.
+MFBT_API bool DefineRecordReplayControlObject(void* aCx, void* aObj);
 
 // Notify the infrastructure that some URL which contains JavaScript or CSS is
 // being parsed. This is used to provide the complete contents of the URL to
@@ -354,6 +378,10 @@ MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(BeginPassThroughThreadEvents, (), ())
 MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(EndPassThroughThreadEvents, (), ())
 MOZ_MAKE_RECORD_REPLAY_WRAPPER(AreThreadEventsPassedThrough, bool, false, (),
                                ())
+MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(BeginPassThroughThreadEventsWithLocalReplay,
+                                    (), ())
+MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(EndPassThroughThreadEventsWithLocalReplay,
+                                    (), ())
 MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(BeginDisallowThreadEvents, (), ())
 MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(EndDisallowThreadEvents, (), ())
 MOZ_MAKE_RECORD_REPLAY_WRAPPER(AreThreadEventsDisallowed, bool, false, (), ())
@@ -376,8 +404,7 @@ MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(MovePLDHashTableContents,
                                     (aFirstOps, aSecondOps))
 MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(InvalidateRecording, (const char* aWhy),
                                     (aWhy))
-MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(HoldJSObject, (JSObject* aObject),
-                                    (aObject))
+MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(HoldJSObject, (void* aJSObj), (aJSObj))
 MOZ_MAKE_RECORD_REPLAY_WRAPPER_VOID(RecordReplayAssertBytes,
                                     (const void* aData, size_t aSize),
                                     (aData, aSize))

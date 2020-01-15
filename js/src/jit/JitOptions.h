@@ -98,8 +98,9 @@ struct DefaultJitOptions {
   uint32_t ionMaxScriptSizeMainThread;
   uint32_t ionMaxLocalsAndArgs;
   uint32_t ionMaxLocalsAndArgsMainThread;
-  uint32_t wasmBatchIonThreshold;
   uint32_t wasmBatchBaselineThreshold;
+  uint32_t wasmBatchIonThreshold;
+  uint32_t wasmBatchCraneliftThreshold;
   mozilla::Maybe<IonRegisterAllocator> forcedRegisterAllocator;
 
   // Spectre mitigation flags. Each mitigation has its own flag in order to
@@ -141,8 +142,6 @@ inline bool IsBaselineInterpreterEnabled() {
 inline bool IsBaselineJitEnabled() {
   return IsBaselineInterpreterEnabled() && JitOptions.baselineJit;
 }
-
-inline bool IsIonEnabled() { return IsBaselineJitEnabled() && JitOptions.ion; }
 
 }  // namespace jit
 }  // namespace js

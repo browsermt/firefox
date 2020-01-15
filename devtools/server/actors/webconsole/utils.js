@@ -4,14 +4,16 @@
 
 "use strict";
 
-const { Ci, Cu } = require("chrome");
+const { Ci, Cu, Cc } = require("chrome");
 
 // Note that this is only used in WebConsoleCommands, see $0, screenshot and pprint().
 if (!isWorker) {
+  // TODO: Fix this server -> client import in Bug 1591055
+  // eslint-disable-next-line mozilla/reject-some-requires
   loader.lazyImporter(
     this,
     "VariablesView",
-    "resource://devtools/client/shared/widgets/VariablesView.jsm"
+    "resource://devtools/client/storage/VariablesView.jsm"
   );
   loader.lazyRequireGetter(
     this,
@@ -555,6 +557,27 @@ WebConsoleCommands._registerOriginal("help", function(owner) {
  *        eval scope is cleared back to its default (the top window).
  */
 WebConsoleCommands._registerOriginal("cd", function(owner, window) {
+  // Log a deprecation warning.
+  const scriptErrorClass = Cc["@mozilla.org/scripterror;1"];
+  const scriptError = scriptErrorClass.createInstance(Ci.nsIScriptError);
+
+  const deprecationMessage =
+    "The `cd` command will be disabled in a future release. " +
+    "See https://bugzilla.mozilla.org/show_bug.cgi?id=1605327 for more information.";
+
+  scriptError.initWithWindowID(
+    deprecationMessage,
+    null,
+    null,
+    0,
+    0,
+    1,
+    "content javascript",
+    owner.window.windowUtils.currentInnerWindowID
+  );
+  const Services = require("Services");
+  Services.console.logMessage(scriptError);
+
   if (!window) {
     owner.consoleActor.evalWindow = null;
     owner.helperResult = { type: "cd" };
@@ -628,7 +651,6 @@ WebConsoleCommands._registerOriginal("pprint", function(owner, object) {
   for (const name in obj) {
     const desc = WebConsoleUtils.getPropertyDescriptor(obj, name) || {};
     if (desc.get || desc.set) {
-      // TODO: Bug 842672 - toolkit/ imports modules from browser/.
       const getGrip = VariablesView.getGrip(desc.get);
       const setGrip = VariablesView.getGrip(desc.set);
       const getString = VariablesView.getString(getGrip);

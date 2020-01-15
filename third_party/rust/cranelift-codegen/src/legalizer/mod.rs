@@ -16,11 +16,13 @@
 use crate::bitset::BitSet;
 use crate::cursor::{Cursor, FuncCursor};
 use crate::flowgraph::ControlFlowGraph;
-use crate::ir::types::I32;
+use crate::ir::types::{I32, I64};
 use crate::ir::{self, InstBuilder, MemFlags};
 use crate::isa::TargetIsa;
 use crate::predicates;
 use crate::timing;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 mod boundary;
 mod call;
@@ -36,31 +38,78 @@ use self::heap::expand_heap_addr;
 use self::libcall::expand_as_libcall;
 use self::table::expand_table_addr;
 
-/// Legalize `inst` for `isa`. Return true if any changes to the code were
-/// made; return false if the instruction was successfully encoded as is.
+enum LegalizeInstResult {
+    Done,
+    Legalized,
+    SplitLegalizePending,
+}
+
+/// Legalize `inst` for `isa`.
 fn legalize_inst(
     inst: ir::Inst,
     pos: &mut FuncCursor,
     cfg: &mut ControlFlowGraph,
     isa: &dyn TargetIsa,
-) -> bool {
+) -> LegalizeInstResult {
     let opcode = pos.func.dfg[inst].opcode();
 
     // Check for ABI boundaries that need to be converted to the legalized signature.
     if opcode.is_call() {
-        if boundary::handle_call_abi(inst, pos.func, cfg) {
-            return true;
+        if boundary::handle_call_abi(isa, inst, pos.func, cfg) {
+            return LegalizeInstResult::Legalized;
         }
     } else if opcode.is_return() {
         if boundary::handle_return_abi(inst, pos.func, cfg) {
-            return true;
+            return LegalizeInstResult::Legalized;
         }
     } else if opcode.is_branch() {
         split::simplify_branch_arguments(&mut pos.func.dfg, inst);
+    } else if opcode == ir::Opcode::Isplit {
+        pos.use_srcloc(inst);
+
+        let arg = match pos.func.dfg[inst] {
+            ir::InstructionData::Unary { arg, .. } => pos.func.dfg.resolve_aliases(arg),
+            _ => panic!("Expected isplit: {}", pos.func.dfg.display_inst(inst, None)),
+        };
+
+        match pos.func.dfg.value_def(arg) {
+            ir::ValueDef::Result(inst, _num) => {
+                if let ir::InstructionData::Binary {
+                    opcode: ir::Opcode::Iconcat,
+                    ..
+                } = pos.func.dfg[inst]
+                {
+                    // `arg` was created by an `iconcat` instruction.
+                } else {
+                    // `arg` was not created by an `iconcat` instruction. Don't try to resolve it,
+                    // as otherwise `split::isplit` will re-insert the original `isplit`, causing
+                    // an endless loop.
+                    return LegalizeInstResult::SplitLegalizePending;
+                }
+            }
+            ir::ValueDef::Param(_ebb, _num) => {}
+        }
+
+        let res = pos.func.dfg.inst_results(inst).to_vec();
+        assert_eq!(res.len(), 2);
+        let (resl, resh) = (res[0], res[1]); // Prevent borrowck error
+
+        // Remove old isplit
+        pos.func.dfg.clear_results(inst);
+        pos.remove_inst();
+
+        let curpos = pos.position();
+        let srcloc = pos.srcloc();
+        let (xl, xh) = split::isplit(pos.func, cfg, curpos, srcloc, arg);
+
+        pos.func.dfg.change_to_alias(resl, xl);
+        pos.func.dfg.change_to_alias(resh, xh);
+
+        return LegalizeInstResult::Legalized;
     }
 
     match pos.func.update_encoding(inst, isa) {
-        Ok(()) => false,
+        Ok(()) => LegalizeInstResult::Done,
         Err(action) => {
             // We should transform the instruction into legal equivalents.
             // If the current instruction was replaced, we need to double back and revisit
@@ -69,12 +118,16 @@ fn legalize_inst(
             // There's a risk of infinite looping here if the legalization patterns are
             // unsound. Should we attempt to detect that?
             if action(inst, pos.func, cfg, isa) {
-                return true;
+                return LegalizeInstResult::Legalized;
             }
 
             // We don't have any pattern expansion for this instruction either.
             // Try converting it to a library call as a last resort.
-            expand_as_libcall(inst, pos.func, isa)
+            if expand_as_libcall(inst, pos.func, isa) {
+                LegalizeInstResult::Legalized
+            } else {
+                LegalizeInstResult::Done
+            }
         }
     }
 }
@@ -93,6 +146,18 @@ pub fn legalize_function(func: &mut ir::Function, cfg: &mut ControlFlowGraph, is
     func.encodings.resize(func.dfg.num_insts());
 
     let mut pos = FuncCursor::new(func);
+    let func_begin = pos.position();
+
+    // Split ebb params before trying to legalize instructions, so that the newly introduced
+    // isplit instructions get legalized.
+    while let Some(ebb) = pos.next_ebb() {
+        split::split_ebb_params(pos.func, cfg, ebb);
+    }
+
+    pos.set_position(func_begin);
+
+    // This must be a set to prevent trying to legalize `isplit` and `vsplit` twice in certain cases.
+    let mut pending_splits = BTreeSet::new();
 
     // Process EBBs in layout order. Some legalization actions may split the current EBB or append
     // new ones to the end. We need to make sure we visit those new EBBs too.
@@ -102,14 +167,27 @@ pub fn legalize_function(func: &mut ir::Function, cfg: &mut ControlFlowGraph, is
         let mut prev_pos = pos.position();
 
         while let Some(inst) = pos.next_inst() {
-            if legalize_inst(inst, &mut pos, cfg, isa) {
-                // Go back and legalize the inserted return value conversion instructions.
-                pos.set_position(prev_pos);
-            } else {
+            match legalize_inst(inst, &mut pos, cfg, isa) {
                 // Remember this position in case we need to double back.
-                prev_pos = pos.position();
+                LegalizeInstResult::Done => prev_pos = pos.position(),
+
+                // Go back and legalize the inserted return value conversion instructions.
+                LegalizeInstResult::Legalized => pos.set_position(prev_pos),
+
+                // The argument of a `isplit` or `vsplit` instruction didn't resolve to a
+                // `iconcat` or `vconcat` instruction. Try again after legalizing the rest of
+                // the instructions.
+                LegalizeInstResult::SplitLegalizePending => {
+                    pending_splits.insert(inst);
+                }
             }
         }
+    }
+
+    // Try legalizing `isplit` and `vsplit` instructions, which could not previously be legalized.
+    for inst in pending_splits {
+        pos.goto_inst(inst);
+        legalize_inst(inst, &mut pos, cfg, isa);
     }
 
     // Now that we've lowered all br_tables, we don't need the jump tables anymore.
@@ -302,7 +380,7 @@ fn expand_br_table_conds(
     let table_size = func.jump_tables[table].len();
     let mut cond_failed_ebb = vec![];
     if table_size >= 1 {
-        cond_failed_ebb = std::vec::Vec::with_capacity(table_size - 1);
+        cond_failed_ebb = alloc::vec::Vec::with_capacity(table_size - 1);
         for _ in 0..table_size - 1 {
             cond_failed_ebb.push(func.dfg.make_ebb());
         }
@@ -311,14 +389,17 @@ fn expand_br_table_conds(
     let mut pos = FuncCursor::new(func).at_inst(inst);
     pos.use_srcloc(inst);
 
+    // Ignore the lint for this loop as the range needs to be 0 to table_size
+    #[allow(clippy::needless_range_loop)]
     for i in 0..table_size {
         let dest = pos.func.jump_tables[table].as_slice()[i];
         let t = pos.ins().icmp_imm(IntCC::Equal, arg, i as i64);
         pos.ins().brnz(t, dest, &[]);
         // Jump to the next case.
         if i < table_size - 1 {
-            pos.ins().jump(cond_failed_ebb[i], &[]);
-            pos.insert_ebb(cond_failed_ebb[i]);
+            let ebb = cond_failed_ebb[i];
+            pos.ins().jump(ebb, &[]);
+            pos.insert_ebb(ebb);
         }
     }
 
@@ -497,4 +578,164 @@ fn expand_stack_store(
     mflags.set_notrap();
     mflags.set_aligned();
     pos.func.dfg.replace(inst).store(mflags, val, addr, 0);
+}
+
+/// Split a load into two parts before `iconcat`ing the result together.
+fn narrow_load(
+    inst: ir::Inst,
+    func: &mut ir::Function,
+    _cfg: &mut ControlFlowGraph,
+    _isa: &dyn TargetIsa,
+) {
+    let mut pos = FuncCursor::new(func).at_inst(inst);
+    pos.use_srcloc(inst);
+
+    let (ptr, offset, flags) = match pos.func.dfg[inst] {
+        ir::InstructionData::Load {
+            opcode: ir::Opcode::Load,
+            arg,
+            offset,
+            flags,
+        } => (arg, offset, flags),
+        _ => panic!("Expected load: {}", pos.func.dfg.display_inst(inst, None)),
+    };
+
+    let res_ty = pos.func.dfg.ctrl_typevar(inst);
+    let small_ty = res_ty.half_width().expect("Can't narrow load");
+
+    let al = pos.ins().load(small_ty, flags, ptr, offset);
+    let ah = pos.ins().load(
+        small_ty,
+        flags,
+        ptr,
+        offset.try_add_i64(8).expect("load offset overflow"),
+    );
+    pos.func.dfg.replace(inst).iconcat(al, ah);
+}
+
+/// Split a store into two parts after `isplit`ing the value.
+fn narrow_store(
+    inst: ir::Inst,
+    func: &mut ir::Function,
+    _cfg: &mut ControlFlowGraph,
+    _isa: &dyn TargetIsa,
+) {
+    let mut pos = FuncCursor::new(func).at_inst(inst);
+    pos.use_srcloc(inst);
+
+    let (val, ptr, offset, flags) = match pos.func.dfg[inst] {
+        ir::InstructionData::Store {
+            opcode: ir::Opcode::Store,
+            args,
+            offset,
+            flags,
+        } => (args[0], args[1], offset, flags),
+        _ => panic!("Expected store: {}", pos.func.dfg.display_inst(inst, None)),
+    };
+
+    let (al, ah) = pos.ins().isplit(val);
+    pos.ins().store(flags, al, ptr, offset);
+    pos.ins().store(
+        flags,
+        ah,
+        ptr,
+        offset.try_add_i64(8).expect("store offset overflow"),
+    );
+    pos.remove_inst();
+}
+
+/// Expands an illegal iconst value by splitting it into two.
+fn narrow_iconst(
+    inst: ir::Inst,
+    func: &mut ir::Function,
+    _cfg: &mut ControlFlowGraph,
+    isa: &dyn TargetIsa,
+) {
+    let imm: i64 = if let ir::InstructionData::UnaryImm {
+        opcode: ir::Opcode::Iconst,
+        imm,
+    } = &func.dfg[inst]
+    {
+        (*imm).into()
+    } else {
+        panic!("unexpected instruction in narrow_iconst");
+    };
+
+    let mut pos = FuncCursor::new(func).at_inst(inst);
+    pos.use_srcloc(inst);
+
+    let ty = pos.func.dfg.ctrl_typevar(inst);
+    if isa.pointer_bits() == 32 && ty == I64 {
+        let low = pos.ins().iconst(I32, imm & 0xffffffff);
+        let high = pos.ins().iconst(I32, imm >> 32);
+        // The instruction has as many results as iconcat, so no need to replace them.
+        pos.func.dfg.replace(inst).iconcat(low, high);
+        return;
+    }
+
+    unimplemented!("missing encoding or legalization for iconst.{:?}", ty);
+}
+
+fn narrow_icmp_imm(
+    inst: ir::Inst,
+    func: &mut ir::Function,
+    _cfg: &mut ControlFlowGraph,
+    _isa: &dyn TargetIsa,
+) {
+    use crate::ir::condcodes::{CondCode, IntCC};
+
+    let (arg, cond, imm): (ir::Value, IntCC, i64) = match func.dfg[inst] {
+        ir::InstructionData::IntCompareImm {
+            opcode: ir::Opcode::IcmpImm,
+            arg,
+            cond,
+            imm,
+        } => (arg, cond, imm.into()),
+        _ => panic!("unexpected instruction in narrow_icmp_imm"),
+    };
+
+    let mut pos = FuncCursor::new(func).at_inst(inst);
+    pos.use_srcloc(inst);
+
+    let ty = pos.func.dfg.ctrl_typevar(inst);
+    let ty_half = ty.half_width().unwrap();
+
+    let imm_low = pos
+        .ins()
+        .iconst(ty_half, imm & (1u128 << (ty_half.bits() - 1)) as i64);
+    let imm_high = pos
+        .ins()
+        .iconst(ty_half, imm.wrapping_shr(ty_half.bits().into()));
+    let (arg_low, arg_high) = pos.ins().isplit(arg);
+
+    match cond {
+        IntCC::Equal => {
+            let res_low = pos.ins().icmp(cond, arg_low, imm_low);
+            let res_high = pos.ins().icmp(cond, arg_high, imm_high);
+            pos.func.dfg.replace(inst).band(res_low, res_high);
+        }
+        IntCC::NotEqual => {
+            let res_low = pos.ins().icmp(cond, arg_low, imm_low);
+            let res_high = pos.ins().icmp(cond, arg_high, imm_high);
+            pos.func.dfg.replace(inst).bor(res_low, res_high);
+        }
+        IntCC::SignedGreaterThan
+        | IntCC::SignedGreaterThanOrEqual
+        | IntCC::SignedLessThan
+        | IntCC::SignedLessThanOrEqual
+        | IntCC::UnsignedGreaterThan
+        | IntCC::UnsignedGreaterThanOrEqual
+        | IntCC::UnsignedLessThan
+        | IntCC::UnsignedLessThanOrEqual => {
+            let b1 = pos.ins().icmp(cond.without_equal(), arg_high, imm_high);
+            let b2 = pos
+                .ins()
+                .icmp(cond.inverse().without_equal(), arg_high, imm_high);
+            let b3 = pos.ins().icmp(cond.unsigned(), arg_low, imm_low);
+            let c1 = pos.ins().bnot(b2);
+            let c2 = pos.ins().band(c1, b3);
+            pos.func.dfg.replace(inst).bor(b1, c2);
+        }
+        _ => unimplemented!("missing legalization for condition {:?}", cond),
+    }
 }

@@ -60,6 +60,7 @@ class CompositorBridgeParent;
 class IAPZCTreeManager;
 class GeckoContentController;
 class APZEventState;
+struct APZEventResult;
 class CompositorSession;
 class ImageContainer;
 struct ScrollableLayerGuid;
@@ -167,6 +168,7 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
 
   virtual void SetSizeMode(nsSizeMode aMode) override;
   virtual nsSizeMode SizeMode() override { return mSizeMode; }
+  virtual bool IsTiled() const override { return mIsTiled; }
 
   virtual bool IsFullyOccluded() const override { return mIsFullyOccluded; }
 
@@ -177,7 +179,8 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   virtual nsTransparencyMode GetTransparencyMode() override;
   virtual void GetWindowClipRegion(
       nsTArray<LayoutDeviceIntRect>* aRects) override;
-  virtual void SetWindowShadowStyle(int32_t aStyle) override {}
+  virtual void SetWindowShadowStyle(
+      mozilla::StyleWindowShadow aStyle) override {}
   virtual void SetShowsToolbarButton(bool aShow) override {}
   virtual void SetShowsFullScreenButton(bool aShow) override {}
   virtual void SetWindowAnimationType(WindowAnimationType aType) override {}
@@ -211,7 +214,7 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
 
   already_AddRefed<mozilla::CompositorVsyncDispatcher>
   GetCompositorVsyncDispatcher();
-  void CreateCompositorVsyncDispatcher();
+  virtual void CreateCompositorVsyncDispatcher();
   virtual void CreateCompositor();
   virtual void CreateCompositor(int aWidth, int aHeight);
   virtual void SetCompositorWidgetDelegate(CompositorWidgetDelegate* delegate) {
@@ -446,9 +449,6 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   virtual RefPtr<mozilla::layers::NativeLayerRoot> GetNativeLayerRoot() {
     return nullptr;
   }
-  virtual void DrawWindowOverlay(
-      mozilla::widget::WidgetRenderingContext* aContext,
-      LayoutDeviceIntRect aRect) {}
   virtual already_AddRefed<DrawTarget> StartRemoteDrawing();
   virtual already_AddRefed<DrawTarget> StartRemoteDrawingInRegion(
       LayoutDeviceIntRegion& aInvalidRegion, BufferMode* aBufferMode) {
@@ -466,9 +466,6 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   }
   virtual uint32_t GetGLFrameBufferFormat();
   virtual bool CompositorInitiallyPaused() { return false; }
-#ifdef XP_MACOSX
-  virtual LayoutDeviceIntRegion GetOpaqueWidgetRegion() { return {}; }
-#endif
 
  protected:
   void ResolveIconName(const nsAString& aIconName, const nsAString& aIconSuffix,
@@ -482,10 +479,9 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   CreateRootContentController();
 
   // Dispatch an event that has already been routed through APZ.
-  nsEventStatus ProcessUntransformedAPZEvent(mozilla::WidgetInputEvent* aEvent,
-                                             const ScrollableLayerGuid& aGuid,
-                                             uint64_t aInputBlockId,
-                                             nsEventStatus aApzResponse);
+  nsEventStatus ProcessUntransformedAPZEvent(
+      mozilla::WidgetInputEvent* aEvent,
+      const mozilla::layers::APZEventResult& aApzResult);
 
   const LayoutDeviceIntRegion RegionFromArray(
       const nsTArray<LayoutDeviceIntRect>& aRects);
@@ -691,10 +687,12 @@ class nsBaseWidget : public nsIWidget, public nsSupportsWeakReference {
   mozilla::UniquePtr<LayoutDeviceIntRect[]> mClipRects;
   uint32_t mClipRectCount;
   nsSizeMode mSizeMode;
+  bool mIsTiled;
   nsPopupLevel mPopupLevel;
   nsPopupType mPopupType;
   SizeConstraints mSizeConstraints;
   bool mHasRemoteContent;
+  bool mFissionWindow;
 
   bool mUpdateCursor;
   bool mUseAttachedEvents;

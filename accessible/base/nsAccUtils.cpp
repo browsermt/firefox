@@ -20,6 +20,7 @@
 #include "nsIPersistentProperties2.h"
 #include "mozilla/a11y/PDocAccessibleChild.h"
 #include "mozilla/dom/Element.h"
+#include "nsAccessibilityService.h"
 
 using namespace mozilla;
 using namespace mozilla::a11y;
@@ -96,7 +97,7 @@ int32_t nsAccUtils::GetLevelForXULContainerItem(nsIContent* aContent) {
       aContent->AsElement()->AsXULContainerItem();
   if (!item) return 0;
 
-  nsCOMPtr<Element> containerElement;
+  nsCOMPtr<dom::Element> containerElement;
   item->GetParentContainer(getter_AddRefs(containerElement));
   nsCOMPtr<nsIDOMXULContainerElement> container =
       containerElement ? containerElement->AsXULContainer() : nullptr;
@@ -138,7 +139,11 @@ void nsAccUtils::SetLiveContainerAttributes(
                                        live);
       } else if (role) {
         GetLiveAttrValue(role->liveAttRule, live);
+      } else if (nsStaticAtom* value = GetAccService()->MarkupAttribute(
+                     ancestor, nsGkAtoms::live)) {
+        value->ToString(live);
       }
+
       if (!live.IsEmpty()) {
         SetAccAttr(aAttributes, nsGkAtoms::containerLive, live);
         if (role) {
@@ -174,7 +179,7 @@ bool nsAccUtils::HasDefinedARIAToken(nsIContent* aContent, nsAtom* aAtom) {
 
   if (!aContent->IsElement()) return false;
 
-  Element* element = aContent->AsElement();
+  dom::Element* element = aContent->AsElement();
   if (!element->HasAttr(kNameSpaceID_None, aAtom) ||
       element->AttrValueIs(kNameSpaceID_None, aAtom, nsGkAtoms::_empty,
                            eCaseMatters) ||
@@ -188,7 +193,7 @@ bool nsAccUtils::HasDefinedARIAToken(nsIContent* aContent, nsAtom* aAtom) {
 nsStaticAtom* nsAccUtils::GetARIAToken(dom::Element* aElement, nsAtom* aAttr) {
   if (!HasDefinedARIAToken(aElement, aAttr)) return nsGkAtoms::_empty;
 
-  static Element::AttrValuesArray tokens[] = {
+  static dom::Element::AttrValuesArray tokens[] = {
       nsGkAtoms::_false, nsGkAtoms::_true, nsGkAtoms::mixed, nullptr};
 
   int32_t idx =
@@ -205,7 +210,7 @@ nsStaticAtom* nsAccUtils::NormalizeARIAToken(dom::Element* aElement,
   }
 
   if (aAttr == nsGkAtoms::aria_current) {
-    static Element::AttrValuesArray tokens[] = {
+    static dom::Element::AttrValuesArray tokens[] = {
         nsGkAtoms::page, nsGkAtoms::step, nsGkAtoms::location_,
         nsGkAtoms::date, nsGkAtoms::time, nsGkAtoms::_true,
         nullptr};
@@ -488,6 +493,9 @@ bool nsAccUtils::IsARIALive(const Accessible* aAccessible) {
                                        docLive);
       } else if (role) {
         GetLiveAttrValue(role->liveAttRule, docLive);
+      } else if (nsStaticAtom* value = GetAccService()->MarkupAttribute(
+                     ancestor, nsGkAtoms::live)) {
+        value->ToString(docLive);
       }
       if (!docLive.IsEmpty()) {
         live = docLive;

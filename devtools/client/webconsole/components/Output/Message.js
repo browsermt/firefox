@@ -79,10 +79,9 @@ class Message extends Component {
       timeStamp: PropTypes.number,
       timestampsVisible: PropTypes.bool.isRequired,
       serviceContainer: PropTypes.shape({
-        emitNewMessage: PropTypes.func.isRequired,
+        emitForTests: PropTypes.func.isRequired,
         onViewSource: PropTypes.func.isRequired,
         onViewSourceInDebugger: PropTypes.func,
-        onViewSourceInScratchpad: PropTypes.func,
         onViewSourceInStyleEditor: PropTypes.func,
         openContextMenu: PropTypes.func.isRequired,
         openLink: PropTypes.func.isRequired,
@@ -123,20 +122,23 @@ class Message extends Component {
       if (this.props.scrollToMessage) {
         this.messageNode.scrollIntoView();
       }
-      // Event used in tests. Some message types don't pass it in because existing tests
-      // did not emit for them.
-      if (this.props.serviceContainer) {
-        this.props.serviceContainer.emitNewMessage(
-          this.messageNode,
-          this.props.messageId,
-          this.props.timeStamp
-        );
-      }
+
+      this.emitNewMessage(this.messageNode);
     }
   }
 
   componentDidCatch(e) {
     this.setState({ error: e });
+  }
+
+  // Event used in tests. Some message types don't pass it in because existing tests
+  // did not emit for them.
+  emitNewMessage(node) {
+    const { serviceContainer, messageId, timeStamp } = this.props;
+    serviceContainer.emitForTests(
+      "new-messages",
+      new Set([{ node, messageId, timeStamp }])
+    );
   }
 
   onLearnMoreClick(e) {
@@ -170,11 +172,18 @@ class Message extends Component {
   }
 
   onContextMenu(e) {
-    const { serviceContainer, source, request, messageId } = this.props;
+    const {
+      serviceContainer,
+      source,
+      request,
+      messageId,
+      executionPoint,
+    } = this.props;
     const messageInfo = {
       source,
       request,
       messageId,
+      executionPoint,
     };
     serviceContainer.openContextMenu(e, messageInfo);
     e.stopPropagation();
@@ -182,9 +191,9 @@ class Message extends Component {
   }
 
   onMouseEvent(ev) {
-    const { messageId, serviceContainer, executionPoint } = this.props;
+    const { message, serviceContainer, executionPoint } = this.props;
     if (serviceContainer.canRewind() && executionPoint) {
-      serviceContainer.onMessageHover(ev.type, messageId);
+      serviceContainer.onMessageHover(ev.type, message);
     }
   }
 
@@ -255,7 +264,17 @@ class Message extends Component {
                 className: "devtools-button",
                 onClick: () =>
                   navigator.clipboard.writeText(
-                    JSON.stringify(this.props.message, null, 2)
+                    JSON.stringify(
+                      this.props.message,
+                      function(key, value) {
+                        // The message can hold one or multiple fronts that we need to serialize
+                        if (value && value.getGrip) {
+                          return value.getGrip();
+                        }
+                        return value;
+                      },
+                      2
+                    )
                   ),
               },
               l10n.getStr(
@@ -269,7 +288,7 @@ class Message extends Component {
     );
   }
 
-  /* eslint-disable complexity */
+  // eslint-disable-next-line complexity
   render() {
     if (this.state && this.state.error) {
       return this.renderErrorState();
@@ -331,9 +350,6 @@ class Message extends Component {
           onViewSourceInDebugger:
             serviceContainer.onViewSourceInDebugger ||
             serviceContainer.onViewSource,
-          onViewSourceInScratchpad:
-            serviceContainer.onViewSourceInScratchpad ||
-            serviceContainer.onViewSource,
           onViewSource: serviceContainer.onViewSource,
           onReady: this.props.maybeScrollToBottom,
           sourceMapService: serviceContainer.sourceMapService,
@@ -392,10 +408,6 @@ class Message extends Component {
       if (source === MESSAGE_SOURCE.CSS) {
         onFrameClick =
           serviceContainer.onViewSourceInStyleEditor ||
-          serviceContainer.onViewSource;
-      } else if (/^Scratchpad\/\d+$/.test(frame.source)) {
-        onFrameClick =
-          serviceContainer.onViewSourceInScratchpad ||
           serviceContainer.onViewSource;
       } else {
         // Point everything else to debugger, if source not available,
@@ -488,7 +500,6 @@ class Message extends Component {
       attachment ? null : dom.br()
     );
   }
-  /* eslint-enable complexity */
 }
 
 module.exports = Message;

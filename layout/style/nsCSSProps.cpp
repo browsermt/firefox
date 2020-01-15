@@ -114,13 +114,14 @@ void nsCSSProps::ReleaseTable(void) {
 }
 
 /* static */
-bool nsCSSProps::IsCustomPropertyName(const nsAString& aProperty) {
+bool nsCSSProps::IsCustomPropertyName(const nsACString& aProperty) {
   return aProperty.Length() >= CSS_CUSTOM_NAME_PREFIX_LENGTH &&
-         StringBeginsWith(aProperty, NS_LITERAL_STRING("--"));
+         StringBeginsWith(aProperty, NS_LITERAL_CSTRING("--"));
 }
 
 nsCSSPropertyID nsCSSProps::LookupPropertyByIDLName(
     const nsACString& aPropertyIDLName, EnabledState aEnabled) {
+  MOZ_ASSERT(gPropertyIDLNameTable, "no lookup table, needs addref");
   nsCSSPropertyID res;
   if (!gPropertyIDLNameTable->Get(aPropertyIDLName, &res)) {
     return eCSSProperty_UNKNOWN;
@@ -132,14 +133,7 @@ nsCSSPropertyID nsCSSProps::LookupPropertyByIDLName(
   return res;
 }
 
-nsCSSPropertyID nsCSSProps::LookupPropertyByIDLName(
-    const nsAString& aPropertyIDLName, EnabledState aEnabled) {
-  MOZ_ASSERT(gPropertyIDLNameTable, "no lookup table, needs addref");
-  return LookupPropertyByIDLName(NS_ConvertUTF16toUTF8(aPropertyIDLName),
-                                 aEnabled);
-}
-
-nsCSSFontDesc nsCSSProps::LookupFontDesc(const nsAString& aFontDesc) {
+nsCSSFontDesc nsCSSProps::LookupFontDesc(const nsACString& aFontDesc) {
   MOZ_ASSERT(gFontDescTable, "no lookup table, needs addref");
   nsCSSFontDesc which = nsCSSFontDesc(gFontDescTable->Lookup(aFontDesc));
 
@@ -335,23 +329,6 @@ bool nsCSSProps::gPropertyEnabled[eCSSProperty_COUNT_with_aliases] = {
 #undef CSS_PROP_LONGHAND
 
 #undef IS_ENABLED_BY_DEFAULT
-};
-
-#include "../../dom/base/PropertyUseCounterMap.inc"
-
-/* static */ const UseCounter
-    nsCSSProps::gPropertyUseCounter[eCSSProperty_COUNT_no_shorthands] = {
-#define CSS_PROP_PUBLIC_OR_PRIVATE(publicname_, privatename_) privatename_
-// Need an extra level of macro nesting to force expansion of method_
-// params before they get pasted.
-#define CSS_PROP_USE_COUNTER(method_) \
-  static_cast<UseCounter>(USE_COUNTER_FOR_CSS_PROPERTY_##method_),
-#define CSS_PROP_LONGHAND(name_, id_, method_, ...) \
-  CSS_PROP_USE_COUNTER(method_)
-#include "mozilla/ServoCSSPropList.h"
-#undef CSS_PROP_LONGHAND
-#undef CSS_PROP_USE_COUNTER
-#undef CSS_PROP_PUBLIC_OR_PRIVATE
 };
 
 #include "nsCSSPropsGenerated.inc"

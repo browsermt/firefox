@@ -70,12 +70,7 @@ class GeckoInstance(object):
         "extensions.getAddons.cache.enabled": False,
         # Disable intalling any distribution add-ons
         "extensions.installDistroAddons": False,
-        # Make sure Shield doesn't hit the network.
-        # Removed in Firefox 60.
-        "extensions.shield-recipe-client.api_url": "",
-        # Disable extensions compatibility dialogue.
-        # Removed in Firefox 61.
-        "extensions.showMismatchUI": False,
+
         # Turn off extension updates so they don't bother tests
         "extensions.update.enabled": False,
         "extensions.update.notifyUser": False,
@@ -566,9 +561,6 @@ class DesktopInstance(GeckoInstance):
         # Don't check for the default web browser during startup
         "browser.shell.checkDefaultBrowser": False,
 
-        # Disable e10s by default
-        "browser.tabs.remote.autostart": False,
-
         # Needed for branded builds to prevent opening a second tab on startup
         "browser.startup.homepage_override.mstone": "ignore",
         # Start with a blank page by default
@@ -596,10 +588,6 @@ class DesktopInstance(GeckoInstance):
         # Turn off search suggestions in the location bar so as not to trigger network
         # connections.
         "browser.urlbar.suggest.searches": False,
-
-        # Turn off the location bar search suggestions opt-in.  It interferes with
-        # tests that don't expect it to be there.
-        "browser.urlbar.userMadeSearchSuggestionsChoice": True,
 
         # Don't warn when exiting the browser
         "browser.warnOnQuit": False,

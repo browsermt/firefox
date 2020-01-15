@@ -541,16 +541,6 @@ bool Layer::HasScrollableFrameMetrics() const {
   return false;
 }
 
-bool Layer::HasRootScrollableFrameMetrics() const {
-  for (uint32_t i = 0; i < GetScrollMetadataCount(); i++) {
-    if (GetFrameMetrics(i).IsScrollable() &&
-        GetFrameMetrics(i).IsRootContent()) {
-      return true;
-    }
-  }
-  return false;
-}
-
 bool Layer::IsScrollableWithoutContent() const {
   // A scrollable container layer with no children
   return AsContainerLayer() && HasScrollableFrameMetrics() && !GetFirstChild();
@@ -1312,7 +1302,8 @@ void ContainerLayer::DidInsertChild(Layer* aLayer) {
 }
 
 void RefLayer::FillSpecificAttributes(SpecificLayerAttributes& aAttrs) {
-  aAttrs = RefLayerAttributes(GetReferentId(), mEventRegionsOverride);
+  aAttrs = RefLayerAttributes(GetReferentId(), mEventRegionsOverride,
+                              mRemoteDocumentRect);
 }
 
 /**
@@ -1731,11 +1722,12 @@ void Layer::PrintInfo(std::stringstream& aStream, const char* aPrefix) {
   }
   if (GetIsFixedPosition()) {
     LayerPoint anchor = GetFixedPositionAnchor();
-    aStream << nsPrintfCString(" [isFixedPosition scrollId=%" PRIu64
-                               " sides=0x%x anchor=%s]",
-                               GetFixedPositionScrollContainerId(),
-                               GetFixedPositionSides(),
-                               ToString(anchor).c_str())
+    aStream << nsPrintfCString(
+                   " [isFixedPosition scrollId=%" PRIu64
+                   " sides=0x%x anchor=%s]",
+                   GetFixedPositionScrollContainerId(),
+                   static_cast<unsigned int>(GetFixedPositionSides()),
+                   ToString(anchor).c_str())
                    .get();
   }
   if (GetIsStickyPosition()) {
@@ -2319,7 +2311,7 @@ void RecordCompositionPayloadsPresented(
     TimeStamp presented = TimeStamp::Now();
     for (const CompositionPayload& payload : aPayloads) {
 #if MOZ_GECKO_PROFILER
-      if (profiler_is_active()) {
+      if (profiler_can_accept_markers()) {
         nsPrintfCString marker(
             "Payload Presented, type: %d latency: %dms\n",
             int32_t(payload.mType),
@@ -2331,6 +2323,10 @@ void RecordCompositionPayloadsPresented(
       if (payload.mType == CompositionPayloadType::eKeyPress) {
         Telemetry::AccumulateTimeDelta(
             mozilla::Telemetry::KEYPRESS_PRESENT_LATENCY, payload.mTimeStamp,
+            presented);
+      } else if (payload.mType == CompositionPayloadType::eAPZScroll) {
+        Telemetry::AccumulateTimeDelta(
+            mozilla::Telemetry::SCROLL_PRESENT_LATENCY, payload.mTimeStamp,
             presented);
       }
     }

@@ -142,12 +142,14 @@ class WorkerGlobalScope : public DOMEventTargetHelper,
   void ClearInterval(int32_t aHandle);
 
   void GetOrigin(nsAString& aOrigin) const;
+  bool CrossOriginIsolated() const;
 
   void Atob(const nsAString& aAtob, nsAString& aOutput, ErrorResult& aRv) const;
   void Btoa(const nsAString& aBtoa, nsAString& aOutput, ErrorResult& aRv) const;
 
   IMPL_EVENT_HANDLER(online)
   IMPL_EVENT_HANDLER(offline)
+  IMPL_EVENT_HANDLER(languagechange)
   IMPL_EVENT_HANDLER(rejectionhandled)
   IMPL_EVENT_HANDLER(unhandledrejection)
 
@@ -226,6 +228,8 @@ class WorkerGlobalScope : public DOMEventTargetHelper,
   RefPtr<mozilla::dom::ServiceWorkerRegistration>
   GetOrCreateServiceWorkerRegistration(
       const ServiceWorkerRegistrationDescriptor& aDescriptor) override;
+
+  uint64_t WindowID() const;
 
   void FirstPartyStorageAccessGranted();
 };

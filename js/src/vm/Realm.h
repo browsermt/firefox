@@ -24,6 +24,7 @@
 #include "js/UniquePtr.h"
 #include "vm/ArrayBufferObject.h"
 #include "vm/Compartment.h"
+#include "vm/PromiseLookup.h"  // js::PromiseLookup
 #include "vm/ReceiverGuard.h"
 #include "vm/RegExpShared.h"
 #include "vm/SavedStacks.h"
@@ -31,6 +32,10 @@
 #include "wasm/WasmRealm.h"
 
 namespace js {
+
+namespace coverage {
+class LCovRealm;
+}  // namespace coverage
 
 namespace jit {
 class JitRealm;
@@ -54,17 +59,17 @@ struct NativeIterator;
 class DtoaCache {
   double d;
   int base;
-  JSFlatString* s;  // if s==nullptr, d and base are not valid
+  JSLinearString* s;  // if s==nullptr, d and base are not valid
 
  public:
   DtoaCache() : s(nullptr) {}
   void purge() { s = nullptr; }
 
-  JSFlatString* lookup(int base, double d) {
+  JSLinearString* lookup(int base, double d) {
     return this->s && base == this->base && d == this->d ? this->s : nullptr;
   }
 
-  void cache(int base, double d, JSFlatString* s) {
+  void cache(int base, double d, JSLinearString* s) {
     this->base = base;
     this->d = d;
     this->s = s;
@@ -244,11 +249,6 @@ class ObjectRealm {
   // Map from array buffers to views sharing that storage.
   JS::WeakCache<js::InnerViewTable> innerViews;
 
-  // Inline transparent typed objects do not initially have an array buffer,
-  // but can have that buffer created lazily if it is accessed later. This
-  // table manages references from such typed objects to their buffers.
-  js::UniquePtr<js::ObjectWeakMap> lazyArrayBuffers;
-
   // Keep track of the metadata objects which can be associated with each JS
   // object. Both keys and values are in this realm.
   js::UniquePtr<js::ObjectWeakMap> objectMetadataTable;
@@ -268,11 +268,10 @@ class ObjectRealm {
   void finishRoots();
   void trace(JSTracer* trc);
   void sweepAfterMinorGC();
-  void sweepNativeIterators();
+  void traceWeakNativeIterators(JSTracer* trc);
 
   void addSizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf,
                               size_t* innerViewsArg,
-                              size_t* lazyArrayBuffersArg,
                               size_t* objectMetadataTablesArg,
                               size_t* nonSyntacticLexicalEnvironmentsArg);
 
@@ -330,7 +329,8 @@ class JS::Realm : public JS::shadow::Realm {
   // Names are only removed from this list by a |delete IdentifierReference|
   // that successfully removes that global property.
   using VarNamesSet =
-      JS::GCHashSet<JSAtom*, js::DefaultHasher<JSAtom*>, js::ZoneAllocPolicy>;
+      GCHashSet<js::HeapPtr<JSAtom*>, js::DefaultHasher<JSAtom*>,
+                js::ZoneAllocPolicy>;
   VarNamesSet varNames_;
 
   friend class js::AutoSetNewObjectMetadata;
@@ -385,6 +385,31 @@ class JS::Realm : public JS::shadow::Realm {
   // stack.
   unsigned enterRealmDepthIgnoringJit_ = 0;
 
+ public:
+  struct DebuggerVectorEntry {
+    // The debugger relies on iterating through the DebuggerVector to know what
+    // debuggers to notify about certain actions, which it does using this
+    // pointer. We need an explicit Debugger* because the JSObject* from
+    // the DebuggerDebuggeeLink to the Debugger is only set some of the time.
+    // This `Debugger*` pointer itself could also live on the
+    // DebuggerDebuggeeLink itself, but that would then require all of the
+    // places that iterate over the realm's DebuggerVector to also traverse
+    // the CCW which seems like it would be needlessly complicated.
+    js::WeakHeapPtr<js::Debugger*> dbg;
+
+    // This links to the debugger's DebuggerDebuggeeLink object, via a CCW.
+    // Tracing this link from the realm allows the debugger to define
+    // whether pieces of the debugger should be held live by a given realm.
+    js::HeapPtr<JSObject*> debuggerLink;
+
+    DebuggerVectorEntry(js::Debugger* dbg_, JSObject* link);
+  };
+  using DebuggerVector =
+      js::Vector<DebuggerVectorEntry, 0, js::ZoneAllocPolicy>;
+
+ private:
+  DebuggerVector debuggers_;
+
   enum {
     IsDebuggee = 1 << 0,
     DebuggerObservesAllExecution = 1 << 1,
@@ -401,13 +426,11 @@ class JS::Realm : public JS::shadow::Realm {
   bool isSelfHostingRealm_ = false;
   bool isSystem_ = false;
 
+  js::UniquePtr<js::coverage::LCovRealm> lcovRealm_ = nullptr;
+
  public:
   // WebAssembly state for the realm.
   js::wasm::Realm wasm;
-
-  // Aggregated output used to collect JSScript hit counts when code coverage
-  // is enabled.
-  js::coverage::LCovRealm lcovOutput;
 
   js::RegExpRealm regExps;
 
@@ -434,7 +457,6 @@ class JS::Realm : public JS::shadow::Realm {
    */
   uint32_t globalWriteBarriered = 0;
 
-  uint32_t warnedAboutArrayGenericsMethods = 0;
 #ifdef DEBUG
   bool firedOnNewGlobalObject = false;
 #endif
@@ -458,13 +480,15 @@ class JS::Realm : public JS::shadow::Realm {
   void destroy(JSFreeOp* fop);
   void clearTables();
 
-  void addSizeOfIncludingThis(
-      mozilla::MallocSizeOf mallocSizeOf, size_t* tiAllocationSiteTables,
-      size_t* tiArrayTypeTables, size_t* tiObjectTypeTables,
-      size_t* realmObject, size_t* realmTables, size_t* innerViewsArg,
-      size_t* lazyArrayBuffersArg, size_t* objectMetadataTablesArg,
-      size_t* savedStacksSet, size_t* varNamesSet,
-      size_t* nonSyntacticLexicalEnvironmentsArg, size_t* jitRealm);
+  void addSizeOfIncludingThis(mozilla::MallocSizeOf mallocSizeOf,
+                              size_t* tiAllocationSiteTables,
+                              size_t* tiArrayTypeTables,
+                              size_t* tiObjectTypeTables, size_t* realmObject,
+                              size_t* realmTables, size_t* innerViewsArg,
+                              size_t* objectMetadataTablesArg,
+                              size_t* savedStacksSet, size_t* varNamesSet,
+                              size_t* nonSyntacticLexicalEnvironmentsArg,
+                              size_t* jitRealm);
 
   JS::Zone* zone() { return zone_; }
   const JS::Zone* zone() const { return zone_; }
@@ -505,7 +529,9 @@ class JS::Realm : public JS::shadow::Realm {
   inline js::GlobalObject* maybeGlobal() const;
 
   /* An unbarriered getter for use while tracing. */
-  inline js::GlobalObject* unsafeUnbarrieredMaybeGlobal() const;
+  js::GlobalObject* unsafeUnbarrieredMaybeGlobal() const {
+    return global_.unbarrieredGet();
+  }
 
   inline js::LexicalEnvironmentObject* unbarrieredLexicalEnvironment() const;
 
@@ -524,7 +550,7 @@ class JS::Realm : public JS::shadow::Realm {
    */
   void traceGlobal(JSTracer* trc);
 
-  void sweepGlobalObject();
+  void traceWeakObjects(JSTracer* trc);
   void fixupGlobal();
 
   /*
@@ -540,15 +566,15 @@ class JS::Realm : public JS::shadow::Realm {
 
   void sweepAfterMinorGC();
   void sweepDebugEnvironments();
-  void sweepObjectRealm();
-  void sweepRegExps();
-  void sweepSelfHostingScriptSource();
-  void sweepTemplateObjects();
+  void traceWeakObjectRealm(JSTracer* trc);
+  void traceWeakRegExps(JSTracer* trc);
+  void traceWeakSelfHostingScriptSource(JSTracer* trc);
+  void traceWeakTemplateObjects(JSTracer* trc);
 
-  void sweepObjectGroups() { objectGroups_.sweep(); }
+  void traceWeakObjectGroups(JSTracer* trc) { objectGroups_.traceWeak(trc); }
 
   void clearScriptCounts();
-  void clearScriptNames();
+  void clearScriptLCov();
 
   void purge();
 
@@ -562,7 +588,7 @@ class JS::Realm : public JS::shadow::Realm {
 
   // Add a name to [[VarNames]].  Reports OOM on failure.
   MOZ_MUST_USE bool addToVarNames(JSContext* cx, JS::Handle<JSAtom*> name);
-  void sweepVarNames();
+  void tracekWeakVarNames(JSTracer* trc);
 
   void removeFromVarNames(JS::Handle<JSAtom*> name) { varNames_.remove(name); }
 
@@ -642,9 +668,6 @@ class JS::Realm : public JS::shadow::Realm {
 
   bool isSystem() const { return isSystem_; }
 
-  // Used to approximate non-content code when reporting telemetry.
-  bool isProbablySystemCode() const { return isSystem_; }
-
   static const size_t IterResultObjectValueSlot = 0;
   static const size_t IterResultObjectDoneSlot = 1;
   js::NativeObject* getOrCreateIterResultTemplateObject(JSContext* cx);
@@ -704,6 +727,8 @@ class JS::Realm : public JS::shadow::Realm {
   void setIsDebuggee();
   void unsetIsDebuggee();
 
+  DebuggerVector& getDebuggers() { return debuggers_; };
+
   // True if this compartment's global is a debuggee of some Debugger
   // object with a live hook that observes all execution; e.g.,
   // onEnterFrame.
@@ -756,6 +781,9 @@ class JS::Realm : public JS::shadow::Realm {
   // scripts.
   bool ensureDelazifyScriptsForDebugger(JSContext* cx);
 
+  // Get or allocate the associated LCovRealm.
+  js::coverage::LCovRealm* lcovRealm();
+
   // Initializes randomNumberGenerator if needed.
   mozilla::non_crypto::XorShift128PlusRNG& getOrCreateRandomNumberGenerator();
 
@@ -772,7 +800,7 @@ class JS::Realm : public JS::shadow::Realm {
   void setValidAccessPtr(bool* accessp) { validAccessPtr_ = accessp; }
 
   bool ensureJitRealmExists(JSContext* cx);
-  void sweepJitRealm();
+  void traceWeakEdgesInJitRealm(JSTracer* trc);
 
   js::jit::JitRealm* jitRealm() { return jitRealm_.get(); }
 
@@ -790,7 +818,7 @@ class JS::Realm : public JS::shadow::Realm {
     savedStacks_.chooseSamplingProbability(this);
   }
 
-  void sweepSavedStacks();
+  void traceWeakSavedStacks(JSTracer* trc);
 
   static constexpr size_t offsetOfCompartment() {
     return offsetof(JS::Realm, compartment_);
@@ -803,13 +831,6 @@ class JS::Realm : public JS::shadow::Realm {
   }
   static constexpr uint32_t debugModeIsDebuggeeBit() { return IsDebuggee; }
 
-  // Note: global_ is a read-barriered object, but it's fine to skip the read
-  // barrier when the realm is active. See the comment in JSContext::global().
-  static constexpr size_t offsetOfActiveGlobal() {
-    static_assert(sizeof(global_) == sizeof(uintptr_t),
-                  "JIT code assumes field is pointer-sized");
-    return offsetof(JS::Realm, global_);
-  }
   static constexpr size_t offsetOfActiveLexicalEnvironment() {
     static_assert(sizeof(lexicalEnv_) == sizeof(uintptr_t),
                   "JIT code assumes field is pointer-sized");

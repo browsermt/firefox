@@ -45,7 +45,7 @@ class MockChannelProxy : public webrtc::voe::ChannelProxy {
 class AudioConduitWithMockChannelProxy : public WebrtcAudioConduit {
  public:
   AudioConduitWithMockChannelProxy(RefPtr<WebRtcCallWrapper> aCall,
-                                   nsCOMPtr<nsIEventTarget> aStsThread)
+                                   nsCOMPtr<nsISerialEventTarget> aStsThread)
       : WebrtcAudioConduit(aCall, aStsThread) {}
 
   MediaConduitErrorCode Init() override {
@@ -74,7 +74,7 @@ class AudioConduitTest : public ::testing::Test {
   AudioConduitTest() : mCall(new MockCall()) {
     mAudioConduit = new AudioConduitWithMockChannelProxy(
         WebRtcCallWrapper::Create(UniquePtr<MockCall>(mCall)),
-        GetCurrentThreadEventTarget());
+        GetCurrentThreadSerialEventTarget());
     mAudioConduit->Init();
   }
 
@@ -89,6 +89,7 @@ TEST_F(AudioConduitTest, TestConfigureSendMediaCodec) {
   AudioCodecConfig codecConfig(114, "opus", 48000, 2, false);
   ec = mAudioConduit->ConfigureSendMediaCodec(&codecConfig);
   ASSERT_EQ(ec, kMediaConduitNoError);
+  mAudioConduit->StartTransmitting();
   {
     const webrtc::SdpAudioFormat& f =
         mCall->mAudioSendConfig.send_codec_spec->format;
@@ -128,6 +129,7 @@ TEST_F(AudioConduitTest, TestConfigureSendOpusMono) {
   AudioCodecConfig codecConfig = AudioCodecConfig(114, "opus", 48000, 1, false);
   ec = mAudioConduit->ConfigureSendMediaCodec(&codecConfig);
   ASSERT_EQ(ec, kMediaConduitNoError);
+  mAudioConduit->StartTransmitting();
   {
     const webrtc::SdpAudioFormat& f =
         mCall->mAudioSendConfig.send_codec_spec->format;
@@ -147,6 +149,7 @@ TEST_F(AudioConduitTest, TestConfigureSendOpusFEC) {
   AudioCodecConfig codecConfig = AudioCodecConfig(114, "opus", 48000, 2, true);
   ec = mAudioConduit->ConfigureSendMediaCodec(&codecConfig);
   ASSERT_EQ(ec, kMediaConduitNoError);
+  mAudioConduit->StartTransmitting();
   {
     const webrtc::SdpAudioFormat& f =
         mCall->mAudioSendConfig.send_codec_spec->format;
@@ -168,6 +171,7 @@ TEST_F(AudioConduitTest, TestConfigureSendMaxPlaybackRate) {
   codecConfig.mMaxPlaybackRate = 1234;
   ec = mAudioConduit->ConfigureSendMediaCodec(&codecConfig);
   ASSERT_EQ(ec, kMediaConduitNoError);
+  mAudioConduit->StartTransmitting();
   {
     const webrtc::SdpAudioFormat& f =
         mCall->mAudioSendConfig.send_codec_spec->format;

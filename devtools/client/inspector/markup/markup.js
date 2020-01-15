@@ -20,6 +20,7 @@ const MarkupElementContainer = require("devtools/client/inspector/markup/views/e
 const MarkupReadOnlyContainer = require("devtools/client/inspector/markup/views/read-only-container");
 const MarkupTextContainer = require("devtools/client/inspector/markup/views/text-container");
 const RootContainer = require("devtools/client/inspector/markup/views/root-container");
+const WalkerEventListener = require("devtools/client/inspector/shared/walker-event-listener");
 
 loader.lazyRequireGetter(
   this,
@@ -117,14 +118,16 @@ const shortcutHandlers = {
   // Localizable keys
   "markupView.hide.key": markupView => {
     const node = markupView._selectedContainer.node;
+    const walkerFront = node.walkerFront;
+
     if (node.hidden) {
-      markupView.walker.unhideNode(node);
+      walkerFront.unhideNode(node);
     } else {
-      markupView.walker.hideNode(node);
+      walkerFront.hideNode(node);
     }
   },
   "markupView.edit.key": markupView => {
-    markupView.beginEditingOuterHTML(markupView._selectedContainer.node);
+    markupView.beginEditingHTML(markupView._selectedContainer.node);
   },
   "markupView.scrollInto.key": markupView => {
     markupView.scrollNodeIntoView();
@@ -288,7 +291,7 @@ function MarkupView(inspector, frame, controllerWindow) {
     this
   );
   this._isImagePreviewTarget = this._isImagePreviewTarget.bind(this);
-  this._mutationObserver = this._mutationObserver.bind(this);
+  this._onWalkerMutations = this._onWalkerMutations.bind(this);
   this._onBlur = this._onBlur.bind(this);
   this._onContextMenu = this._onContextMenu.bind(this);
   this._onCopy = this._onCopy.bind(this);
@@ -313,9 +316,6 @@ function MarkupView(inspector, frame, controllerWindow) {
   this._elt.addEventListener("mouseout", this._onMouseOut);
   this._frame.addEventListener("focus", this._onFocus);
   this.inspector.selection.on("new-node-front", this._onNewSelection);
-  this.walker.on("display-change", this._onWalkerNodeStatesChanged);
-  this.walker.on("scrollable-change", this._onWalkerNodeStatesChanged);
-  this.walker.on("mutations", this._mutationObserver);
   this.win.addEventListener("copy", this._onCopy);
   this.win.addEventListener("mouseup", this._onMouseUp);
   this.inspector.toolbox.nodePicker.on(
@@ -356,6 +356,12 @@ function MarkupView(inspector, frame, controllerWindow) {
   );
 
   this._initShortcuts();
+
+  this._walkerEventListener = new WalkerEventListener(this.inspector, {
+    "display-change": this._onWalkerNodeStatesChanged,
+    "scrollable-change": this._onWalkerNodeStatesChanged,
+    mutations: this._onWalkerMutations,
+  });
 }
 
 MarkupView.prototype = {
@@ -716,6 +722,10 @@ MarkupView.prototype = {
    *         requests queued up
    */
   _hideBoxModel: function(forceHide) {
+    if (!this._highlightedNodeFront) {
+      return Promise.resolve();
+    }
+
     return this._highlightedNodeFront.highlighterFront
       .unhighlight(forceHide)
       .catch(this._handleRejectionIfNotDestroyed);
@@ -920,7 +930,7 @@ MarkupView.prototype = {
         "scrollable-change",
         this._onWalkerNodeStatesChanged
       );
-      nodeFront.walkerFront.on("mutations", this._mutationObserver);
+      nodeFront.walkerFront.on("mutations", this._onWalkerMutations);
     }
 
     if (this.htmlEditor) {
@@ -1213,6 +1223,7 @@ MarkupView.prototype = {
     return !(
       nodeFront.isDocumentElement ||
       nodeFront.nodeType == nodeConstants.DOCUMENT_TYPE_NODE ||
+      nodeFront.nodeType == nodeConstants.DOCUMENT_FRAGMENT_NODE ||
       nodeFront.isAnonymous
     );
   },
@@ -1396,7 +1407,7 @@ MarkupView.prototype = {
   /**
    * Mutation observer used for included nodes.
    */
-  _mutationObserver: function(mutations) {
+  _onWalkerMutations: function(mutations) {
     for (const mutation of mutations) {
       let type = mutation.type;
       let target = mutation.target;
@@ -1423,7 +1434,8 @@ MarkupView.prototype = {
         type === "characterData" ||
         type === "customElementDefined" ||
         type === "events" ||
-        type === "pseudoClassLock"
+        type === "pseudoClassLock" ||
+        type === "mutationBreakpoint"
       ) {
         container.update();
       } else if (
@@ -1866,13 +1878,18 @@ MarkupView.prototype = {
   },
 
   /**
-   * Open an editor in the UI to allow editing of a node's outerHTML.
+   * Open an editor in the UI to allow editing of a node's html.
    *
    * @param  {NodeFront} node
    *         The NodeFront to edit.
    */
-  beginEditingOuterHTML: function(node) {
-    this.getNodeOuterHTML(node).then(oldValue => {
+  beginEditingHTML: function(node) {
+    // We use outer html for elements, but inner html for fragments.
+    const isOuter = node.nodeType == nodeConstants.ELEMENT_NODE;
+    const html = isOuter
+      ? this.getNodeOuterHTML(node)
+      : this.getNodeInnerHTML(node);
+    html.then(oldValue => {
       const container = this.getContainer(node);
       if (!container) {
         return;
@@ -1890,7 +1907,11 @@ MarkupView.prototype = {
         this.doc.documentElement.focus();
 
         if (commit) {
-          this.updateNodeOuterHTML(node, value, oldValue);
+          if (isOuter) {
+            this.updateNodeOuterHTML(node, value, oldValue);
+          } else {
+            this.updateNodeInnerHTML(node, value, oldValue);
+          }
         }
 
         const end = this.telemetry.msSystemNow();
@@ -2294,11 +2315,11 @@ MarkupView.prototype = {
       "picker-node-hovered",
       this._onToolboxPickerHover
     );
-    this.walker.off("display-change", this._onWalkerNodeStatesChanged);
-    this.walker.off("scrollable-change", this._onWalkerNodeStatesChanged);
-    this.walker.off("mutations", this._mutationObserver);
     this.win.removeEventListener("copy", this._onCopy);
     this.win.removeEventListener("mouseup", this._onMouseUp);
+
+    this._walkerEventListener.destroy();
+    this._walkerEventListener = null;
 
     this._prefObserver.off(
       ATTR_COLLAPSE_ENABLED_PREF,

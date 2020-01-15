@@ -25,3 +25,9 @@ typedef void (*PFN_CLOSEVRWINDOW)(uint32_t nVRWindowID, bool waitForTerminate);
 
 typedef void (*PFN_SENDUIMSG)(uint32_t nVRWindowID, uint32_t msg,
                               uint64_t wparam, uint64_t lparam);
+
+typedef void (*PFN_WAITFORVREVENT)(uint32_t& nVRWindowID, uint32_t& eventType,
+                                   uint32_t& eventData1, uint32_t& eventData2);
+
+typedef void (*PFN_SENDVRTELEMETRY)(uint32_t nVRWindowID, uint32_t telemetryId,
+                                    uint32_t value);

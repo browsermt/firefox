@@ -5,6 +5,7 @@
 "use strict";
 
 const xpcInspector = require("xpcInspector");
+const { Cu } = require("chrome");
 
 /**
  * Manages pushing event loops and automatically pops and exits them in the
@@ -131,7 +132,18 @@ EventLoop.prototype = {
         })
         // Ignore iframes as they will be paused automatically when pausing their
         // owner top level document
-        .filter(window => window.top === window)
+        .filter(window => {
+          try {
+            return window.top === window;
+          } catch (e) {
+            // Warn if this is throwing for an unknown reason, but suppress the
+            // exception regardless so that we can enter the nested event loop.
+            if (!Cu.isDeadWrapper(window) && !/not initialized/.test(e)) {
+              console.warn(`Exception in getAllWindowDebuggees: ${e}`);
+            }
+            return false;
+          }
+        })
     );
   },
 

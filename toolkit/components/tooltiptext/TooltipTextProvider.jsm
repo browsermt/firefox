@@ -65,7 +65,7 @@ TooltipTextProvider.prototype = {
         var bundle = Services.strings.createBundle(
           "chrome://global/locale/layout/HtmlForm.properties"
         );
-        if (files.length == 0) {
+        if (!files.length) {
           if (tipElement.multiple) {
             titleText = bundle.GetStringFromName("NoFilesSelected");
           } else {
@@ -110,7 +110,9 @@ TooltipTextProvider.prototype = {
     ) {
       if (tipElement.nodeType == defView.Node.ELEMENT_NODE) {
         if (tipElement.namespaceURI == XULNS) {
-          XULtooltiptextText = tipElement.getAttribute("tooltiptext");
+          XULtooltiptextText = tipElement.hasAttribute("tooltiptext")
+            ? tipElement.getAttribute("tooltiptext")
+            : null;
         } else if (!(tipElement instanceof defView.SVGElement)) {
           titleText = tipElement.getAttribute("title");
         }

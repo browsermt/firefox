@@ -26,9 +26,8 @@ include protocol PParentToChildStream; //FIXME: bug #792908
 include protocol PStunAddrsRequest;
 include protocol PFileChannel;
 include protocol PClassifierDummyChannel;
-include protocol PWebrtcProxyChannel;
+include protocol PWebrtcTCPSocket;
 include protocol PSocketProcessBridge;
-include protocol PProxyConfigLookup;
 include protocol PDocumentChannel;
 
 include IPCStream;
@@ -68,8 +67,7 @@ nested(upto inside_cpow) sync protocol PNecko
   manages PAltDataOutputStream;
   manages PStunAddrsRequest;
   manages PClassifierDummyChannel;
-  manages PWebrtcProxyChannel;
-  manages PProxyConfigLookup;
+  manages PWebrtcTCPSocket;
   manages PDocumentChannel;
 
 parent:
@@ -90,7 +88,7 @@ parent:
   async PDNSRequest(nsCString hostName, OriginAttributes originAttributes,
                     uint32_t flags);
 
-  async PDocumentChannel(PBrowserOrId browser,
+  async PDocumentChannel(PBrowser browser,
                          SerializedLoadContext loadContext,
                          DocumentChannelCreationArgs args);
 
@@ -106,10 +104,10 @@ parent:
 
   async SpeculativeConnect(URIParams uri, nsIPrincipal principal, bool anonymous);
   async HTMLDNSPrefetch(nsString hostname, bool isHttps,
-                        OriginAttributes originAttributes, uint16_t flags);
+                        OriginAttributes originAttributes, uint32_t flags);
   async CancelHTMLDNSPrefetch(nsString hostname, bool isHttps,
                               OriginAttributes originAttributes,
-                              uint16_t flags, nsresult reason);
+                              uint32_t flags, nsresult reason);
 
   /**
    * channelId is used to establish a connection between redirect channels in
@@ -143,9 +141,8 @@ parent:
 
   async PStunAddrsRequest();
 
-  async PWebrtcProxyChannel(TabId tabId);
-
-  async PProxyConfigLookup();
+  /* tabId is only required for web-proxy support, which isn't always needed */
+  async PWebrtcTCPSocket(TabId? tabId);
 
   /**
    * WebExtension-specific remote resource loading
@@ -175,9 +172,9 @@ child:
 
   async SpeculativeConnectRequest();
 
-  // Using high priority to deliver this notification possibly sooner than we
+  // Using medium high priority to deliver this notification possibly sooner than we
   // enter poll() on the child process with infinite timeout.
-  prio(high) async NetworkChangeNotification(nsCString type);
+  prio(mediumhigh) async NetworkChangeNotification(nsCString type);
 
   async PTransportProvider();
 

@@ -7,8 +7,10 @@
 const { Component } = require("devtools/client/shared/vendor/react");
 const dom = require("devtools/client/shared/vendor/react-dom-factories");
 const PropTypes = require("devtools/client/shared/vendor/react-prop-types");
-const { L10N } = require("../utils/l10n");
-const { propertiesEqual } = require("../utils/request-utils");
+const { L10N } = require("devtools/client/netmonitor/src/utils/l10n");
+const {
+  propertiesEqual,
+} = require("devtools/client/netmonitor/src/utils/request-utils");
 
 const { div, img } = dom;
 
@@ -18,6 +20,9 @@ const UPDATED_STATUS_PROPS = [
   "status",
   "statusText",
 ];
+
+const BLOCKED_ICON =
+  "chrome://devtools/content/netmonitor/src/assets/icons/blocked.svg";
 
 /**
  * Status code component
@@ -48,7 +53,6 @@ class StatusCode extends Component {
       statusText,
       blockedReason,
     } = item;
-    let statusContent = status;
     let code;
 
     if (status) {
@@ -62,13 +66,17 @@ class StatusCode extends Component {
     }
 
     if (blockedReason) {
-      statusContent = img({
-        src:
-          "chrome://devtools/content/netmonitor/src/assets/icons/blocked.svg",
-        alt: L10N.getStr("networkMenu.blocked"),
-        title: L10N.getStr("networkMenu.blocked"),
-        className: "blocked",
-      });
+      return div(
+        {
+          className:
+            "requests-list-status-code status-code status-code-blocked",
+          title: L10N.getStr("networkMenu.blockedTooltip"),
+        },
+        img({
+          src: BLOCKED_ICON,
+          alt: L10N.getStr("networkMenu.blockedTooltip"),
+        })
+      );
     }
 
     // `data-code` refers to the status-code
@@ -87,7 +95,7 @@ class StatusCode extends Component {
         "data-status-code": code,
         "data-code": status,
       },
-      statusContent
+      status
     );
   }
 }

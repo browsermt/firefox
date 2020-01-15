@@ -15,10 +15,8 @@
 #include "nsCOMPtr.h"
 #include "nsIFontLoadCompleteCallback.h"
 #include "nsIMemoryReporter.h"
-#include "nsIPrincipal.h"
 #include "nsIRunnable.h"
 #include "nsIScriptError.h"
-#include "nsIURI.h"
 #include "nsIReferrerInfo.h"
 #include "nsURIHashKey.h"
 #include "mozilla/FontPropertyTypes.h"
@@ -297,6 +295,12 @@ class gfxUserFontSet {
 
   // rebuild if local rules have been used
   void RebuildLocalRules();
+
+  // Discard any font entries created for src:local(), so that they will
+  // be reloaded next time they're needed. This is called when the platform
+  // font list has changed, which means local font entries that were set up
+  // may no longer be valid.
+  void ForgetLocalFaces();
 
   class UserFontCache {
    public:
@@ -640,10 +644,15 @@ class gfxUserFontEntry : public gfxFontEntry {
   static void Shutdown() { sFontLoadingThread = nullptr; }
 
  protected:
+  struct OTSMessage {
+    nsCString mMessage;
+    int mLevel;  // see OTSContext in gfx/ots/include/opentype-sanitizer.h
+  };
+
   const uint8_t* SanitizeOpenTypeData(const uint8_t* aData, uint32_t aLength,
                                       uint32_t& aSaneLength,
                                       gfxUserFontType& aFontType,
-                                      nsTArray<nsCString>& aMessages);
+                                      nsTArray<OTSMessage>& aMessages);
 
   // attempt to load the next resource in the src list.
   void LoadNextSrc();
@@ -679,7 +688,7 @@ class gfxUserFontEntry : public gfxFontEntry {
   void ContinuePlatformFontLoadOnMainThread(
       const uint8_t* aOriginalFontData, uint32_t aOriginalLength,
       gfxUserFontType aFontType, const uint8_t* aSanitizedFontData,
-      uint32_t aSanitizedLength, nsTArray<nsCString>&& aMessages,
+      uint32_t aSanitizedLength, nsTArray<OTSMessage>&& aMessages,
       nsMainThreadPtrHandle<nsIFontLoadCompleteCallback> aCallback);
 
   // helper method for LoadPlatformFontSync and
@@ -688,7 +697,7 @@ class gfxUserFontEntry : public gfxFontEntry {
                         uint32_t aOriginalLength, gfxUserFontType aFontType,
                         const uint8_t* aSanitizedFontData,
                         uint32_t aSanitizedLength,
-                        nsTArray<nsCString>&& aMessages);
+                        nsTArray<OTSMessage>&& aMessages);
 
   // helper method for FontDataDownloadComplete and
   // ContinuePlatformFontLoadOnMainThread; runs on the main thread

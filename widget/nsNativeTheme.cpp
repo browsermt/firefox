@@ -12,9 +12,7 @@
 #include "nsPresContext.h"
 #include "nsString.h"
 #include "nsNameSpaceManager.h"
-#include "nsIDOMXULMenuListElement.h"
 #include "nsStyleConsts.h"
-#include "nsIComponentManager.h"
 #include "nsPIDOMWindow.h"
 #include "nsProgressFrame.h"
 #include "nsMeterFrame.h"
@@ -336,8 +334,7 @@ bool nsNativeTheme::IsFrameRTL(nsIFrame* aFrame) {
   if (!aFrame) {
     return false;
   }
-  WritingMode wm = aFrame->GetWritingMode();
-  return !(wm.IsVertical() ? wm.IsVerticalLR() : wm.IsBidiLTR());
+  return aFrame->GetWritingMode().IsPhysicalRTL();
 }
 
 bool nsNativeTheme::IsHTMLContent(nsIFrame* aFrame) {
@@ -652,6 +649,7 @@ static nsIFrame* GetBodyFrame(nsIFrame* aCanvasFrame) {
   return body->GetPrimaryFrame();
 }
 
+/* static */
 bool nsNativeTheme::IsDarkBackground(nsIFrame* aFrame) {
   nsIScrollableFrame* scrollFrame = nullptr;
   while (!scrollFrame && aFrame) {

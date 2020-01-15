@@ -11,13 +11,18 @@
 #include "SharedSSLState.h"
 #include "mozilla/Assertions.h"
 #include "mozilla/Telemetry.h"
+#include "mozilla/TextUtils.h"
 #include "mozilla/Unused.h"
 #include "nsAppDirectoryServiceDefs.h"
 #include "nsCRT.h"
 #include "nsILineInputStream.h"
+#include "nsIMarionette.h"
 #include "nsIObserver.h"
 #include "nsIObserverService.h"
 #include "nsIOutputStream.h"
+#ifdef ENABLE_REMOTE_AGENT
+#  include "nsIRemoteAgent.h"
+#endif
 #include "nsISafeOutputStream.h"
 #include "nsIX509Cert.h"
 #include "nsNSSCertHelper.h"
@@ -336,7 +341,7 @@ nsCertOverrideService::RememberValidityOverride(const nsACString& aHostName,
                                                 uint32_t aOverrideBits,
                                                 bool aTemporary) {
   NS_ENSURE_ARG_POINTER(aCert);
-  if (aHostName.IsEmpty() || !IsASCII(aHostName)) {
+  if (aHostName.IsEmpty() || !IsAscii(aHostName)) {
     return NS_ERROR_INVALID_ARG;
   }
   if (aPort < -1) return NS_ERROR_INVALID_ARG;
@@ -392,7 +397,7 @@ nsCertOverrideService::RememberTemporaryValidityOverrideUsingFingerprint(
     const nsACString& aHostName, int32_t aPort,
     const nsACString& aCertFingerprint, uint32_t aOverrideBits) {
   if (aCertFingerprint.IsEmpty() || aHostName.IsEmpty() ||
-      !IsASCII(aCertFingerprint) || !IsASCII(aHostName) || (aPort < -1)) {
+      !IsAscii(aCertFingerprint) || !IsAscii(aHostName) || (aPort < -1)) {
     return NS_ERROR_INVALID_ARG;
   }
 
@@ -427,7 +432,7 @@ nsCertOverrideService::HasMatchingOverride(const nsACString& aHostName,
     return NS_OK;
   }
 
-  if (aHostName.IsEmpty() || !IsASCII(aHostName)) {
+  if (aHostName.IsEmpty() || !IsAscii(aHostName)) {
     return NS_ERROR_INVALID_ARG;
   }
   if (aPort < -1) return NS_ERROR_INVALID_ARG;
@@ -501,7 +506,7 @@ nsresult nsCertOverrideService::AddEntryToList(
 NS_IMETHODIMP
 nsCertOverrideService::ClearValidityOverride(const nsACString& aHostName,
                                              int32_t aPort) {
-  if (aHostName.IsEmpty() || !IsASCII(aHostName)) {
+  if (aHostName.IsEmpty() || !IsAscii(aHostName)) {
     return NS_ERROR_INVALID_ARG;
   }
   if (!NS_IsMainThread()) {
@@ -607,11 +612,29 @@ nsCertOverrideService::IsCertUsedForOverrides(nsIX509Cert* aCert,
   return NS_OK;
 }
 
+static bool IsDebugger() {
+  bool marionetteRunning = false;
+  bool remoteAgentListening = false;
+
+  nsCOMPtr<nsIMarionette> marionette = do_GetService(NS_MARIONETTE_CONTRACTID);
+  if (marionette) {
+    marionette->GetRunning(&marionetteRunning);
+  }
+
+#ifdef ENABLE_REMOTE_AGENT
+  nsCOMPtr<nsIRemoteAgent> agent = do_GetService(NS_REMOTEAGENT_CONTRACTID);
+  if (agent) {
+    agent->GetListening(&remoteAgentListening);
+  }
+#endif
+
+  return marionetteRunning || remoteAgentListening;
+}
+
 NS_IMETHODIMP
 nsCertOverrideService::
     SetDisableAllSecurityChecksAndLetAttackersInterceptMyData(bool aDisable) {
-  if (!(PR_GetEnv("XPCSHELL_TEST_PROFILE_DIR") ||
-        PR_GetEnv("MOZ_MARIONETTE"))) {
+  if (!(PR_GetEnv("XPCSHELL_TEST_PROFILE_DIR") || IsDebugger())) {
     return NS_ERROR_NOT_AVAILABLE;
   }
 

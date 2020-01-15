@@ -100,7 +100,9 @@ struct BaseEventFlags {
   // dispatching into the DOM tree and not completed.
   bool mIsBeingDispatched : 1;
   // If mDispatchedAtLeastOnce is true, the event has been dispatched
-  // as a DOM event and the dispatch has been completed.
+  // as a DOM event and the dispatch has been completed in the process.
+  // So, this is false even if the event has already been dispatched
+  // in another process.
   bool mDispatchedAtLeastOnce : 1;
   // If mIsSynthesizedForTests is true, the event has been synthesized for
   // automated tests or something hacky approach of an add-on.
@@ -174,6 +176,10 @@ struct BaseEventFlags {
   // remote process (but it's not handled yet if it's not a duplicated event
   // instance).
   bool mPostedToRemoteProcess : 1;
+
+  // At lease one of the event in the event path had non privileged click
+  // listener.
+  bool mHadNonPrivilegedClickListeners : 1;
 
   // If the event is being handled in target phase, returns true.
   inline bool InTargetPhase() const {
@@ -317,6 +323,8 @@ struct BaseEventFlags {
     if (IsWaitingReplyFromRemoteProcess()) {
       mPropagationStopped = mImmediatePropagationStopped = false;
     }
+    // mDispatchedAtLeastOnce indicates the state in current process.
+    mDispatchedAtLeastOnce = false;
   }
   /**
    * Return true if the event has been posted to a remote process.
@@ -365,7 +373,7 @@ struct BaseEventFlags {
   }
 
  private:
-  typedef uint32_t RawFlags;
+  typedef uint64_t RawFlags;
 
   inline void SetRawFlags(RawFlags aRawFlags) {
     static_assert(sizeof(BaseEventFlags) <= sizeof(RawFlags),
@@ -888,6 +896,12 @@ class WidgetEvent : public WidgetEventTime {
       case eWheelEventClass:
         // All wheel events are composed
         mFlags.mComposed = mMessage == eWheel;
+        break;
+      case eMouseScrollEventClass:
+        // Legacy mouse scroll events are composed too, for consistency with
+        // wheel.
+        mFlags.mComposed = mMessage == eLegacyMouseLineOrPageScroll ||
+                           mMessage == eLegacyMousePixelScroll;
         break;
       default:
         mFlags.mComposed = false;

@@ -7,33 +7,13 @@
  * Check a frame actor's arguments property.
  */
 
-var gDebuggee;
-var gClient;
-var gThreadFront;
-
-function run_test() {
-  Services.prefs.setBoolPref("security.allow_eval_with_system_principal", true);
-  registerCleanupFunction(() => {
-    Services.prefs.clearUserPref("security.allow_eval_with_system_principal");
-  });
-  initTestDebuggerServer();
-  gDebuggee = addTestGlobal("test-stack");
-  gClient = new DebuggerClient(DebuggerServer.connectPipe());
-  gClient.connect().then(function() {
-    attachTestTabAndResume(gClient, "test-stack", function(
-      response,
-      targetFront,
+add_task(
+  threadFrontTest(async ({ threadFront, debuggee }) => {
+    const packet = await executeOnNextTickAndWaitForPause(
+      () => evalCode(debuggee),
       threadFront
-    ) {
-      gThreadFront = threadFront;
-      test_pause_frame();
-    });
-  });
-  do_test_pending();
-}
+    );
 
-function test_pause_frame() {
-  gThreadFront.once("paused", function(packet) {
     const args = packet.frame.arguments;
     Assert.equal(args.length, 6);
     Assert.equal(args[0], 42);
@@ -45,12 +25,12 @@ function test_pause_frame() {
     Assert.equal(args[5].class, "Object");
     Assert.ok(!!args[5].actor);
 
-    gThreadFront.resume().then(function() {
-      finishClient(gClient);
-    });
-  });
+    await threadFront.resume();
+  })
+);
 
-  gDebuggee.eval(
+function evalCode(debuggee) {
+  debuggee.eval(
     "(" +
       function() {
         function stopMe(number, bool, string, null_, undef, object) {

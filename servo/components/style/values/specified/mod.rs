@@ -62,7 +62,9 @@ pub use self::length::{FontRelativeLength, Length, LengthOrNumber, NonNegativeLe
 pub use self::length::{LengthOrAuto, LengthPercentage, LengthPercentageOrAuto};
 pub use self::length::{MaxSize, Size};
 pub use self::length::{NoCalcLength, ViewportPercentageLength};
-pub use self::length::{NonNegativeLengthPercentage, NonNegativeLengthPercentageOrAuto};
+pub use self::length::{
+    NonNegativeLength, NonNegativeLengthPercentage, NonNegativeLengthPercentageOrAuto,
+};
 #[cfg(feature = "gecko")]
 pub use self::list::ListStyleType;
 pub use self::list::MozListReversed;
@@ -78,6 +80,7 @@ pub use self::svg::MozContextProperties;
 pub use self::svg::{SVGLength, SVGOpacity, SVGPaint};
 pub use self::svg::{SVGPaintOrder, SVGStrokeDashArray, SVGWidth};
 pub use self::svg_path::SVGPathData;
+pub use self::text::TextUnderlinePosition;
 pub use self::text::{InitialLetter, LetterSpacing, LineBreak, LineHeight, TextAlign};
 pub use self::text::{OverflowWrap, TextEmphasisPosition, TextEmphasisStyle, WordBreak};
 pub use self::text::{TextAlignKeyword, TextDecorationLine, TextOverflow, WordSpacing};
@@ -134,24 +137,22 @@ fn parse_number_with_clamping_mode<'i, 't>(
     clamping_mode: AllowedNumericType,
 ) -> Result<Number, ParseError<'i>> {
     let location = input.current_source_location();
-    // FIXME: remove early returns when lifetimes are non-lexical
     match *input.next()? {
         Token::Number { value, .. } if clamping_mode.is_ok(context.parsing_mode, value) => {
-            return Ok(Number {
+            Ok(Number {
                 value: value.min(f32::MAX).max(f32::MIN),
                 calc_clamping_mode: None,
-            });
+            })
         },
-        Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {},
-        ref t => return Err(location.new_unexpected_token_error(t.clone())),
+        Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {
+            let result = input.parse_nested_block(|i| CalcNode::parse_number(context, i))?;
+            Ok(Number {
+                value: result.min(f32::MAX).max(f32::MIN),
+                calc_clamping_mode: Some(clamping_mode),
+            })
+        },
+        ref t => Err(location.new_unexpected_token_error(t.clone())),
     }
-
-    let result = input.parse_nested_block(|i| CalcNode::parse_number(context, i))?;
-
-    Ok(Number {
-        value: result.min(f32::MAX).max(f32::MIN),
-        calc_clamping_mode: Some(clamping_mode),
-    })
 }
 
 /// A CSS `<number>` specified value.
@@ -177,11 +178,24 @@ impl Parse for Number {
 
 impl Number {
     /// Returns a new number with the value `val`.
-    pub fn new(val: CSSFloat) -> Self {
-        Number {
-            value: val,
-            calc_clamping_mode: None,
+    fn new_with_clamping_mode(
+        value: CSSFloat,
+        calc_clamping_mode: Option<AllowedNumericType>,
+    ) -> Self {
+        Self {
+            value,
+            calc_clamping_mode,
         }
+    }
+
+    /// Returns this percentage as a number.
+    pub fn to_percentage(&self) -> Percentage {
+        Percentage::new_with_clamping_mode(self.value, self.calc_clamping_mode)
+    }
+
+    /// Returns a new number with the value `val`.
+    pub fn new(val: CSSFloat) -> Self {
+        Self::new_with_clamping_mode(val, None)
     }
 
     /// Returns whether this number came from a `calc()` expression.
@@ -368,6 +382,22 @@ impl NumberOrPercentage {
     ) -> Result<Self, ParseError<'i>> {
         Self::parse_with_clamping_mode(context, input, AllowedNumericType::NonNegative)
     }
+
+    /// Convert the number or the percentage to a number.
+    pub fn to_percentage(self) -> Percentage {
+        match self {
+            Self::Percentage(p) => p,
+            Self::Number(n) => n.to_percentage(),
+        }
+    }
+
+    /// Convert the number or the percentage to a number.
+    pub fn to_number(self) -> Number {
+        match self {
+            Self::Percentage(p) => p.to_number(),
+            Self::Number(n) => n,
+        }
+    }
 }
 
 impl Parse for NumberOrPercentage {
@@ -417,17 +447,7 @@ impl Parse for Opacity {
         context: &ParserContext,
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
-        let number = match NumberOrPercentage::parse(context, input)? {
-            NumberOrPercentage::Percentage(p) => Number {
-                value: p.get(),
-                calc_clamping_mode: if p.is_calc() {
-                    Some(AllowedNumericType::All)
-                } else {
-                    None
-                },
-            },
-            NumberOrPercentage::Number(n) => n,
-        };
+        let number = NumberOrPercentage::parse(context, input)?.to_number();
         Ok(Opacity(number))
     }
 }
@@ -519,19 +539,16 @@ impl Parse for Integer {
         input: &mut Parser<'i, 't>,
     ) -> Result<Self, ParseError<'i>> {
         let location = input.current_source_location();
-
-        // FIXME: remove early returns when lifetimes are non-lexical
         match *input.next()? {
             Token::Number {
                 int_value: Some(v), ..
-            } => return Ok(Integer::new(v)),
-            Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {},
-            ref t => return Err(location.new_unexpected_token_error(t.clone())),
+            } => Ok(Integer::new(v)),
+            Token::Function(ref name) if name.eq_ignore_ascii_case("calc") => {
+                let result = input.parse_nested_block(|i| CalcNode::parse_integer(context, i))?;
+                Ok(Integer::from_calc(result))
+            },
+            ref t => Err(location.new_unexpected_token_error(t.clone())),
         }
-
-        let result = input.parse_nested_block(|i| CalcNode::parse_integer(context, i))?;
-
-        Ok(Integer::from_calc(result))
     }
 }
 
@@ -706,7 +723,7 @@ impl ClipRectOrAuto {
         allow_quirks: AllowQuirks,
     ) -> Result<Self, ParseError<'i>> {
         if let Ok(v) = input.try(|i| ClipRect::parse_quirky(context, i, allow_quirks)) {
-            return Ok(generics::GenericClipRectOrAuto::Rect(v))
+            return Ok(generics::GenericClipRectOrAuto::Rect(v));
         }
         input.expect_ident_matching("auto")?;
         Ok(generics::GenericClipRectOrAuto::Auto)
@@ -750,9 +767,12 @@ impl AllowQuirks {
     ToShmem,
 )]
 #[css(function)]
+#[repr(C)]
 pub struct Attr {
-    /// Optional namespace prefix and URL.
-    pub namespace: Option<(Prefix, Namespace)>,
+    /// Optional namespace prefix.
+    pub namespace_prefix: Prefix,
+    /// Optional namespace URL.
+    pub namespace_url: Namespace,
     /// Attribute name
     pub attribute: Atom,
 }
@@ -797,7 +817,7 @@ impl Attr {
                         ref t => return Err(location.new_unexpected_token_error(t.clone())),
                     };
 
-                    let prefix_and_ns = if let Some(ns) = first {
+                    let (namespace_prefix, namespace_url) = if let Some(ns) = first {
                         let prefix = Prefix::from(ns.as_ref());
                         let ns = match get_namespace_for_prefix(&prefix, context) {
                             Some(ns) => ns,
@@ -806,17 +826,18 @@ impl Attr {
                                     .new_custom_error(StyleParseErrorKind::UnspecifiedError));
                             },
                         };
-                        Some((prefix, ns))
+                        (prefix, ns)
                     } else {
-                        None
+                        (Prefix::default(), Namespace::default())
                     };
                     return Ok(Attr {
-                        namespace: prefix_and_ns,
+                        namespace_prefix,
+                        namespace_url,
                         attribute: Atom::from(second_token.as_ref()),
                     });
                 },
                 // In the case of attr(foobar    ) we don't want to error out
-                // because of the trailing whitespace
+                // because of the trailing whitespace.
                 Token::WhiteSpace(..) => {},
                 ref t => return Err(input.new_unexpected_token_error(t.clone())),
             }
@@ -824,7 +845,8 @@ impl Attr {
 
         if let Some(first) = first {
             Ok(Attr {
-                namespace: None,
+                namespace_prefix: Prefix::default(),
+                namespace_url: Namespace::default(),
                 attribute: Atom::from(first.as_ref()),
             })
         } else {
@@ -839,8 +861,8 @@ impl ToCss for Attr {
         W: Write,
     {
         dest.write_str("attr(")?;
-        if let Some((ref prefix, ref _url)) = self.namespace {
-            serialize_atom_identifier(prefix, dest)?;
+        if !self.namespace_prefix.is_empty() {
+            serialize_atom_identifier(&self.namespace_prefix, dest)?;
             dest.write_str("|")?;
         }
         serialize_atom_identifier(&self.attribute, dest)?;

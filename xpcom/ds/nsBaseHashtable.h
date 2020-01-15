@@ -12,8 +12,34 @@
 #include "nsTHashtable.h"
 #include "nsDebug.h"
 
-template <class KeyClass, class DataType, class UserDataType>
+template <class KeyClass, class DataType, class UserDataType, class Converter>
 class nsBaseHashtable;  // forward declaration
+
+/**
+ * Data type conversion helper that is used to wrap and unwrap the specified
+ * DataType.
+ */
+template <class DataType, class UserDataType>
+class nsDefaultConverter {
+ public:
+  /**
+   * Maps the storage DataType to the exposed UserDataType.
+   */
+  static UserDataType Unwrap(DataType& src) { return UserDataType(src); }
+
+  /**
+   * Const ref variant used for example with nsCOMPtr wrappers.
+   */
+  static DataType Wrap(const UserDataType& src) { return DataType(src); }
+
+  /**
+   * Generic conversion, this is useful for things like already_AddRefed.
+   */
+  template <typename U>
+  static DataType Wrap(U&& src) {
+    return std::move(src);
+  }
+};
 
 /**
  * the private nsTHashtable::EntryType class used by nsBaseHashtable
@@ -23,10 +49,20 @@ class nsBaseHashtable;  // forward declaration
 template <class KeyClass, class DataType>
 class nsBaseHashtableET : public KeyClass {
  public:
-  DataType mData;
-  friend class nsTHashtable<nsBaseHashtableET<KeyClass, DataType>>;
+  const DataType& GetData() const { return mData; }
+  DataType* GetModifiableData() { return &mData; }
+  template <typename U>
+  void SetData(U&& aData) {
+    mData = std::forward<U>(aData);
+  }
 
  private:
+  DataType mData;
+  friend class nsTHashtable<nsBaseHashtableET<KeyClass, DataType>>;
+  template <typename KeyClassX, typename DataTypeX, typename UserDataTypeX,
+            typename ConverterX>
+  friend class nsBaseHashtable;
+
   typedef typename KeyClass::KeyType KeyType;
   typedef typename KeyClass::KeyTypePointer KeyTypePointer;
 
@@ -43,11 +79,14 @@ class nsBaseHashtableET : public KeyClass {
  * @param KeyClass a wrapper-class for the hashtable key, see nsHashKeys.h
  *   for a complete specification.
  * @param DataType the datatype stored in the hashtable,
- *   for example, uint32_t or nsCOMPtr.  If UserDataType is not the same,
- *   DataType must implicitly cast to UserDataType
+ *   for example, uint32_t or nsCOMPtr.
  * @param UserDataType the user sees, for example uint32_t or nsISupports*
+ * @param Converter that can be used to map from DataType to UserDataType. A
+ *   default converter is provided that assumes implicit conversion is an
+ *   option.
  */
-template <class KeyClass, class DataType, class UserDataType>
+template <class KeyClass, class DataType, class UserDataType,
+          class Converter = nsDefaultConverter<DataType, UserDataType>>
 class nsBaseHashtable
     : protected nsTHashtable<nsBaseHashtableET<KeyClass, DataType>> {
   typedef mozilla::fallible_t fallible_t;
@@ -93,7 +132,7 @@ class nsBaseHashtable
     }
 
     if (aData) {
-      *aData = ent->mData;
+      *aData = Converter::Unwrap(ent->mData);
     }
 
     return true;
@@ -115,7 +154,7 @@ class nsBaseHashtable
       return UserDataType{};
     }
 
-    return ent->mData;
+    return Converter::Unwrap(ent->mData);
   }
 
   /**
@@ -146,7 +185,7 @@ class nsBaseHashtable
       return false;
     }
 
-    ent->mData = aData;
+    ent->mData = Converter::Wrap(aData);
 
     return true;
   }
@@ -168,7 +207,7 @@ class nsBaseHashtable
       return false;
     }
 
-    ent->mData = std::move(aData);
+    ent->mData = Converter::Wrap(std::move(aData));
 
     return true;
   }
@@ -296,7 +335,7 @@ class nsBaseHashtable
       MOZ_ASSERT(mTableGeneration == mTable.GetGeneration());
       MOZ_ASSERT(mEntry);
       if (!mExistingEntry) {
-        mEntry->mData = func();
+        mEntry->mData = Converter::Wrap(func());
 #ifdef DEBUG
         mDidInitNewEntry = true;
 #endif
@@ -370,7 +409,7 @@ class nsBaseHashtable
 
     KeyType Key() const { return static_cast<EntryType*>(Get())->GetKey(); }
     UserDataType UserData() const {
-      return static_cast<EntryType*>(Get())->mData;
+      return Converter::Unwrap(static_cast<EntryType*>(Get())->mData);
     }
     DataType& Data() const { return static_cast<EntryType*>(Get())->mData; }
 
@@ -386,6 +425,91 @@ class nsBaseHashtable
   Iterator ConstIter() const {
     return Iterator(const_cast<nsBaseHashtable*>(this));
   }
+
+  // STL-style iterators to allow the use in range-based for loops, e.g.
+  template <typename T>
+  class base_iterator
+      : public std::iterator<std::forward_iterator_tag, T, int32_t> {
+   public:
+    using typename std::iterator<std::forward_iterator_tag, T,
+                                 int32_t>::value_type;
+    using typename std::iterator<std::forward_iterator_tag, T,
+                                 int32_t>::difference_type;
+
+    using iterator_type = base_iterator;
+    using const_iterator_type = base_iterator<const T>;
+
+    using EndIteratorTag = PLDHashTable::Iterator::EndIteratorTag;
+
+    base_iterator(base_iterator&& aOther) = default;
+
+    base_iterator& operator=(base_iterator&& aOther) {
+      // User-defined because the move assignment operator is deleted in
+      // PLDHashtable::Iterator.
+      return operator=(static_cast<const base_iterator&>(aOther));
+    }
+
+    base_iterator(const base_iterator& aOther)
+        : mIterator{aOther.mIterator.Clone()} {}
+    base_iterator& operator=(const base_iterator& aOther) {
+      // Since PLDHashTable::Iterator has no assignment operator, we destroy and
+      // recreate mIterator.
+      mIterator.~Iterator();
+      new (&mIterator) PLDHashTable::Iterator(aOther.mIterator.Clone());
+      return *this;
+    }
+
+    explicit base_iterator(PLDHashTable::Iterator aFrom)
+        : mIterator{std::move(aFrom)} {}
+
+    explicit base_iterator(const nsBaseHashtable* aTable)
+        : mIterator{&const_cast<nsBaseHashtable*>(aTable)->mTable} {}
+
+    base_iterator(const nsBaseHashtable* aTable, EndIteratorTag aTag)
+        : mIterator{&const_cast<nsBaseHashtable*>(aTable)->mTable, aTag} {}
+
+    bool operator==(const iterator_type& aRhs) const {
+      return mIterator == aRhs.mIterator;
+    }
+    bool operator!=(const iterator_type& aRhs) const {
+      return !(*this == aRhs);
+    }
+
+    value_type* operator->() const {
+      return static_cast<value_type*>(mIterator.Get());
+    }
+    value_type& operator*() const {
+      return *static_cast<value_type*>(mIterator.Get());
+    }
+
+    iterator_type& operator++() {
+      mIterator.Next();
+      return *this;
+    }
+    iterator_type operator++(int) {
+      iterator_type it = *this;
+      ++*this;
+      return it;
+    }
+
+    operator const_iterator_type() const {
+      return const_iterator_type{mIterator.Clone()};
+    }
+
+   private:
+    PLDHashTable::Iterator mIterator;
+  };
+  using const_iterator = base_iterator<const EntryType>;
+  using iterator = base_iterator<EntryType>;
+
+  iterator begin() { return iterator{this}; }
+  const_iterator begin() const { return const_iterator{this}; }
+  const_iterator cbegin() const { return begin(); }
+  iterator end() { return iterator{this, typename iterator::EndIteratorTag{}}; }
+  const_iterator end() const {
+    return const_iterator{this, typename const_iterator::EndIteratorTag{}};
+  }
+  const_iterator cend() const { return end(); }
 
   /**
    * reset the hashtable, removing all entries
@@ -417,9 +541,7 @@ class nsBaseHashtable
     nsTHashtable<EntryType>::SwapElements(aOther);
   }
 
-#ifdef DEBUG
   using nsTHashtable<EntryType>::MarkImmutable;
-#endif
 };
 
 //

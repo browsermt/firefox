@@ -31,13 +31,13 @@ const {
 const FluentReact = require("devtools/client/shared/vendor/fluent-react");
 const Localized = createFactory(FluentReact.Localized);
 
-const UIButton = createFactory(require("../ui/UIButton"));
+const {
+  services,
+} = require("devtools/client/application/src/modules/application-services");
+const Types = require("devtools/client/application/src/types/index");
 
-loader.lazyRequireGetter(
-  this,
-  "gDevToolsBrowser",
-  "devtools/client/framework/devtools-browser",
-  true
+const UIButton = createFactory(
+  require("devtools/client/application/src/components/ui/UIButton")
 );
 
 /**
@@ -50,16 +50,7 @@ class Worker extends PureComponent {
   static get propTypes() {
     return {
       isDebugEnabled: PropTypes.bool.isRequired,
-      worker: PropTypes.shape({
-        active: PropTypes.bool,
-        name: PropTypes.string.isRequired,
-        scope: PropTypes.string.isRequired,
-        lastUpdateTime: PropTypes.number.isRequired,
-        url: PropTypes.string.isRequired,
-        // registrationFront can be missing in e10s.
-        registrationFront: PropTypes.object,
-        workerTargetFront: PropTypes.object,
-      }).isRequired,
+      worker: PropTypes.shape(Types.worker).isRequired,
     };
   }
 
@@ -77,8 +68,7 @@ class Worker extends PureComponent {
       return;
     }
 
-    const { workerTargetFront } = this.props.worker;
-    gDevToolsBrowser.openWorkerToolbox(workerTargetFront);
+    services.openWorkerInDebugger(this.props.worker.workerTargetFront);
   }
 
   start() {
@@ -207,14 +197,16 @@ class Worker extends PureComponent {
         )
       : null;
 
+    const scope = span(
+      { title: worker.scope, className: "worker__scope js-sw-scope" },
+      this.formatScope(worker.scope)
+    );
+
     return li(
       { className: "worker js-sw-container" },
       header(
         { className: "worker__header" },
-        span(
-          { title: worker.scope, className: "worker__scope js-sw-scope" },
-          this.formatScope(worker.scope)
-        ),
+        scope,
         section({ className: "worker__controls" }, unregisterButton)
       ),
       dl(

@@ -46,6 +46,12 @@ glob:**/*.configure
 # are all somewhere in "tooltool-manifests" directories.
 glob:**/tooltool-manifests/**
 
+# For test chunking
+glob:**/*.ini
+glob:**/*.list
+path:testing/mozbase/manifestparser
+path:testing/runtimes
+
 # For scheduling android-gradle-dependencies.
 path:mobile/android/config/
 glob:**/*.gradle
@@ -67,3 +73,8 @@ path:toolkit/mozapps/update/updater
 # for the browsertime toolchain task
 path:tools/browsertime/mach_commands.py
 path:tools/browsertime/package.json
+
+# for the geckodriver toolchain task
+path:testing/geckodriver
+path:testing/mozbase/rust
+path:testing/webdriver

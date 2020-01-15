@@ -85,7 +85,8 @@ class WindowGlobalChild final : public WindowGlobalActor,
   already_AddRefed<BrowserChild> GetBrowserChild();
 
   void ReceiveRawMessage(const JSWindowActorMessageMeta& aMeta,
-                         ipc::StructuredCloneData&& aData);
+                         ipc::StructuredCloneData&& aData,
+                         ipc::StructuredCloneData&& aStack);
 
   // Get a JS actor object by name.
   already_AddRefed<JSWindowActorChild> GetActor(const nsAString& aName,
@@ -112,13 +113,16 @@ class WindowGlobalChild final : public WindowGlobalActor,
 
   // IPC messages
   mozilla::ipc::IPCResult RecvRawMessage(const JSWindowActorMessageMeta& aMeta,
-                                         const ClonedMessageData& aData);
+                                         const ClonedMessageData& aData,
+                                         const ClonedMessageData& aStack);
 
-  mozilla::ipc::IPCResult RecvLoadURIInChild(nsDocShellLoadState* aLoadState);
+  mozilla::ipc::IPCResult RecvMakeFrameLocal(
+      dom::BrowsingContext* aFrameContext, uint64_t aPendingSwitchId);
 
-  mozilla::ipc::IPCResult RecvChangeFrameRemoteness(
-      dom::BrowsingContext* aBc, const nsString& aRemoteType,
-      uint64_t aPendingSwitchId, ChangeFrameRemotenessResolver&& aResolver);
+  mozilla::ipc::IPCResult RecvMakeFrameRemote(
+      dom::BrowsingContext* aFrameContext,
+      ManagedEndpoint<PBrowserBridgeChild>&& aEndpoint, const TabId& aTabId,
+      MakeFrameRemoteResolver&& aResolve);
 
   mozilla::ipc::IPCResult RecvDrawSnapshot(const Maybe<IntRect>& aRect,
                                            const float& aScale,

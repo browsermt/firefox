@@ -77,18 +77,11 @@ class MarionetteTest(TestingMixin, MercurialScript, TransferMixin,
          "dest": "total_chunks",
          "help": "Number of total chunks",
          }
-     ], [
+    ], [
         ["--this-chunk"],
         {"action": "store",
          "dest": "this_chunk",
          "help": "Number of this chunk",
-         }
-     ], [
-        ["--disable-e10s"],
-        {"action": "store_false",
-         "dest": "e10s",
-         "default": True,
-         "help": "Run tests without multiple processes (e10s). (Desktop builds only)",
          }
     ], [
         ["--setpref"],
@@ -176,8 +169,8 @@ class MarionetteTest(TestingMixin, MercurialScript, TransferMixin,
     def _pre_config_lock(self, rw_config):
         super(MarionetteTest, self)._pre_config_lock(rw_config)
         if not self.config.get('emulator') and not self.config.get('marionette_address'):
-                self.fatal("You need to specify a --marionette-address for non-emulator tests! "
-                           "(Try --marionette-address localhost:2828 )")
+            self.fatal("You need to specify a --marionette-address for non-emulator tests! "
+                       "(Try --marionette-address localhost:2828 )")
 
     def _query_tests_dir(self):
         dirs = self.query_abs_dirs()
@@ -310,9 +303,6 @@ class MarionetteTest(TestingMixin, MercurialScript, TransferMixin,
 
         if self.config.get('app_arg'):
             config_fmt_args['app_arg'] = self.config['app_arg']
-
-        if not self.config['e10s']:
-            cmd.append('--disable-e10s')
 
         if self.config['enable_webrender']:
             cmd.append('--enable-webrender')

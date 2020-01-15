@@ -366,6 +366,11 @@ class XPCShellTestThread(Thread):
             return None
 
         pluginsDir = mkdtemp(prefix='xpc-plugins-', dir=self._rootTempDir)
+        retries = 0
+        while not os.path.isdir(pluginsDir) and retries < 5:
+            self.log.info("plugins temp directory %s missing; waiting..." % pluginsDir)
+            time.sleep(1)
+            retries += 1
         # shutil.copytree requires dst to not exist. Deleting the tempdir
         # would make a race condition possible in a concurrent environment,
         # so we are using dir_utils.copy_tree which accepts an existing dst
@@ -852,9 +857,9 @@ class XPCShellTests(object):
 
     def normalizeTest(self, root, test_object):
         path = test_object.get('file_relpath', test_object['relpath'])
-        if 'dupe-manifest' in test_object and 'ancestor-manifest' in test_object:
+        if 'dupe-manifest' in test_object and 'ancestor_manifest' in test_object:
             test_object['id'] = '%s:%s' % (os.path.basename
-                                           (test_object['ancestor-manifest']), path)
+                                           (test_object['ancestor_manifest']), path)
         else:
             test_object['id'] = path
 
@@ -1147,7 +1152,7 @@ class XPCShellTests(object):
                                           msg, 0)
                     if searchObj:
                         self.env["MOZHTTP2_PORT"] = searchObj.group(1)
-                        self.env["MOZHTTP2_PROXY_PORT"] = searchObj.group(2)
+                        self.env["MOZNODE_EXEC_PORT"] = searchObj.group(2)
             except OSError as e:
                 # This occurs if the subprocess couldn't be started
                 self.log.error('Could not run %s server: %s' % (name, str(e)))
@@ -1215,8 +1220,17 @@ class XPCShellTests(object):
         self.mozInfo = fixedInfo
 
         self.mozInfo['fission'] = prefs.get('fission.autostart', False)
+
+        # Until the test harness can understand default pref values,
+        # (https://bugzilla.mozilla.org/show_bug.cgi?id=1577912) this value
+        # should by synchronized with the default pref value indicated in
+        # StaticPrefList.yaml.
+        #
+        # Currently for automation, the pref defaults to true (but can be
+        # overridden with --setpref).
         self.mozInfo['serviceworker_e10s'] = prefs.get(
-            'dom.serviceWorkers.parent_intercept', False)
+            'dom.serviceWorkers.parent_intercept', True)
+
         self.mozInfo['verify'] = options.get('verify', False)
         self.mozInfo['webrender'] = self.enable_webrender
 

@@ -53,6 +53,13 @@ Services.prefs
   .getDefaultBranch(SearchUtils.BROWSER_SEARCH_PREF)
   .setCharPref("geoSpecificDefaults.url", "");
 
+XPCOMUtils.defineLazyPreferenceGetter(
+  this,
+  "gModernConfig",
+  SearchUtils.BROWSER_SEARCH_PREF + "modernConfig",
+  false
+);
+
 AddonTestUtils.init(this, false);
 AddonTestUtils.createAppInfo(
   "xpcshell@tests.mozilla.org",
@@ -62,37 +69,22 @@ AddonTestUtils.createAppInfo(
 );
 
 /**
- * Configure preferences to load engines from
- * chrome://testsearchplugin/locale/searchplugins/
+ * Load engines from test data located in particular folders.
+ *
+ * @param {string} [folder]
+ *   The folder name to use.
+ * @param {string} [subFolder]
+ *   The subfolder to use, if any.
  */
-function configureToLoadJarEngines() {
-  let searchExtensions = do_get_cwd();
-  searchExtensions.append("data");
-  searchExtensions.append("search-extensions");
-  let url = "file://" + searchExtensions.path;
+async function useTestEngines(folder = "data", subFolder = null) {
+  let url = `resource://test/${folder}/`;
+  if (subFolder) {
+    url += `${subFolder}/`;
+  }
   let resProt = Services.io
     .getProtocolHandler("resource")
     .QueryInterface(Ci.nsIResProtocolHandler);
   resProt.setSubstitution("search-extensions", Services.io.newURI(url));
-}
-
-/**
- * Load engines from test data located in 'folder'.
- *
- * @param {string} folder
- *   The folder name to use.
- */
-function useTestEngines(folder) {
-  let searchExtensions = do_get_cwd();
-  searchExtensions.append("data");
-  searchExtensions.append(folder);
-  let resProt = Services.io
-    .getProtocolHandler("resource")
-    .QueryInterface(Ci.nsIResProtocolHandler);
-  resProt.setSubstitution(
-    "search-extensions",
-    Services.io.newURI("file://" + searchExtensions.path)
-  );
 }
 
 async function promiseCacheData() {
@@ -136,6 +128,15 @@ async function forceExpiration() {
   await promiseSaveGlobalMetadata(metadata);
 }
 
+function promiseDefaultNotification(type = "normal") {
+  return SearchTestUtils.promiseSearchNotification(
+    SearchUtils.MODIFIED_TYPE[
+      type == "private" ? "DEFAULT_PRIVATE" : "DEFAULT"
+    ],
+    SearchUtils.TOPIC_ENGINE_MODIFIED
+  );
+}
+
 /**
  * Clean the profile of any cache file left from a previous run.
  *
@@ -177,20 +178,6 @@ function isUSTimezone() {
 const kDefaultenginenamePref = "browser.search.defaultenginename";
 const kTestEngineName = "Test search engine";
 const TOPIC_LOCALES_CHANGE = "intl:app-locales-changed";
-
-/**
- * Overrides list.json with test data from the specified location,
- * e.g. data/list.json.
- *
- * @param {string} url
- *   The resource url to set the location from.
- */
-function useTestEngineConfig(url = "resource://test/data/") {
-  const resProt = Services.io
-    .getProtocolHandler("resource")
-    .QueryInterface(Ci.nsIResProtocolHandler);
-  resProt.setSubstitution("search-extensions", Services.io.newURI(url));
-}
 
 /**
  * Loads the current default engine list.json via parsing the json manually.
@@ -305,17 +292,28 @@ function readJSONFile(aFile) {
  *
  * @param {object} expectedObj
  * @param {object} actualObj
+ * @param {function} skipProp
+ *   A function that is called with the property name and its value, to see if
+ *   testing that property should be skipped or not.
  */
-function isSubObjectOf(expectedObj, actualObj) {
+function isSubObjectOf(expectedObj, actualObj, skipProp) {
   for (let prop in expectedObj) {
+    if (skipProp && skipProp(prop, expectedObj[prop])) {
+      continue;
+    }
     if (expectedObj[prop] instanceof Object) {
-      Assert.equal(expectedObj[prop].length, actualObj[prop].length);
-      isSubObjectOf(expectedObj[prop], actualObj[prop]);
+      Assert.equal(
+        actualObj[prop].length,
+        expectedObj[prop].length,
+        `Should have the correct length for property ${prop}`
+      );
+      isSubObjectOf(expectedObj[prop], actualObj[prop], skipProp);
     } else {
-      if (expectedObj[prop] != actualObj[prop]) {
-        info("comparing property " + prop);
-      }
-      Assert.equal(expectedObj[prop], actualObj[prop]);
+      Assert.equal(
+        actualObj[prop],
+        expectedObj[prop],
+        `Should have the correct value for property ${prop}`
+      );
     }
   }
 }
@@ -349,6 +347,8 @@ async function withGeoServer(
   testFn,
   {
     visibleDefaultEngines = null,
+    geoLookupData = null,
+    preGeolookupPromise = Promise.resolve,
     cohort = null,
     intval200 = 86400 * 365,
     intval503 = 86400,
@@ -397,6 +397,15 @@ async function withGeoServer(
     }, delay);
   });
 
+  srv.registerPathHandler("/lookup_geoip", async (metadata, response) => {
+    response.processAsync();
+    await preGeolookupPromise;
+    response.setStatusLine("1.1", 200, "OK");
+    response.write(JSON.stringify(geoLookupData));
+    response.finish();
+    gRequests.push(metadata);
+  });
+
   srv.start(-1);
 
   let url = `http://localhost:${srv.identity.primaryPort}/${path}?`;
@@ -410,10 +419,11 @@ async function withGeoServer(
     SearchUtils.BROWSER_SEARCH_PREF + PREF_SEARCH_URL,
     "about:blank"
   );
-  Services.prefs.setCharPref(
-    "browser.search.geoip.url",
-    'data:application/json,{"country_code": "FR"}'
-  );
+
+  let geoLookupUrl = geoLookupData
+    ? `http://localhost:${srv.identity.primaryPort}/lookup_geoip`
+    : 'data:application/json,{"country_code": "FR"}';
+  Services.prefs.setCharPref("browser.search.geoip.url", geoLookupUrl);
 
   try {
     await testFn(gRequests);
@@ -499,10 +509,7 @@ function installTestEngine() {
   return addTestEngines([{ name: kTestEngineName, xmlFileName: "engine.xml" }]);
 }
 
-async function asyncReInit({
-  waitForRegionFetch = false,
-  skipReset = false,
-} = {}) {
+async function asyncReInit({ waitForRegionFetch = false } = {}) {
   let promises = [SearchTestUtils.promiseSearchNotification("reinit-complete")];
   if (waitForRegionFetch) {
     promises.push(
@@ -510,9 +517,6 @@ async function asyncReInit({
     );
   }
 
-  if (!skipReset) {
-    Services.search.reset();
-  }
   Services.search.reInit(!waitForRegionFetch);
 
   return Promise.all(promises);

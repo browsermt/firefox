@@ -11,13 +11,12 @@ use crate::gecko_bindings::structs;
 use crate::media_queries::MediaType;
 use crate::properties::ComputedValues;
 use crate::string_cache::Atom;
-use crate::values::computed::font::FontSize;
+use crate::values::specified::font::FONT_MEDIUM_PX;
 use crate::values::{CustomIdent, KeyframesName};
-use app_units::Au;
-use app_units::AU_PER_PX;
+use app_units::{Au, AU_PER_PX};
 use cssparser::RGBA;
 use euclid::default::Size2D;
-use euclid::Scale;
+use euclid::{Scale, SideOffsets2D};
 use servo_arc::Arc;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
@@ -87,7 +86,7 @@ impl Device {
             document,
             default_values: ComputedValues::default_values(doc),
             // FIXME(bz): Seems dubious?
-            root_font_size: AtomicIsize::new(FontSize::medium().size().0 as isize),
+            root_font_size: AtomicIsize::new(Au::from_px(FONT_MEDIUM_PX as i32).0 as isize),
             body_text_color: AtomicUsize::new(prefs.mDefaultColor as usize),
             used_root_font_size: AtomicBool::new(false),
             used_viewport_size: AtomicBool::new(false),
@@ -139,8 +138,7 @@ impl Device {
 
     /// Set the font size of the root element (for rem)
     pub fn set_root_font_size(&self, size: Au) {
-        self.root_font_size
-            .store(size.0 as isize, Ordering::Relaxed)
+        self.root_font_size.store(size.0 as isize, Ordering::Relaxed)
     }
 
     /// Sets the body text color for the "inherit color from body" quirk.
@@ -237,7 +235,13 @@ impl Device {
     /// used for viewport unit resolution.
     pub fn au_viewport_size_for_viewport_unit_resolution(&self) -> Size2D<Au> {
         self.used_viewport_size.store(true, Ordering::Relaxed);
-        self.au_viewport_size()
+
+        let pc = match self.pres_context() {
+            Some(pc) => pc,
+            None => return Size2D::new(Au(0), Au(0)),
+        };
+        let size = &pc.mSizeForViewportUnits;
+        Size2D::new(Au(size.width), Au(size.height))
     }
 
     /// Returns whether we ever looked up the viewport size of the Device.
@@ -268,13 +272,7 @@ impl Device {
         if doc.mIsBeingUsedAsImage() {
             return true;
         }
-        let document_color_use = static_prefs::pref!("browser.display.document_color_use");
-        let prefs = self.pref_sheet_prefs();
-        match document_color_use {
-            1 => true,
-            2 => prefs.mIsChrome,
-            _ => !prefs.mUseAccessibilityTheme,
-        }
+        self.pref_sheet_prefs().mUseDocumentColors
     }
 
     /// Returns the default background color.
@@ -302,5 +300,10 @@ impl Device {
     #[inline]
     pub fn unzoom_text(&self, size: Au) -> Au {
         size.scale_by(1. / self.effective_text_zoom())
+    }
+
+    /// Returns safe area insets
+    pub fn safe_area_insets(&self) -> SideOffsets2D<f32, CSSPixel> {
+        SideOffsets2D::zero()
     }
 }

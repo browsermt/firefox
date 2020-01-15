@@ -489,6 +489,24 @@ class BaseContext {
     return this.extension.canAccessWindow(window);
   }
 
+  /**
+   * Opens a conduit linked to this context, populating related address fields.
+   * Only available in child contexts with an associated contentWindow.
+   * @param {object} subject
+   * @param {ConduitAddress} address
+   * @returns {PointConduit}
+   */
+  openConduit(subject, address) {
+    let wgc = this.contentWindow.getWindowGlobalChild();
+    let conduit = wgc.getActor("Conduits").openConduit(subject, {
+      extensionId: this.extension.id,
+      envType: this.envType,
+      ...address,
+    });
+    this.callOnClose(conduit);
+    return conduit;
+  }
+
   setContentWindow(contentWindow) {
     if (!this.canAccessWindow(contentWindow)) {
       throw new Error(
@@ -1353,7 +1371,6 @@ class SchemaAPIManager extends EventEmitter {
    *     "addon" - An addon process.
    *     "content" - A content process.
    *     "devtools" - A devtools process.
-   *     "proxy" - A proxy script process.
    * @param {SchemaRoot} schema
    */
   constructor(processType, schema) {
@@ -1368,6 +1385,7 @@ class SchemaAPIManager extends EventEmitter {
     this.modulePaths = { children: new Map(), modules: new Set() };
     this.manifestKeys = new Map();
     this.eventModules = new DefaultMap(() => new Set());
+    this.settingsModules = new Set();
 
     this._modulesJSONLoaded = false;
 
@@ -1411,6 +1429,7 @@ class SchemaAPIManager extends EventEmitter {
       modulePaths: this.modulePaths,
       manifestKeys: this.manifestKeys,
       eventModules: this.eventModules,
+      settingsModules: this.settingsModules,
       schemaURLs: this.schemaURLs,
     });
   }
@@ -1423,6 +1442,7 @@ class SchemaAPIManager extends EventEmitter {
       this.modulePaths = data.modulePaths;
       this.manifestKeys = data.manifestKeys;
       this.eventModules = new DefaultMap(() => new Set(), data.eventModules);
+      this.settingsModules = new Set(data.settingsModules);
       this.schemaURLs = data.schemaURLs;
     }
 
@@ -1457,6 +1477,10 @@ class SchemaAPIManager extends EventEmitter {
 
       for (let event of details.events || []) {
         this.eventModules.get(event).add(name);
+      }
+
+      if (details.settings) {
+        this.settingsModules.add(name);
       }
 
       for (let key of details.manifest || []) {
@@ -1645,6 +1669,14 @@ class SchemaAPIManager extends EventEmitter {
     });
 
     return module.asyncLoaded;
+  }
+
+  asyncLoadSettingsModules() {
+    return Promise.all(
+      Array.from(this.settingsModules).map(apiName =>
+        this.asyncLoadModule(apiName)
+      )
+    );
   }
 
   getModule(name) {

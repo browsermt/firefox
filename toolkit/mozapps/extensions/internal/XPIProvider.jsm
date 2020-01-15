@@ -1716,7 +1716,11 @@ class BootstrapScope {
    */
   async callBootstrapMethod(aMethod, aReason, aExtraParams = {}) {
     let { addon, runInSafeMode } = this;
-    if (Services.appinfo.inSafeMode && !runInSafeMode) {
+    if (
+      Services.appinfo.inSafeMode &&
+      !runInSafeMode &&
+      aMethod !== "uninstall"
+    ) {
       return null;
     }
 
@@ -2914,7 +2918,7 @@ var XPIProvider = {
       let extensionListChanged = false;
       // If the database needs to be updated then open it and then update it
       // from the filesystem
-      if (updateReasons.length > 0) {
+      if (updateReasons.length) {
         AddonManagerPrivate.recordSimpleMeasure(
           "XPIDB_startup_load_reasons",
           updateReasons

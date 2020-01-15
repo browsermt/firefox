@@ -22,11 +22,7 @@
 #include "mozilla/PresShell.h"
 #include "gfxFont.h"
 #include "ScaledFontBase.h"
-#include "SkTextBlob.h"
-#include "SkTypeface.h"
-#include "SkFont.h"
-#include "SkPoint.h"
-#include "SkScalar.h"
+#include "skia/include/core/SkTextBlob.h"
 
 #include "BorderConsts.h"
 #include "nsStyleConsts.h"
@@ -41,7 +37,6 @@
 #include "nsIContent.h"
 #include "mozilla/dom/DocumentInlines.h"
 #include "nsIScrollableFrame.h"
-#include "imgIRequest.h"
 #include "imgIContainer.h"
 #include "ImageOps.h"
 #include "nsCSSRendering.h"
@@ -536,16 +531,12 @@ static nsRect JoinBoxesForBlockAxisSlice(nsIFrame* aFrame,
   auto wm = aFrame->GetWritingMode();
   nsIFrame* f = aFrame->GetNextContinuation();
   for (; f; f = f->GetNextContinuation()) {
-    MOZ_ASSERT(!(f->GetStateBits() & NS_FRAME_PART_OF_IBSPLIT),
-               "anonymous ib-split block shouldn't have border/background");
     bSize += f->BSize(wm);
   }
   (wm.IsVertical() ? borderArea.width : borderArea.height) += bSize;
   bSize = 0;
   f = aFrame->GetPrevContinuation();
   for (; f; f = f->GetPrevContinuation()) {
-    MOZ_ASSERT(!(f->GetStateBits() & NS_FRAME_PART_OF_IBSPLIT),
-               "anonymous ib-split block shouldn't have border/background");
     bSize += f->BSize(wm);
   }
   (wm.IsVertical() ? borderArea.x : borderArea.y) -= bSize;
@@ -3648,7 +3639,7 @@ void nsCSSRendering::GetTableBorderSolidSegments(
         break;
       }
       // else fall through to solid
-      MOZ_FALLTHROUGH;
+      [[fallthrough]];
     case StyleBorderStyle::Solid:
       aSegments.AppendElement(
           SolidBeveledBorderSegment{aBorder,
@@ -3770,7 +3761,7 @@ static void GetPositioning(
 
   // the upper and lower lines/edges of the under or over line
   SkScalar upperLine, lowerLine;
-  if (aParams.decoration == mozilla::StyleTextDecorationLine_OVERLINE) {
+  if (aParams.decoration == mozilla::StyleTextDecorationLine::OVERLINE) {
     lowerLine =
         -aParams.offset + aParams.defaultLineThickness - aCenterBaselineOffset;
     upperLine = lowerLine - rectThickness;
@@ -3954,11 +3945,9 @@ static void GetTextIntercepts(const sk_sp<const SkTextBlob>& aBlob,
 // included here
 static void SkipInk(nsIFrame* aFrame, DrawTarget& aDrawTarget,
                     const nsCSSRendering::PaintDecorationLineParams& aParams,
-                    const nsTArray<SkScalar>& aIntercepts, Rect& aRect) {
+                    const nsTArray<SkScalar>& aIntercepts, Float aPadding,
+                    Rect& aRect) {
   nsCSSRendering::PaintDecorationLineParams clipParams = aParams;
-  double padding = aParams.lineSize.height;
-  double oneCSSPixel = aFrame->PresContext()->CSSPixelsToDevPixels(1.0f);
-  padding = std::max(padding, oneCSSPixel);
   int length = aIntercepts.Length();
 
   SkScalar startIntercept = 0;
@@ -3979,15 +3968,15 @@ static void SkipInk(nsIFrame* aFrame, DrawTarget& aDrawTarget,
   for (int i = 0; i <= length; i += 2) {
     // handle start/end edge cases and set up general case
     startIntercept = (i > 0) ? (dir * aIntercepts[i - 1]) + lineStart
-                             : lineStart - (dir * padding);
+                             : lineStart - (dir * aPadding);
     endIntercept = (i < length) ? (dir * aIntercepts[i]) + lineStart
-                                : lineEnd + (dir * padding);
+                                : lineEnd + (dir * aPadding);
 
     // remove padding at both ends for width
     // the start of the line is calculated so the padding removes just
     // enough so that the line starts at its normal position
     clipParams.lineSize.width =
-        (dir * (endIntercept - startIntercept)) - (2.0 * padding);
+        (dir * (endIntercept - startIntercept)) - (2.0 * aPadding);
 
     if (aParams.vertical) {
       aRect.height = clipParams.lineSize.width;
@@ -3995,21 +3984,20 @@ static void SkipInk(nsIFrame* aFrame, DrawTarget& aDrawTarget,
       aRect.width = clipParams.lineSize.width;
     }
 
-    // Don't draw decoration lines that have a smaller width than 1, or half the
-    // decoration thickness
-    if (clipParams.lineSize.width <
-        std::max(0.5 * clipParams.lineSize.height, 1.0)) {
+    // Don't draw decoration lines that have a smaller width than 1, or half
+    // the line-end padding dimension.
+    if (clipParams.lineSize.width < std::max(aPadding * 0.5, 1.0)) {
       continue;
     }
 
     // start the line right after the intercept's location plus room for
     // padding
     if (aParams.vertical) {
-      clipParams.pt.y = aParams.sidewaysLeft ? endIntercept + padding
-                                             : startIntercept + padding;
+      clipParams.pt.y = aParams.sidewaysLeft ? endIntercept + aPadding
+                                             : startIntercept + aPadding;
       aRect.y = clipParams.pt.y;
     } else {
-      clipParams.pt.x = startIntercept + padding;
+      clipParams.pt.x = startIntercept + aPadding;
       aRect.x = clipParams.pt.x;
     }
 
@@ -4029,9 +4017,9 @@ void nsCSSRendering::PaintDecorationLine(
     return;
   }
 
-  if (aParams.decoration != StyleTextDecorationLine_UNDERLINE &&
-      aParams.decoration != StyleTextDecorationLine_OVERLINE &&
-      aParams.decoration != StyleTextDecorationLine_LINE_THROUGH) {
+  if (aParams.decoration != StyleTextDecorationLine::UNDERLINE &&
+      aParams.decoration != StyleTextDecorationLine::OVERLINE &&
+      aParams.decoration != StyleTextDecorationLine::LINE_THROUGH) {
     MOZ_ASSERT_UNREACHABLE("Invalid text decoration value");
     return;
   }
@@ -4042,7 +4030,7 @@ void nsCSSRendering::PaintDecorationLine(
       aFrame->StyleText()->mTextDecorationSkipInk;
   bool skipInkEnabled =
       skipInk == mozilla::StyleTextDecorationSkipInk::Auto &&
-      aParams.decoration != StyleTextDecorationLine_LINE_THROUGH &&
+      aParams.decoration != StyleTextDecorationLine::LINE_THROUGH &&
       StaticPrefs::layout_css_text_decoration_skip_ink_enabled();
 
   if (!skipInkEnabled || aParams.glyphRange.Length() == 0) {
@@ -4147,7 +4135,13 @@ void nsCSSRendering::PaintDecorationLine(
   bool needsSkipInk = intercepts.Length() > 0;
 
   if (needsSkipInk) {
-    SkipInk(aFrame, aDrawTarget, aParams, intercepts, rect);
+    // Padding between glyph intercepts and the decoration line: we use the
+    // decoration line thickness, clamped to a minimum of 1px and a maximum
+    // of 0.2em.
+    Float padding =
+        std::min(std::max(aParams.lineSize.height, oneCSSPixel),
+                 Float(textRun->GetFontGroup()->GetStyle()->size / 5.0));
+    SkipInk(aFrame, aDrawTarget, aParams, intercepts, padding, rect);
   } else {
     PaintDecorationLineInternal(aFrame, aDrawTarget, aParams, rect);
   }
@@ -4385,7 +4379,7 @@ void nsCSSRendering::PaintDecorationLineInternal(
       // In vertical mode, to go "down" relative to the text we need to
       // decrease the block coordinate, whereas in horizontal we increase
       // it. So the sense of this flag is effectively inverted.
-      bool goDown = aParams.vertical ? false : true;
+      bool goDown = !aParams.vertical;
       uint32_t iter = 0;
       while (ptICoord < iCoordLimit) {
         if (++iter > 1000) {
@@ -4428,9 +4422,9 @@ Rect nsCSSRendering::DecorationLineToPath(
     return path;
   }
 
-  if (aParams.decoration != StyleTextDecorationLine_UNDERLINE &&
-      aParams.decoration != StyleTextDecorationLine_OVERLINE &&
-      aParams.decoration != StyleTextDecorationLine_LINE_THROUGH) {
+  if (aParams.decoration != StyleTextDecorationLine::UNDERLINE &&
+      aParams.decoration != StyleTextDecorationLine::OVERLINE &&
+      aParams.decoration != StyleTextDecorationLine::LINE_THROUGH) {
     MOZ_ASSERT_UNREACHABLE("Invalid text decoration value");
     return path;
   }
@@ -4578,7 +4572,7 @@ gfxRect nsCSSRendering::GetTextDecorationRectInternal(
   // upwards. We'll swap them to be physical coords at the end.
   gfxFloat offset = 0.0;
 
-  if (aParams.decoration == StyleTextDecorationLine_UNDERLINE) {
+  if (aParams.decoration == StyleTextDecorationLine::UNDERLINE) {
     offset = aParams.offset;
     if (canLiftUnderline) {
       if (descentLimit < -offset + r.Height()) {
@@ -4591,14 +4585,14 @@ gfxRect nsCSSRendering::GetTextDecorationRectInternal(
         offset = std::min(offsetBottomAligned, offsetTopAligned);
       }
     }
-  } else if (aParams.decoration == StyleTextDecorationLine_OVERLINE) {
+  } else if (aParams.decoration == StyleTextDecorationLine::OVERLINE) {
     // For overline, we adjust the offset by defaultlineThickness (the default
     // thickness of a single decoration line) because empirically it looks
     // better to draw the overline just inside rather than outside the font's
     // ascent, which is what nsTextFrame passes as aParams.offset (as fonts
     // don't provide an explicit overline-offset).
     offset = aParams.offset - defaultLineThickness + r.Height();
-  } else if (aParams.decoration == StyleTextDecorationLine_LINE_THROUGH) {
+  } else if (aParams.decoration == StyleTextDecorationLine::LINE_THROUGH) {
     // To maintain a consistent mid-point for line-through decorations,
     // we adjust the offset by half of the decoration rect's height.
     gfxFloat extra = floor(r.Height() / 2.0 + 0.5);

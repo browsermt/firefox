@@ -643,7 +643,7 @@ add_task(async function dontTemporarilyShowAboutExtensionPath() {
 
   gBrowser.removeProgressListener(wpl);
   is(gURLBar.value, "", "URL bar value should be empty.");
-  ContentTask.spawn(tab.linkedBrowser, null, function() {
+  await SpecialPowers.spawn(tab.linkedBrowser, [], function() {
     is(
       content.document.body.textContent,
       "New tab!",
@@ -791,4 +791,26 @@ add_task(async function test_overriding_newtab_incognito_spanning() {
 
   await extension.unload();
   await BrowserTestUtils.closeWindow(win);
+});
+
+// Test that prefs set by the newtab override code are
+// properly unset when all newtab extensions are gone.
+add_task(async function testNewTabPrefsReset() {
+  function isUndefinedPref(pref) {
+    try {
+      Services.prefs.getBoolPref(pref);
+      return false;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  ok(
+    isUndefinedPref("browser.newtab.extensionControlled"),
+    "extensionControlled pref is not set"
+  );
+  ok(
+    isUndefinedPref("browser.newtab.privateAllowed"),
+    "privateAllowed pref is not set"
+  );
 });

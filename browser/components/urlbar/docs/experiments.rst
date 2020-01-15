@@ -237,65 +237,76 @@ Further Reading
 Running Address Bar Extensions
 ------------------------------
 
-Because ``browser.urlbar`` is a privileged API, any extension that uses it must
-also be privileged. Running privileged extensions requires jumping through a few
-hoops and depends on their signed state. Since we're interested in extensions
-primarily for running experiments, there are three particular signed states
-relevant to us:
+``browser.urlbar`` is a privileged API. There are two different points to
+consider when it comes to running an extension that uses privileged APIs:
+loading the extension in the first place, and granting it access to privileged
+APIs. There's a certain bar for loading any extension regardless of its API
+usage that depends on its signed state and the Firefox build you want to run it
+in. There's yet a higher bar for granting it access to privileged APIs. This
+section discusses how to load extensions so that they can access privileged
+APIs.
+
+Since we're interested in extensions primarily for running experiments, there
+are three particular signed states relevant to us:
 
 Unsigned
-  Extensions that are not signed can be loaded temporarily using a Firefox build
-  where the build-time setting ``AppConstants.MOZ_ALLOW_LEGACY_EXTENSIONS`` is
-  true [source__]. Such builds include Nightly and Developer Edition but not
-  Beta or Release [source__]. You can load extensions temporarily by visiting
+  There are two ways to run unsigned extensions that use privileged APIs.
+
+  They can be loaded temporarily using a Firefox build where the build-time
+  setting ``AppConstants.MOZ_ALLOW_LEGACY_EXTENSIONS`` is true [source__]. Such
+  builds include Nightly and Developer Edition but not Beta or Release
+  [source__]. You can load extensions temporarily by visiting
   about:debugging#/runtime/this-firefox and clicking "Load Temporary Add-on."
   `web-ext <Workflow_>`__ also loads extensions temporarily.
 
   __ https://searchfox.org/mozilla-central/rev/3a61fb322f74a0396878468e50e4f4e97e369825/toolkit/components/extensions/Extension.jsm#1816
   __ https://searchfox.org/mozilla-central/search?q=MOZ_ALLOW_LEGACY_EXTENSIONS&redirect=false
 
-  Unsigned extensions can also be loaded normally (not temporarily) by setting
-  the pref ``xpinstall.signatures.required`` to false and using a Firefox build
-  where the build-time setting ``AppConstants.MOZ_REQUIRE_SIGNING`` is false
-  [source__, source__]. As in the previous paragraph, such builds include
-  Nightly and Developer Edition but not Beta or Release [source__].
+  They can be also be loaded normally (not temporarily) in a custom build where
+  ``AppConstants.MOZ_ALLOW_LEGACY_EXTENSIONS`` is true (as above), or where the
+  build-time setting ``AppConstants.MOZ_REQUIRE_SIGNING`` [source__, source__]
+  and ``xpinstall.signatures.required`` pref are both false. As in the previous
+  paragraph, such builds include Nightly and Developer Edition but not Beta or
+  Release [source__]. In addition, your custom build must modify the
+  ``Extension.isPrivileged`` getter__ to return true. This getter determines
+  whether an extension can access privileged APIs.
 
   __ https://searchfox.org/mozilla-central/rev/7088fc958db5935eba24b413b1f16d6ab7bd13ea/toolkit/mozapps/extensions/internal/XPIProvider.jsm#2378
   __ https://searchfox.org/mozilla-central/rev/7088fc958db5935eba24b413b1f16d6ab7bd13ea/toolkit/mozapps/extensions/internal/AddonSettings.jsm#36
   __ https://searchfox.org/mozilla-central/search?q=MOZ_REQUIRE_SIGNING&case=false&regexp=false&path=
+  __ https://searchfox.org/mozilla-central/rev/b58e44b74ef2b4a44bdfb4140c2565ac852504be/toolkit/components/extensions/Extension.jsm#1849
 
   Extensions remain unsigned as you develop them. See the Workflow_ section for
   more.
 
 Signed for testing (Signed for QA)
-  Extensions that are signed for testing must run with the pref
-  ``xpinstall.signatures.dev-root`` set to true and use a Firefox build where
-  the build-time setting ``AppConstants.MOZ_REQUIRE_SIGNING`` is false
+  Signed-for-testing extensions that use privileged APIs can be run using the
+  same techniques for running unsigned extensions.
+
+  They can also be loaded normally (not temporarily) if you use a Firefox build
+  where the build-time setting ``AppConstants.MOZ_REQUIRE_SIGNING`` is false and
+  you set the ``xpinstall.signatures.dev-root`` pref to true
   [source__]. ``xpinstall.signatures.dev-root`` does not exist by default and
   must be created.
 
-  You deal with extensions signed for testing when you are writing extensions
-  for experiments. See the Experiments_ section for details. "Signed for QA" is
-  another way of referring to this signed state.
-
   __ https://searchfox.org/mozilla-central/rev/25d9b05653f3417243af25a46fd6769addb6a50b/toolkit/mozapps/extensions/internal/XPIInstall.jsm#263
 
+  You encounter extensions that are signed for testing when you are writing
+  extensions for experiments. See the Experiments_ section for details.
+
+  "Signed for QA" is another way of referring to this signed state.
+
 Signed for release
-  Extensions that are signed for release can be run in any Firefox build, with
-  no special requirements.
+  Signed-for-release extensions that use privileged APIs can be run in any
+  Firefox build with no special requirements.
 
-  You deal with extensions signed for release when you are writing extensions
-  for experiments. See the Experiments_ section for details.
+  You encounter extensions that are signed for release when you are writing
+  extensions for experiments. See the Experiments_ section for details.
 
-To see console logs from the extension in the browser console, check the "Show
-Content Messages" checkbox in the console. This is necessary because extensions
-run outside the main process.
-
-If you have a custom Firefox build and you want to force your extension to be
-loaded regardless of signed state, you can modify the ``Extension.isPrivileged``
-getter__ to return true unconditionally. This can be useful in a pinch.
-
-__ https://searchfox.org/mozilla-central/rev/34cb8d0a2a324043bcfc2c56f37b31abe7fb23a8/toolkit/components/extensions/Extension.jsm#1812
+.. important::
+  To see console logs from extensions in the browser console, select the "Show
+  Content Messages" option in the console's settings. This is necessary because
+  extensions run outside the main process.
 
 Experiments
 -----------
@@ -346,7 +357,7 @@ Add-on experiments
   Mozilla extensions.
 
   An add-on experiment can collect additional telemetry that's not collected in
-  the product by using the priveleged ``browser.telemetry`` WebExtensions API,
+  the product by using the privileged ``browser.telemetry`` WebExtensions API,
   and of course the product will continue to collect all the telemetry it
   usually does. The telemetry pings from users running the experiment will be
   correlated with the experiment with no extra work on our part.
@@ -391,6 +402,9 @@ Further Reading
 
 `Client Implementation Guidelines for Experiments <https://docs.telemetry.mozilla.org/cookbooks/client_guidelines.html>`_
   Relevant documentation from the telemetry team.
+
+#ask-experimenter Slack channel
+  A friendly place to get answers to your experiment questions.
 
 The Experiment Development Process
 ----------------------------------
@@ -454,11 +468,14 @@ This section describes an experiment's life cycle.
    from "Draft" to "Ready for Sign-Off," which allows QA and other teams to sign
    off on their portions of the experiment.
 
-10. Engineering asks the Experimenter team to sign the extension "for testing"
-    (or "for QA"). Michael (mythmon) is a good contact. Build the extension zip
-    file using web-ext as discussed in Workflow_. Attach it to a bug (a metabug
-    for implementing the extension, for example), needinfo Michael, and ask him
-    to sign it. He'll attach the signed version to the bug.
+10. Engineering requests the extension be signed "for testing" (or "for
+    QA"). Michael (mythmon) from the Experiments team and Rehan (rdalal) from
+    Services Engineering are good contacts. Build the extension zip file using
+    web-ext as discussed in Workflow_. Attach it to a bug (a metabug for
+    implementing the extension, for example), needinfo Michael or Rehan, and ask
+    him to sign it. He'll attach the signed version to the bug. If neither
+    Michael nor Rehan is available, try asking in the #ask-experimenter Slack
+    channel.
 
 11. Engineering sends QA the link to the signed extension and works with them to
     resolve bugs they find.

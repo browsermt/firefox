@@ -247,6 +247,7 @@ add_old_configure_assignment('OBJ_SUFFIX', library_name_info.obj.suffix)
 set_config('IMPORT_LIB_SUFFIX', library_name_info.import_lib.suffix)
 set_define('MOZ_DLL_PREFIX', depends(library_name_info.dll.prefix)(lambda s: '"%s"' % s))
 set_define('MOZ_DLL_SUFFIX', depends(library_name_info.dll.suffix)(lambda s: '"%s"' % s))
+set_config('WASM_OBJ_SUFFIX', 'wasm')
 
 include(include_project_configure)
 
@@ -266,10 +267,16 @@ imply_option('--build-backends', build_backend)
 
 
 @depends('--enable-artifact-builds', '--disable-compile-environment',
-         '--enable-build-backend', '--help')
+         '--enable-build-backend', '--enable-project', '--enable-application',
+         '--help')
 @imports('sys')
 def build_backend_defaults(artifact_builds, compile_environment, requested_backends,
-                           _):
+                           project, application, _):
+    if application:
+        project = application[0]
+    elif project:
+        project = project[0]
+
     if 'Tup' in requested_backends:
         # As a special case, if Tup was requested, do not combine it with any
         # Make based backend by default.
@@ -281,7 +288,7 @@ def build_backend_defaults(artifact_builds, compile_environment, requested_backe
     # Normally, we'd use target.os == 'WINNT', but a dependency on target
     # would require target to depend on --help, as well as host and shell,
     # and this is not a can of worms we can open at the moment.
-    if sys.platform == 'win32' and compile_environment:
+    if sys.platform == 'win32' and compile_environment and project != 'mobile/android':
         all_backends.append('VisualStudio')
     return tuple(all_backends) or None
 
@@ -328,7 +335,7 @@ option('--disable-gtest-in-build',
 def build_gtest(pgo, build_project, target, automation, enabled, enable_tests):
     if not enable_tests or not enabled:
         return None
-    if (automation and build_project in ('browser', 'mobile/android') and
+    if (automation and build_project in ('browser', 'comm/mail', 'mobile/android') and
         not ((pgo and target.os == 'WINNT') or (target.os == 'Android' and target.cpu != 'x86_64'))):
         return True
 
@@ -626,6 +633,19 @@ llvm_objdump = check_prog('LLVM_OBJDUMP', llvm_objdump, what='llvm-objdump',
                           paths=toolchain_search_path)
 
 add_old_configure_assignment('LLVM_OBJDUMP', llvm_objdump)
+
+# Fork server
+option('--enable-forkserver', env='MOZ_ENABLE_FORKSERVER', help='Enable fork server')
+
+@depends('--enable-forkserver', target)
+def forkserver_flag(value, target):
+    if target.os == 'Android' or \
+       (target.os == 'GNU' and target.kernel == 'Linux'):
+        return bool(value)
+    pass
+
+set_config('MOZ_ENABLE_FORKSERVER', forkserver_flag)
+set_define('MOZ_ENABLE_FORKSERVER', forkserver_flag, forkserver_flag)
 
 
 # Please do not add configure checks from here on.

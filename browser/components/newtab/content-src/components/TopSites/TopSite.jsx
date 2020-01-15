@@ -271,7 +271,7 @@ export class TopSiteLink extends React.PureComponent {
           {children}
           {link.type === SPOC_TYPE ? (
             <ImpressionStats
-              campaignId={link.campaignId}
+              flightId={link.flightId}
               rows={[
                 {
                   id: link.id,
@@ -315,6 +315,9 @@ export class TopSite extends React.PureComponent {
       // Set the card_type as "search" regardless of its pinning status
       value.card_type = "search";
       value.search_vendor = this.props.link.hostname;
+    }
+    if (this.props.link.type === SPOC_TYPE) {
+      value.card_type = "spoc";
     }
     return { value };
   }

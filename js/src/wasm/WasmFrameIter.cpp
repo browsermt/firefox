@@ -18,6 +18,7 @@
 
 #include "wasm/WasmFrameIter.h"
 
+#include "vm/JitActivation.h"  // js::jit::JitActivation
 #include "wasm/WasmInstance.h"
 #include "wasm/WasmStubs.h"
 
@@ -1262,8 +1263,13 @@ static const char* ThunkedNativeToDescription(SymbolicAddress func) {
     case SymbolicAddress::CallImport_F64:
     case SymbolicAddress::CallImport_FuncRef:
     case SymbolicAddress::CallImport_AnyRef:
+    case SymbolicAddress::CallImport_NullRef:
     case SymbolicAddress::CoerceInPlace_ToInt32:
     case SymbolicAddress::CoerceInPlace_ToNumber:
+#ifdef ENABLE_WASM_BIGINT
+    case SymbolicAddress::CoerceInPlace_ToBigInt:
+#endif
+    case SymbolicAddress::BoxValue_Anyref:
       MOZ_ASSERT(!NeedsBuiltinThunk(func),
                  "not in sync with NeedsBuiltinThunk");
       break;
@@ -1298,6 +1304,10 @@ static const char* ThunkedNativeToDescription(SymbolicAddress func) {
       return "call to native i32.div_s (in wasm)";
     case SymbolicAddress::aeabi_uidivmod:
       return "call to native i32.div_u (in wasm)";
+#endif
+#ifdef ENABLE_WASM_BIGINT
+    case SymbolicAddress::AllocateBigInt:
+      return "call to native Allocate<BigInt, NoGC> (in wasm)";
 #endif
     case SymbolicAddress::ModD:
       return "call to asm.js native f64 % (mod)";
@@ -1352,10 +1362,12 @@ static const char* ThunkedNativeToDescription(SymbolicAddress func) {
     case SymbolicAddress::ReportInt64JSCall:
       return "jit call to int64 wasm function";
     case SymbolicAddress::MemCopy:
+    case SymbolicAddress::MemCopyShared:
       return "call to native memory.copy function";
     case SymbolicAddress::DataDrop:
       return "call to native data.drop function";
     case SymbolicAddress::MemFill:
+    case SymbolicAddress::MemFillShared:
       return "call to native memory.fill function";
     case SymbolicAddress::MemInit:
       return "call to native memory.init function";

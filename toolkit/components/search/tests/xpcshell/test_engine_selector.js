@@ -14,14 +14,18 @@ const CONFIG_URL =
       {
         engineName: "aol",
         orderHint: 500,
-        webExtensionLocale: "default",
+        webExtension: {
+          locales: ["default"],
+        },
         appliesTo: [
           {
             included: { everywhere: true },
           },
           {
             included: { regions: ["us"] },
-            webExtensionLocale: "$USER_LOCALE",
+            webExtension: {
+              locales: ["$USER_LOCALE"],
+            },
           },
         ],
       },
@@ -44,6 +48,9 @@ const CONFIG_URL =
           {
             included: { locales: { matches: ["en-US"] } },
           },
+          {
+            included: { regions: ["default"] },
+          },
         ],
       },
       {
@@ -53,6 +60,10 @@ const CONFIG_URL =
           {
             included: { everywhere: true },
             excluded: { regions: ["us"] },
+          },
+          {
+            included: { everywhere: true },
+            cohort: "acohortid",
           },
         ],
       },
@@ -68,25 +79,27 @@ add_task(async function() {
   await engineSelector.init(CONFIG_URL);
 
   let { engines, privateDefault } = engineSelector.fetchEngineConfiguration(
+    "en-US",
     "us",
-    "en-US"
+    "default"
   );
   Assert.equal(
-    privateDefault,
+    privateDefault.engineName,
     "altavista",
     "Should set altavista as privateDefault"
   );
   let names = engines.map(obj => obj.engineName);
   Assert.deepEqual(names, ["lycos", "altavista", "aol"], "Correct order");
   Assert.equal(
-    engines[2].webExtensionLocale,
+    engines[2].webExtension.locale,
     "en-US",
     "Subsequent matches in applies to can override default"
   );
 
   ({ engines, privateDefault } = engineSelector.fetchEngineConfiguration(
+    "zh-CN",
     "kz",
-    "zh-CN"
+    "default"
   ));
   Assert.equal(engines.length, 2, "Correct engines are returns");
   Assert.equal(privateDefault, null, "There should be no privateDefault");
@@ -95,5 +108,33 @@ add_task(async function() {
     names,
     ["excite", "aol"],
     "The engines should be in the correct order"
+  );
+
+  Services.prefs.setCharPref("browser.search.cohort", "acohortid");
+  ({ engines, privateDefault } = engineSelector.fetchEngineConfiguration(
+    "en-US",
+    "us",
+    "default"
+  ));
+  Assert.deepEqual(
+    engines.map(obj => obj.engineName),
+    ["lycos", "altavista", "aol", "excite"],
+    "Engines are in the correct order and include the cohort engine"
+  );
+
+  ({ engines, privateDefault } = engineSelector.fetchEngineConfiguration(
+    "en-US",
+    "default",
+    "default"
+  ));
+  Assert.deepEqual(
+    engines.map(obj => obj.engineName),
+    ["lycos", "altavista", "aol", "excite"],
+    "The engines should be in the correct order"
+  );
+  Assert.equal(
+    privateDefault.engineName,
+    "altavista",
+    "Should set altavista as privateDefault"
   );
 });

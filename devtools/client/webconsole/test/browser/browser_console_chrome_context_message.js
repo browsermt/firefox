@@ -7,11 +7,14 @@
 "use strict";
 
 add_task(async function() {
+  // Needed for the execute() function below
+  await pushPref("security.allow_parent_unrestricted_js_loads", true);
+
   // Show the content messages
   await pushPref("devtools.browserconsole.contentMessages", true);
 
   const hud = await BrowserConsoleManager.toggleBrowserConsole();
-  await hud.ui.clearOutput();
+  await clearOutput(hud);
   await openNewTabAndConsole(
     `data:text/html,<script>console.log("hello from content")</script>`
   );
@@ -30,10 +33,10 @@ add_task(async function() {
   ok(true, "Expected messages are displayed in the browser console");
 
   info("Uncheck the Show content messages checkbox");
-  const checkbox = hud.ui.outputNode.querySelector(
-    ".webconsole-filterbar-primary .filter-checkbox"
+  await toggleConsoleSetting(
+    hud,
+    ".webconsole-console-settings-menu-item-contentMessages"
   );
-  checkbox.click();
   await waitFor(() => !findMessage(hud, "hello from content"));
 
   info("Check the expected messages are still visiable in the browser console");

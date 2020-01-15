@@ -1529,6 +1529,8 @@ void GeckoEditableSupport::NotifyIMEContext(const InputContext& aContext,
   // shouldn't open it.
   const bool isUserAction =
       aAction.mCause != InputContextAction::CAUSE_LONGPRESS &&
+      !(aAction.mCause == InputContextAction::CAUSE_UNKNOWN_CHROME &&
+        aContext.mIMEState.mEnabled == IMEState::ENABLED) &&
       (aAction.IsHandlingUserInput() || aContext.mHasHandledUserInput);
   const int32_t flags =
       (inPrivateBrowsing ? EditableListener::IME_FLAG_PRIVATE_BROWSING : 0) |
@@ -1554,6 +1556,8 @@ void GeckoEditableSupport::TransferParent(jni::Object::Param aEditableParent) {
     mEditable->NotifyIME(EditableListener::NOTIFY_IME_OF_TOKEN);
     NotifyIMEContext(mInputContext, InputContextAction());
     mEditable->NotifyIME(EditableListener::NOTIFY_IME_OF_FOCUS);
+    // We have focus, so don't destroy editable child.
+    return;
   }
 
   if (mIsRemote && !mDispatcher) {

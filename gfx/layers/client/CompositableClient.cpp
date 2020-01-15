@@ -31,7 +31,7 @@ void CompositableClient::InitIPDL(const CompositableHandle& aHandle) {
   mForwarder->AssertInForwarderThread();
 
   mHandle = aHandle;
-  mIsAsync = !NS_IsMainThread();
+  mIsAsync |= !NS_IsMainThread();
 }
 
 CompositableClient::CompositableClient(CompositableForwarder* aForwarder,
@@ -135,7 +135,7 @@ TextureClientRecycleAllocator* CompositableClient::GetTextureClientRecycler() {
     return mTextureClientRecycler;
   }
 
-  if (!mForwarder) {
+  if (!mForwarder || !mForwarder->GetTextureForwarder()) {
     return nullptr;
   }
 

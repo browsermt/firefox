@@ -7,24 +7,31 @@
 const {
   MANIFEST_CATEGORIES,
   MANIFEST_ISSUE_LEVELS,
+  MANIFEST_MEMBER_VALUE_TYPES,
   FETCH_MANIFEST_FAILURE,
   FETCH_MANIFEST_START,
   FETCH_MANIFEST_SUCCESS,
   RESET_MANIFEST,
-} = require("../constants");
+} = require("devtools/client/application/src/constants");
 
 function _processRawManifestIcons(rawIcons) {
-  // TODO: we are currently ignoring the following fields present in the data
-  // from the canonical manifest:
-  // - purpose
-  // - type
-  // We should include this info so we can pass it as props to the relevant
-  // component
-  // See https://bugzilla.mozilla.org/show_bug.cgi?id=1577446
+  // NOTE: about `rawIcons` array we are getting from platform:
+  // - Icons that do not comform to the spec are filtered out
+  // - We will always get a `src`
+  // - We will always get `purpose` with a value (default is `["any"]`)
+  // - `sizes` may be undefined
+  // - `type` may be undefined
   return rawIcons.map(icon => {
     return {
-      key: icon.sizes.join(" "),
-      value: icon.src,
+      key: {
+        sizes: Array.isArray(icon.sizes) ? icon.sizes.join(" ") : icon.sizes,
+        contentType: icon.type,
+      },
+      value: {
+        src: icon.src,
+        purpose: icon.purpose.join(" "),
+      },
+      type: MANIFEST_MEMBER_VALUE_TYPES.ICON,
     };
   });
 }
@@ -40,6 +47,16 @@ function _processRawManifestMembers(rawManifest) {
     }
   }
 
+  function getValueTypeForMember(key) {
+    switch (key) {
+      case "theme_color":
+      case "background_color":
+        return MANIFEST_MEMBER_VALUE_TYPES.COLOR;
+      default:
+        return MANIFEST_MEMBER_VALUE_TYPES.STRING;
+    }
+  }
+
   const res = {
     [MANIFEST_CATEGORIES.IDENTITY]: [],
     [MANIFEST_CATEGORIES.PRESENTATION]: [],
@@ -52,7 +69,8 @@ function _processRawManifestMembers(rawManifest) {
 
   for (const [key, value] of rawMembers) {
     const category = getCategoryForMember(key);
-    res[category].push({ key, value });
+    const type = getValueTypeForMember(key);
+    res[category].push({ key, value, type });
   }
 
   return res;

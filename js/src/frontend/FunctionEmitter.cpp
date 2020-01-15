@@ -36,9 +36,7 @@ FunctionEmitter::FunctionEmitter(BytecodeEmitter* bce, FunctionBox* funbox,
       fun_(bce_->cx, funbox_->function()),
       name_(bce_->cx, fun_->explicitName()),
       syntaxKind_(syntaxKind),
-      isHoisted_(isHoisted) {
-  MOZ_ASSERT_IF(fun_->isInterpretedLazy(), fun_->lazyScript());
-}
+      isHoisted_(isHoisted) {}
 
 bool FunctionEmitter::interpretedCommon() {
   // Mark as singletons any function which will only be executed once, or
@@ -46,7 +44,7 @@ bool FunctionEmitter::interpretedCommon() {
   // case, if the lambda runs multiple times then CloneFunctionObject will
   // make a deep clone of its contents.
   bool singleton = bce_->checkRunOnceContext();
-  if (!JSFunction::setTypeForScriptedFunction(bce_->cx, fun_, singleton)) {
+  if (!funbox_->setTypeForScriptedFunction(bce_->cx, singleton)) {
     return false;
   }
 
@@ -116,7 +114,7 @@ bool FunctionEmitter::emitLazy() {
   if (bce_->emittingRunOnceLambda) {
     // NOTE: The 'funbox' is only partially initialized so we defer checking
     // the shouldSuppressRunOnce condition until delazification.
-    fun_->lazyScript()->setTreatAsRunOnce();
+    fun_->baseScript()->setTreatAsRunOnce();
   }
 
   if (!emitFunction()) {
@@ -275,7 +273,7 @@ bool FunctionEmitter::emitNonHoisted(unsigned index) {
 
   if (syntaxKind_ == FunctionSyntaxKind::DerivedClassConstructor) {
     //              [stack] PROTO
-    if (!bce_->emitIndex32(JSOP_FUNWITHPROTO, index)) {
+    if (!bce_->emitIndexOp(JSOP_FUNWITHPROTO, index)) {
       //            [stack] FUN
       return false;
     }
@@ -286,7 +284,7 @@ bool FunctionEmitter::emitNonHoisted(unsigned index) {
   // constructor. Emit the single instruction (without location info).
   JSOp op = syntaxKind_ == FunctionSyntaxKind::Arrow ? JSOP_LAMBDA_ARROW
                                                      : JSOP_LAMBDA;
-  if (!bce_->emitIndex32(op, index)) {
+  if (!bce_->emitIndexOp(op, index)) {
     //              [stack] FUN
     return false;
   }
@@ -335,7 +333,7 @@ bool FunctionEmitter::emitTopLevelFunction(unsigned index) {
 
     JS::Rooted<ModuleObject*> module(bce_->cx,
                                      bce_->sc->asModuleContext()->module());
-    if (!module->noteFunctionDeclaration(bce_->cx, name_, fun_)) {
+    if (!module->noteFunctionDeclaration(bce_->cx, name_, index)) {
       return false;
     }
     return true;
@@ -345,7 +343,7 @@ bool FunctionEmitter::emitTopLevelFunction(unsigned index) {
   MOZ_ASSERT(syntaxKind_ == FunctionSyntaxKind::Statement);
   MOZ_ASSERT(bce_->inPrologue());
 
-  if (!bce_->emitIndex32(JSOP_LAMBDA, index)) {
+  if (!bce_->emitIndexOp(JSOP_LAMBDA, index)) {
     //              [stack] FUN
     return false;
   }
@@ -484,7 +482,7 @@ bool FunctionScriptEmitter::prepareForBody() {
     }
   }
 
-  if (funbox_->kind() == FunctionFlags::FunctionKind::ClassConstructor) {
+  if (funbox_->isClassConstructor()) {
     if (!funbox_->isDerivedClassConstructor()) {
       if (!bce_->emitInitializeInstanceFields()) {
         //          [stack]
@@ -748,8 +746,6 @@ bool FunctionScriptEmitter::initScript() {
   if (!JSScript::fullyInitFromEmitter(bce_->cx, bce_->script, bce_)) {
     return false;
   }
-
-  bce_->tellDebuggerAboutCompiledScript(bce_->cx);
 
 #ifdef DEBUG
   state_ = State::End;

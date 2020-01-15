@@ -19,13 +19,19 @@ const TreeView = createFactory(
 // Reps
 const { MODE } = require("devtools/client/shared/components/reps/reps");
 
-const { fetchChildren } = require("../actions/accessibles");
+const {
+  fetchChildren,
+} = require("devtools/client/accessibility/actions/accessibles");
 
-const { L10N } = require("../utils/l10n");
-const { isFiltered } = require("../utils/audit");
-const AccessibilityRow = createFactory(require("./AccessibilityRow"));
-const AccessibilityRowValue = createFactory(require("./AccessibilityRowValue"));
-const { Provider } = require("../provider");
+const { L10N } = require("devtools/client/accessibility/utils/l10n");
+const { isFiltered } = require("devtools/client/accessibility/utils/audit");
+const AccessibilityRow = createFactory(
+  require("devtools/client/accessibility/components/AccessibilityRow")
+);
+const AccessibilityRowValue = createFactory(
+  require("devtools/client/accessibility/components/AccessibilityRowValue")
+);
+const { Provider } = require("devtools/client/accessibility/provider");
 
 const { scrollIntoView } = require("devtools/client/shared/scroll");
 
@@ -36,12 +42,12 @@ class AccessibilityTree extends Component {
   static get propTypes() {
     return {
       accessibilityWalker: PropTypes.object,
+      toolboxDoc: PropTypes.object.isRequired,
       dispatch: PropTypes.func.isRequired,
       accessibles: PropTypes.object,
       expanded: PropTypes.object,
       selected: PropTypes.string,
       highlighted: PropTypes.object,
-      supports: PropTypes.object,
       filtered: PropTypes.bool,
     };
   }
@@ -53,6 +59,7 @@ class AccessibilityTree extends Component {
     this.onReorder = this.onReorder.bind(this);
     this.onTextChange = this.onTextChange.bind(this);
     this.renderValue = this.renderValue.bind(this);
+    this.scrollSelectedRowIntoView = this.scrollSelectedRowIntoView.bind(this);
   }
 
   /**
@@ -64,6 +71,11 @@ class AccessibilityTree extends Component {
     accessibilityWalker.on("reorder", this.onReorder);
     accessibilityWalker.on("name-change", this.onNameChange);
     accessibilityWalker.on("text-change", this.onTextChange);
+
+    window.on(
+      EVENTS.NEW_ACCESSIBLE_FRONT_INSPECTED,
+      this.scrollSelectedRowIntoView
+    );
     return null;
   }
 
@@ -71,10 +83,7 @@ class AccessibilityTree extends Component {
     // When filtering is toggled, make sure that the selected row remains in
     // view.
     if (this.props.filtered !== prevProps.filtered) {
-      const selected = document.querySelector(".treeTable .treeRow.selected");
-      if (selected) {
-        scrollIntoView(selected, { center: true });
-      }
+      this.scrollSelectedRowIntoView();
     }
 
     window.emit(EVENTS.ACCESSIBILITY_INSPECTOR_UPDATED);
@@ -88,18 +97,42 @@ class AccessibilityTree extends Component {
     accessibilityWalker.off("reorder", this.onReorder);
     accessibilityWalker.off("name-change", this.onNameChange);
     accessibilityWalker.off("text-change", this.onTextChange);
+
+    window.off(
+      EVENTS.NEW_ACCESSIBLE_FRONT_INSPECTED,
+      this.scrollSelectedRowIntoView
+    );
   }
 
   /**
    * Handle accessible reorder event. If the accessible is cached and rendered
    * within the accessibility tree, re-fetch its children and re-render the
    * corresponding subtree.
-   * @param {Object} accessible accessible object that had its subtree
-   *                            reordered.
+   * @param {Object} accessibleFront
+   *        accessible front that had its subtree reordered.
    */
-  onReorder(accessible) {
-    if (this.props.accessibles.has(accessible.actorID)) {
-      this.props.dispatch(fetchChildren(accessible));
+  onReorder(accessibleFront) {
+    if (this.props.accessibles.has(accessibleFront.actorID)) {
+      this.props.dispatch(fetchChildren(accessibleFront));
+    }
+  }
+
+  scrollSelectedRowIntoView() {
+    const { treeview } = this.refs;
+    if (!treeview) {
+      return;
+    }
+
+    const treeEl = treeview.treeRef.current;
+    if (!treeEl) {
+      return;
+    }
+
+    const selected = treeEl.ownerDocument.querySelector(
+      ".treeTable .treeRow.selected"
+    );
+    if (selected) {
+      scrollIntoView(selected, { center: true });
     }
   }
 
@@ -107,21 +140,23 @@ class AccessibilityTree extends Component {
    * Handle accessible name change event. If the name of an accessible changes
    * and that accessible is cached and rendered within the accessibility tree,
    * re-fetch its parent's children and re-render the corresponding subtree.
-   * @param {Object} accessible accessible object that had its name changed.
-   * @param {Object} parent     optional parent accessible object. Note: if it
-   *                            parent is not present, we assume that the top
-   *                            level document's name has changed and use
-   *                            accessible walker as a parent.
+   * @param {Object} accessibleFront
+   *        accessible front that had its name changed.
+   * @param {Object} parentFront
+   *        optional parent accessible front. Note: if it parent is not
+   *        present, we assume that the top level document's name has changed
+   *        and use accessible walker as a parent.
    */
-  onNameChange(accessible, parent) {
-    const { accessibles, accessibilityWalker, dispatch } = this.props;
-    parent = parent || accessibilityWalker;
+  onNameChange(accessibleFront, parentFront) {
+    const { accessibles, dispatch } = this.props;
+    const accessibilityWalkerFront = accessibleFront.parent();
+    parentFront = parentFront || accessibilityWalkerFront;
 
     if (
-      accessibles.has(accessible.actorID) ||
-      accessibles.has(parent.actorID)
+      accessibles.has(accessibleFront.actorID) ||
+      accessibles.has(parentFront.actorID)
     ) {
-      dispatch(fetchChildren(parent));
+      dispatch(fetchChildren(parentFront));
     }
   }
 
@@ -130,13 +165,13 @@ class AccessibilityTree extends Component {
    * an accessible changes and that accessible is cached and rendered within the
    * accessibility tree, re-fetch its children and re-render the corresponding
    * subtree.
-   * @param  {Object} accessible  accessible object that had its child text
-   *                              changed.
+   * @param  {Object} accessibleFront
+   *         accessible front that had its child text changed.
    */
-  onTextChange(accessible) {
+  onTextChange(accessibleFront) {
     const { accessibles, dispatch } = this.props;
-    if (accessibles.has(accessible.actorID)) {
-      dispatch(fetchChildren(accessible));
+    if (accessibles.has(accessibleFront.actorID)) {
+      dispatch(fetchChildren(accessibleFront));
     }
   }
 
@@ -165,22 +200,17 @@ class AccessibilityTree extends Component {
       expanded,
       selected,
       highlighted: highlightedItem,
-      supports,
       accessibilityWalker,
+      toolboxDoc,
       filtered,
     } = this.props;
-
-    // Historically, the first context menu item is snapshot function and it is available
-    // for all accessible object.
-    const hasContextMenu = supports.snapshot;
 
     const renderRow = rowProps => {
       const { object } = rowProps.member;
       const highlighted = object === highlightedItem;
       return AccessibilityRow(
         Object.assign({}, rowProps, {
-          accessibilityWalker,
-          hasContextMenu,
+          toolboxDoc,
           highlighted,
           decorator: {
             getRowClass: function() {
@@ -193,6 +223,7 @@ class AccessibilityTree extends Component {
     const className = filtered ? "filtered" : undefined;
 
     return TreeView({
+      ref: "treeview",
       object: accessibilityWalker,
       mode: MODE.SHORT,
       provider: new Provider(accessibles, filtered, dispatch),
@@ -216,32 +247,29 @@ class AccessibilityTree extends Component {
 
         return true;
       },
-      onContextMenuTree:
-        hasContextMenu &&
-        function(e) {
-          // If context menu event is triggered on (or bubbled to) the TreeView, it was
-          // done via keyboard. Open context menu for currently selected row.
-          let row = this.getSelectedRow();
-          if (!row) {
-            return;
-          }
+      onContextMenuTree: function(e) {
+        // If context menu event is triggered on (or bubbled to) the TreeView, it was
+        // done via keyboard. Open context menu for currently selected row.
+        let row = this.getSelectedRow();
+        if (!row) {
+          return;
+        }
 
-          row = row.getWrappedInstance();
-          row.onContextMenu(e);
-        },
+        row = row.getWrappedInstance();
+        row.onContextMenu(e);
+      },
     });
   }
 }
 
 const mapStateToProps = ({
   accessibles,
-  ui: { expanded, selected, supports, highlighted },
+  ui: { expanded, selected, highlighted },
   audit: { filters },
 }) => ({
   accessibles,
   expanded,
   selected,
-  supports,
   highlighted,
   filtered: isFiltered(filters),
 });

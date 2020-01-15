@@ -22,6 +22,7 @@
 #include "jit/shared/Assembler-shared.h"
 #include "js/HashTable.h"
 #include "threading/ExclusiveData.h"
+#include "util/Memory.h"
 #include "vm/MutexIDs.h"
 #include "wasm/WasmGC.h"
 #include "wasm/WasmTypes.h"
@@ -237,7 +238,7 @@ class FuncExport {
   }
 
   bool canHaveJitEntry() const {
-    return !funcType_.temporarilyUnsupportedAnyRef() &&
+    return !funcType_.temporarilyUnsupportedReftypeForEntry() &&
            JitOptions.enableWasmJitEntry;
   }
 
@@ -331,7 +332,7 @@ struct MetadataCacheablePod {
 
 typedef uint8_t ModuleHash[8];
 typedef Vector<ValTypeVector, 0, SystemAllocPolicy> FuncArgTypesVector;
-typedef Vector<ExprType, 0, SystemAllocPolicy> FuncReturnTypesVector;
+typedef Vector<ValTypeVector, 0, SystemAllocPolicy> FuncReturnTypesVector;
 
 struct Metadata : public ShareableBase<Metadata>, public MetadataCacheablePod {
   FuncTypeWithIdVector funcTypeIds;
@@ -353,6 +354,9 @@ struct Metadata : public ShareableBase<Metadata>, public MetadataCacheablePod {
   FuncArgTypesVector debugFuncArgTypes;
   FuncReturnTypesVector debugFuncReturnTypes;
   ModuleHash debugHash;
+
+  // Feature flag that gets copied from ModuleEnvironment for BigInt support.
+  bool bigIntEnabled;
 
   explicit Metadata(ModuleKind kind = ModuleKind::Wasm)
       : MetadataCacheablePod(kind), debugEnabled(false), debugHash() {}
