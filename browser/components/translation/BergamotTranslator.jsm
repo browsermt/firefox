@@ -156,11 +156,8 @@ this.BergamotTranslator.prototype = {
   },
 
   /**
-   * This function parses the result returned by Bing's Http.svc API,
-   * which is a XML file that contains a number of elements. To our
-   * particular interest, the only part of the response that matters
-   * are the <TranslatedText> nodes, which contains the resulting
-   * items that were sent to be translated.
+   * This function parses the result returned by Bergamot's Http API for
+   * the translated text in target language.
    *
    * @param   request      The request sent to the server.
    * @returns boolean      True if parsing of this chunk was successful.
@@ -184,22 +181,48 @@ this.BergamotTranslator.prototype = {
     let error = false;
     for (let i = 0; i < len; i++) {
       try {
-        let result = results.text[i];
+        // The 'text' field of results is a list of 'Paragraph'. Parse
+        // each 'Paragraph' entry for the translated text in target language
+        let translation = this._getTranslationFromParagraph(results.text[i]);
         let root = bergamotRequest.translationData[i][0];
-        if (root.isSimpleRoot && result.includes("&")) {
-          // If the result contains HTML entities, we need to convert them as
-          // simple roots expect a plain text result.
-          let doc = new DOMParser().parseFromString(result, "text/html");
-          result = doc.body.firstChild.nodeValue;
+        if (root.isSimpleRoot && translation.includes("&")) {
+          // If translation contains HTML entities, we need to convert them.
+          // It is because simple roots expect a plain text result.
+          let doc = new DOMParser().parseFromString(translation, "text/html");
+          translation = doc.body.firstChild.nodeValue;
         }
         root.isSimpleRoot = true;
-        root.parseResult(result);
+        root.parseResult(translation);
       } catch (e) {
         error = true;
       }
     }
 
     return !error;
+  },
+
+  /**
+   * This function parses 'Paragraph' entity of the response for the
+   * translated text in target language and returns it. The API response
+   * format can be referred here: https://github.com/browsermt/mts
+   *
+   * @param   paragraph    paragraph entry in the response of server.
+   * @returns string       translated text in the target language
+   */
+  _getTranslationFromParagraph(paragraph) {
+    // Each 'Paragraph' contains a list of 'Sentence translation' list.
+    // There is only 1 such list.
+    let sentenceTranslationList = paragraph[0];
+
+    // 'Sentence translation' list contains only 1 entry which
+    // contains n Best Translations
+    let sentenceTranslation = sentenceTranslationList[0];
+    let nBestTranslations = sentenceTranslation.nBest;
+
+    // We request for 1 translation and should get 1 translation back.
+    // Translated text in target language is in 'translation' field.
+    let translation = nBestTranslations[0].translation;
+    return translation;
   },
 
   /**
@@ -279,7 +302,8 @@ BergamotRequest.prototype = {
 
     // Prepare the post data
     let postData = {
-      "text"  : []
+      "text"  : [],
+      "options" : {"returnSentenceScore" : true}
     };
 
     // Prepare the content of the post
