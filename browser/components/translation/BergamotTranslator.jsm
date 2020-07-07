@@ -29,7 +29,7 @@ const MAX_REQUEST_CHUNKS = 128; // TODO: Determine the real value for this
 // is MAX_REQUESTS * MAX_REQUEST_DATA.
 const MAX_REQUESTS = 15;
 
-const URL = "http://demo.statmt.org/api/bergamot/v1";
+const URL = "http://localhost:8787/api/bergamot/v1";
 
 /**
  * Translates a webpage using Bergamot's Translation API.
@@ -191,7 +191,8 @@ this.BergamotTranslator.prototype = {
           let doc = new DOMParser().parseFromString(translation, "text/html");
           translation = doc.body.firstChild.nodeValue;
         }
-        root.isSimpleRoot = true;
+        translation = this._generateHTMLStringForTranslation(root, translation);
+        root.isSimpleRoot = false;
         root.parseResult(translation);
       } catch (e) {
         error = true;
@@ -199,6 +200,13 @@ this.BergamotTranslator.prototype = {
     }
 
     return !error;
+  },
+
+  _generateHTMLStringForTranslation(item, translation) {
+    let localName = item.isRoot ? "div" : "b";
+    return (
+      "<" + localName + " id=n" + item.id + ', style="color:green">' + translation + "</" + localName + ">"
+    );
   },
 
   /**
