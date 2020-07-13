@@ -188,6 +188,7 @@ this.BergamotTranslator.prototype = {
         if (root.isSimpleRoot && translation.includes("&")) {
           // If translation contains HTML entities, we need to convert them.
           // It is because simple roots expect a plain text result.
+          // ToDo: Add message-system logging later
           let doc = new DOMParser().parseFromString(translation, "text/html");
           translation = doc.body.firstChild.nodeValue;
         }
@@ -210,19 +211,28 @@ this.BergamotTranslator.prototype = {
    * @returns string       translated text in the target language
    */
   _getTranslationFromParagraph(paragraph) {
+    // ToDo: Add message-system logging later in this method
     // Each 'Paragraph' contains a list of 'Sentence translation' list.
-    // There is only 1 such list.
+    // There should be only 1 such list.
     let sentenceTranslationList = paragraph[0];
 
-    // 'Sentence translation' list contains only 1 entry which
-    // contains n Best Translations
-    let sentenceTranslation = sentenceTranslationList[0];
-    let nBestTranslations = sentenceTranslation.nBest;
+    // 'Sentence translation' list contains 'Sentence translation' objects
+    // where each object contains all the information related to translation
+    // of each sentence in source language.
+    let translation = "";
+    for (let sentenceTranslation of sentenceTranslationList) {
+      let nBestTranslations = sentenceTranslation.nBest;
 
-    // We request for 1 translation and should get 1 translation back.
-    // Translated text in target language is in 'translation' field.
-    let translation = nBestTranslations[0].translation;
-    return translation;
+      // Depending on the request, there might be multiple 'best translations'.
+      // We are fetching the best one (present in 'translation' field).
+      translation += nBestTranslations[0].translation;
+
+      // ToDo: Currently the rest server doesn't retain the leading/trailing
+      // whitespace information of sentences. It is a bug on rest server side.
+      // Once it is fixed there, this line should be removed.
+      translation += " ";
+    }
+    return translation.trim();
   },
 
   /**
