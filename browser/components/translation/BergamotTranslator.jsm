@@ -227,7 +227,9 @@ this.BergamotTranslator.prototype = {
       // We are fetching the best one (present in 'translation' field).
       translation += nBestTranslations[0].translation;
 
-      // Add spaces between individual sentences
+      // ToDo: Currently the rest server doesn't retain the leading/trailing
+      // whitespace information of sentences. It is a bug on rest server side.
+      // Once it is fixed there, this line should be removed.
       translation += " ";
     }
     return translation.trim();
