@@ -78,6 +78,14 @@ this.TranslationDocument.prototype = {
     }
   },
 
+  getOwnerDocument() {
+    for (let root of this.roots) {
+      if (root.nodeRef.ownerDocument) {
+        return root.nodeRef.ownerDocument;
+      }
+    }
+  },
+
   /**
    * Creates a TranslationItem object, which should be called
    * for each node returned by getTranslationNodes.
