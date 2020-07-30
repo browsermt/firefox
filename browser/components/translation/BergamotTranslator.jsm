@@ -462,7 +462,6 @@ BergamotOutboundTranslator.prototype = {
    * @param  event   SubmitEvent object
    */
   _translate(event) {
-    console.log(`Event received:${event} Cancelable:${event.cancelable}`);
     // ToDo: Change this once outbound translation use case gets well defined.
     // Can we move this to constructor function? Form control elements
     // of an HTML webpage should remain unchanged before or after translation?
@@ -553,7 +552,6 @@ BergamotOutboundTranslator.prototype = {
     // elements are returned right now
     if (formControlElement.type.toUpperCase() == "TEXT" ||
         formControlElement.type.toUpperCase() == "TEXTAREA") {
-      console.log(`value:${formControlElement.value}   type:${formControlElement.type}`);
       return formControlElement.value;
     }
   },
@@ -593,10 +591,8 @@ BergamotOutboundTranslator.prototype = {
     if (--this._pendingRequests == 0) {
       if (this._partialSuccess) {
         // ToDo: Return resolved Promise if at least one chunk was successful
-        console.log("PARTIAL SUCCESS");
       } else {
-        // Return rejected Promise otherwise
-        console.log("FAILURE");
+        // ToDo: Return rejected Promise otherwise
       }
     }
   },
@@ -639,12 +635,10 @@ BergamotOutboundTranslator.prototype = {
           translation = doc.body.firstChild.nodeValue;
         }
 
-        console.log(`valueBefo:${formControlElement.value}   type:${formControlElement.type}`);
         // ToDo: Change this once outbound translation use case gets well defined.
         // This step is done in order to demonstrate through GUI that text entered
         // by the user in the form has been translated in target language. This is
         formControlElement.value = translation;
-        console.log(`valueAfte:${formControlElement.value}   type:${formControlElement.type}`);
       } catch (e) {
         error = true;
       }
